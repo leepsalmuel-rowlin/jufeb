@@ -1,0 +1,2540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mechanical Elements Offline</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+    <!-- KaTeX for Math Rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
+
+    <!-- Custom Styles & Animations -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            color: #0f172a;
+        }
+
+        /* Animations */
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        .slide-up { animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        .zoom-in { animation: zoomIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes zoomIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        
+        @keyframes fadeOutDown { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(20px); } }
+        .animate-fade-out-down { animation: fadeOutDown 0.3s forwards; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-blue-200">
+
+    <div id="app" class="flex-1 flex flex-col">
+        <!-- Content will be rendered here by JavaScript -->
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- CONSTANTS ---
+        const INTERVALS = { 1: 1, 2: 3, 3: 7, 4: 15, 5: 30, 6: 60 };
+        const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+        const generateId = () => {
+            return Date.now().toString(36) + Math.random().toString(36).substr(2);
+        };
+
+        const mySessionId = generateId(); 
+        let timerInterval = null;
+        
+        // --- STATE ---
+        let state = {
+            isLoaded: false,
+            folders: [],
+            terms: [],
+            history: {}, 
+            currentView: 'dashboard',
+            sessionData: null,
+            currentCardIndex: 0,
+            showAnswer: false,
+            timerEnabled: true,
+            timeLeft: 10,
+            timePerCard: 10, 
+            lookAheadDays: 2,
+            intakeSize: 20,
+            activeFolderId: 'mdsp',
+            studyFolderId: 'all',
+            statsFolderId: 'all', 
+            showBulk: false,
+            editingFolderId: null,
+            addingSubfolderTo: null,
+            movingFolderId: null,
+            editingTermId: null, 
+            sessionConflict: false, 
+            selectedTerms: [], 
+            forecastMode: 'actual', 
+            forecastQuota: 50,
+            forecastExtra: 0,
+            forecastFolderId: 'all',
+            forecastRatio: 0.5,
+            forecastPhase1EndDate: '2026-12-31', 
+            forecastPhase2Ratio: 1.0, 
+            actualForecastData: null,
+            simulatedForecastData: null,
+            forecastStartDate: null
+        };
+
+        window.setTimePerCard = (val) => {
+            let newVal = parseInt(val);
+            if(newVal && newVal > 0) {
+                state.timePerCard = newVal;
+                if(state.currentView === 'session' && state.timeLeft > state.timePerCard) {
+                     state.timeLeft = state.timePerCard;
+                }
+                renderApp();
+            }
+        };
+
+        // --- HELPER FUNCTIONS ---
+        const getTodayStart = () => {
+            const d = new Date();
+            d.setHours(0, 0, 0, 0);
+            return d.getTime();
+        };
+
+        const getFolderFullPath = (id, list) => {
+            let current = list.find(f => f.id === id);
+            if (!current) return 'Unknown';
+            let path = current.name;
+            while (current && current.parentId) {
+                current = list.find(f => f.id === current.parentId);
+                if (current) path = current.name + ' / ' + path;
+            }
+            return path;
+        };
+
+        const getStudyFolderIds = () => {
+            if (state.studyFolderId === 'all') return null;
+            let ids = [state.studyFolderId];
+            let i = 0;
+            while (i < ids.length) {
+                let children = state.folders.filter(f => f.parentId === ids[i]).map(f => f.id);
+                ids = ids.concat(children);
+                i++;
+            }
+            return ids;
+        };
+
+        const shuffleArray = (array) => {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        };
+
+        window.showToast = (msg, type = 'success') => {
+            const toast = document.createElement('div');
+            toast.className = `fixed bottom-6 right-6 px-6 py-3 rounded-2xl text-white font-bold shadow-xl slide-up z-50 flex items-center gap-2 ${type === 'success' ? 'bg-emerald-500' : 'bg-red-500'}`;
+            toast.innerHTML = `<i class="ph-fill ${type === 'success' ? 'ph-check-circle' : 'ph-x-circle'} text-xl"></i> ${msg}`;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('animate-fade-out-down');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        };
+
+        // --- DATA MANAGEMENT & CLOUD SYNC ---
+        function loadData() {
+            const savedFolders = localStorage.getItem('elementVaultFolders');
+            const savedTerms = localStorage.getItem('elementVaultTerms');
+            const savedHistory = localStorage.getItem('elementVaultHistory');
+            const savedSimForecast = localStorage.getItem('elementVaultSimForecast');
+            
+            if (savedFolders) state.folders = JSON.parse(savedFolders);
+            if (savedHistory) state.history = JSON.parse(savedHistory);
+            if (savedSimForecast) {
+                state.simulatedForecastData = JSON.parse(savedSimForecast);
+                state.simulatedForecastData.forEach(d => d.date = new Date(d.date)); // Revive date objects
+            }
+            if (savedTerms) {
+                state.terms = JSON.parse(savedTerms);
+                
+                const validFolderIds = new Set(state.folders.map(f => f.id));
+                let needsSave = false;
+                state.terms.forEach(t => {
+                    if (!validFolderIds.has(t.folderId)) {
+                        state.folders.push({ id: t.folderId, name: '⚠️ Recovered Cards', parentId: null });
+                        validFolderIds.add(t.folderId);
+                        needsSave = true;
+                    }
+                });
+                if (needsSave) saveData();
+            }
+            state.isLoaded = true;
+        }
+
+        function saveData() {
+            localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
+            localStorage.setItem('elementVaultTerms', JSON.stringify(state.terms));
+            localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
+            
+            if (window.saveToCloud) window.saveToCloud();
+        }
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyA9SLRfYZUTLzzUpGqV0hAzGlDRQDKyBm8",
+            authDomain: "flashcards-808e0.firebaseapp.com",
+            projectId: "flashcards-808e0",
+            storageBucket: "flashcards-808e0.firebasestorage.app",
+            messagingSenderId: "633251772382",
+            appId: "1:633251772382:web:94be56f70f14c176880f4f"
+        };
+        const appId = 'mechanical-elements';
+
+        let db, auth, userId, sessionUnsubscribe;
+        let isCloudSynced = false;
+        const isFirebaseConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY";
+
+        if (isFirebaseConfigured) {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            window.loginWithGoogle = () => {
+                const provider = new GoogleAuthProvider();
+                signInWithPopup(auth, provider).catch(error => {
+                    console.error("Firebase Auth Error:", error);
+                    if (error.code === 'auth/unauthorized-domain') {
+                        showToast("Login Failed: Hindi pa naka-authorize ang Netlify link mo sa Firebase Console (Authorized Domains).", "error");
+                    } else if (error.code === 'auth/operation-not-allowed') {
+                        showToast("Login Failed: Hindi pa naka-ENABLE ang Google Sign-In sa Firebase Console mo.", "error");
+                    } else {
+                        showToast(`Login failed: ${error.message}`, "error");
+                    }
+                });
+            };
+
+            window.logout = () => {
+                signOut(auth).then(() => {
+                    userId = null;
+                    state.isLoaded = false;
+                    renderApp();
+                });
+            };
+
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    state.isLoaded = true;
+                    enforceSingleSession(); 
+                    setupCloudSync();
+                } else {
+                    userId = null;
+                    state.isLoaded = true;
+                    renderApp(); 
+                }
+            });
+        } else {
+            state.isLoaded = true;
+            console.warn("⚠️ Firebase keys are missing! Running in Offline-Only Mode.");
+            renderApp();
+        }
+
+        function enforceSingleSession() {
+            if (!userId || !db) return;
+            const sessionRef = doc(db, 'artifacts', appId, 'users', userId, 'appData', 'activeSession');
+            
+            setDoc(sessionRef, { sessionId: mySessionId, timestamp: Date.now() }).catch(e => {
+                if (e.code === 'permission-denied') {
+                    showToast("Firestore Error: Permission Denied. Ilagay ang Firestore sa 'Test Mode' sa loob ng Firebase console.", "error");
+                }
+            });
+
+            if (sessionUnsubscribe) sessionUnsubscribe();
+            sessionUnsubscribe = onSnapshot(sessionRef, (snap) => {
+                if (snap.exists()) {
+                    const data = snap.data();
+                    if (data.sessionId !== mySessionId) {
+                        state.sessionConflict = true;
+                        window.endSession();
+                        renderApp();
+                    }
+                }
+            }, (error) => console.error("Session listener error:", error));
+        }
+
+        window.takeoverSession = () => {
+            state.sessionConflict = false;
+            enforceSingleSession(); 
+            renderApp();
+        };
+
+        let cloudSaveTimer = null;
+
+        async function setupCloudSync() {
+            if (!userId || !db || state.sessionConflict) return;
+            const docRef = doc(db, 'artifacts', appId, 'users', userId, 'appData', 'vault');
+            try {
+                const snap = await getDoc(docRef);
+                if (snap.exists()) {
+                    const data = snap.data();
+                    if (data.folders) state.folders = data.folders;
+                    if (data.terms) state.terms = data.terms;
+                    if (data.history) state.history = data.history;
+                    
+                    localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
+                    localStorage.setItem('elementVaultTerms', JSON.stringify(state.terms));
+                    localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
+                }
+            } catch (e) {
+                console.error("Error fetching from cloud:", e);
+            } finally {
+                state.isLoaded = true; 
+                renderApp(); 
+            }
+        }
+
+        window.saveToCloud = () => {
+            if (!userId || !db || state.sessionConflict) return;
+            clearTimeout(cloudSaveTimer);
+            cloudSaveTimer = setTimeout(async () => {
+                const docRef = doc(db, 'artifacts', appId, 'users', userId, 'appData', 'vault');
+                try {
+                    await setDoc(docRef, {
+                        folders: state.folders,
+                        terms: state.terms,
+                        history: state.history
+                    });
+                } catch (e) {
+                    console.error("Error saving to cloud:", e);
+                }
+            }, 2500); 
+        };
+
+        // --- SESSION LOGIC ---
+        window.startSession = (type) => {
+            const todayStart = getTodayStart();
+            const targetFolderIds = getStudyFolderIds();
+            const activeStudyTerms = targetFolderIds === null ? state.terms : state.terms.filter(t => targetFolderIds.includes(t.folderId));
+
+            let queue = [];
+            if (type === 'intake') {
+                let newCards = activeStudyTerms.filter(t => t.isNew);
+                shuffleArray(newCards);
+                queue = newCards.slice(0, state.intakeSize);
+            } else if (type === 'review') {
+                let dueCards = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate <= todayStart);
+                shuffleArray(dueCards);
+                
+                // Sort to prioritize L1 & L2 weak cards
+                dueCards.sort((a, b) => {
+                    let weightA = (a.level <= 2) ? 1 : 2;
+                    let weightB = (b.level <= 2) ? 1 : 2;
+                    return weightA - weightB;
+                });
+                queue = dueCards;
+            } else if (type === 'review_ahead') {
+                let futureCards = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate > todayStart && t.nextReviewDate <= todayStart + (state.lookAheadDays * MS_PER_DAY));
+                shuffleArray(futureCards);
+                queue = futureCards;
+            }
+
+            if (queue.length === 0) {
+                showToast("No cards available for this session.", "error");
+                return;
+            }
+
+            state.sessionData = { type, queue, initialQueueLength: queue.length };
+            state.currentCardIndex = 0;
+            state.showAnswer = false;
+            state.timeLeft = state.timePerCard;
+            window.setView('session');
+            manageTimer();
+        };
+
+        window.endSession = () => {
+            state.sessionData = null;
+            clearInterval(timerInterval);
+            window.logDailyStats();
+            window.setView('dashboard');
+        };
+
+        window.handleAnswer = (answerType) => {
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const currentCorrect = currentCard.correct || 0;
+            const currentIncorrect = currentCard.incorrect || 0;
+            const todayStart = getTodayStart();
+
+            let nextQueue = [...state.sessionData.queue];
+
+            if (state.sessionData.type === 'intake') {
+                if (answerType === 'perfect') {
+                    // PERFECT (+3 or Rekta Lvl 4 from Intake)
+                    updateTerm(currentCard.id, {
+                        isNew: false,
+                        level: 4,
+                        nextReviewDate: todayStart + (INTERVALS[4] * MS_PER_DAY),
+                        lastReviewedDate: Date.now(),
+                        graduatedDate: currentCard.graduatedDate || Date.now(),
+                        correct: currentCorrect + 1
+                    });
+                    nextQueue.splice(state.currentCardIndex, 1);
+                    if (nextQueue.length === 0) return endSession();
+                } else if (answerType === 'correct') {
+                    // Graduate to Level 1
+                    updateTerm(currentCard.id, {
+                        isNew: false,
+                        level: 1,
+                        nextReviewDate: todayStart + MS_PER_DAY,
+                        lastReviewedDate: Date.now(),
+                        graduatedDate: currentCard.graduatedDate || Date.now(),
+                        correct: currentCorrect + 1
+                    });
+                    nextQueue.splice(state.currentCardIndex, 1);
+                    if (nextQueue.length === 0) return endSession();
+                } else {
+                    updateTerm(currentCard.id, { incorrect: currentIncorrect + 1 });
+                    const cardToMove = nextQueue.splice(state.currentCardIndex, 1)[0];
+                    nextQueue.push(cardToMove);
+                }
+                state.sessionData.queue = nextQueue;
+            } else {
+                if (answerType === 'perfect') {
+                    const nextLevel = Math.min(currentCard.level + 3, 6);
+                    updateTerm(currentCard.id, {
+                        level: nextLevel,
+                        nextReviewDate: todayStart + (INTERVALS[nextLevel] * MS_PER_DAY),
+                        lastReviewedDate: Date.now(),
+                        correct: currentCorrect + 1
+                    });
+                } else if (answerType === 'correct') {
+                    const nextLevel = Math.min(currentCard.level + 1, 6);
+                    updateTerm(currentCard.id, {
+                        level: nextLevel,
+                        nextReviewDate: todayStart + (INTERVALS[nextLevel] * MS_PER_DAY),
+                        lastReviewedDate: Date.now(),
+                        correct: currentCorrect + 1
+                    });
+                } else {
+                    updateTerm(currentCard.id, {
+                        level: 1,
+                        nextReviewDate: todayStart + (INTERVALS[1] * MS_PER_DAY),
+                        lastReviewedDate: Date.now(),
+                        incorrect: currentIncorrect + 1
+                    });
+                }
+
+                if (state.currentCardIndex + 1 < state.sessionData.queue.length) {
+                    state.currentCardIndex++;
+                } else {
+                    return endSession();
+                }
+            }
+
+            state.showAnswer = false;
+            state.timeLeft = state.timePerCard;
+            renderApp();
+            manageTimer();
+        };
+
+        function updateTerm(id, updates) {
+            state.terms = state.terms.map(t => t.id === id ? { ...t, ...updates } : t);
+            saveData();
+        }
+
+        function manageTimer() {
+            clearInterval(timerInterval);
+            if (state.currentView !== 'session' || !state.sessionData) return;
+            
+            if (state.timerEnabled && !state.showAnswer) {
+                timerInterval = setInterval(() => {
+                    if (state.timeLeft > 0) {
+                        state.timeLeft--;
+                        updateTimerUI();
+                    } else {
+                        clearInterval(timerInterval);
+                        window.revealAnswer();
+                    }
+                }, 1000);
+            }
+        }
+
+        window.toggleTimer = () => {
+            state.timerEnabled = !state.timerEnabled;
+            manageTimer();
+            renderApp();
+        };
+
+        window.revealAnswer = () => {
+            state.showAnswer = true;
+            clearInterval(timerInterval);
+            renderApp();
+        };
+
+        window.generateAIExplanation = async (termId) => {
+            const termIndex = state.terms.findIndex(t => t.id === termId);
+            if (termIndex === -1) return;
+
+            const term = state.terms[termIndex];
+            term.isGeneratingAI = true;
+            renderApp();
+
+            const systemPrompt = "Act as a helpful Mechanical Engineering Board Exam tutor. Explain the answer briefly in Taglish. Limit to 2 to 3 short and concise sentences. State why the correct answer is right, and quickly point out why the other choices are wrong.";
+            const userQuery = `Question:\n${term.question}\n\nCorrect Answer:\n${term.answer}\n\nExplain this to me in Taglish.`;
+            
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    term.explanation = candidate.content.parts[0].text;
+                } else {
+                    showToast("Failed to generate explanation. Baka mahina ang net.", "error");
+                }
+            } catch (e) {
+                showToast("Network error. Kailangan mo ng internet para makapag-generate ng AI.", "error");
+            } finally {
+                term.isGeneratingAI = false;
+                window.saveToCloud(); 
+                renderApp();
+            }
+        };
+
+        window.generateAIDerivation = async (termId) => {
+            const termIndex = state.terms.findIndex(t => t.id === termId);
+            if (termIndex === -1) return;
+
+            const term = state.terms[termIndex];
+            term.isGeneratingDerivation = true;
+            renderApp();
+
+            const systemPrompt = "Act as a Mechanical Engineering Board Exam tutor. Check if the provided question or answer involves a mathematical formula, equation, or principle that can be derived or mathematically broken down. If it DOES NOT involve any formula, reply exactly with 'Hindi ito formula o equation.'. If it DOES, provide a step-by-step mathematical derivation, breakdown, or proof of the formula in Taglish. Focus on where the formula came from. Use LaTeX formatting (wrap inline math in single $ and block math in double $$) for all equations.";
+            const userQuery = `Question:\n${term.question}\n\nAnswer:\n${term.answer}\n\nDerive or breakdown the formula if applicable.`;
+            
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    term.derivation = candidate.content.parts[0].text;
+                } else {
+                    showToast("Failed to generate derivation.", "error");
+                }
+            } catch (e) {
+                showToast("Network error. Kailangan mo ng internet.", "error");
+            } finally {
+                term.isGeneratingDerivation = false;
+                window.saveToCloud(); 
+                renderApp();
+            }
+        };
+
+        window.generateAISimplification = async (termId) => {
+            const termIndex = state.terms.findIndex(t => t.id === termId);
+            if (termIndex === -1) return;
+
+            const term = state.terms[termIndex];
+            term.isGeneratingSimplify = true;
+            renderApp();
+
+            const systemPrompt = "Act as a helpful Mechanical Engineering Board Exam tutor. Rephrase and simplify the following board exam question AND its choices. Remove complex jargon, make it direct, and translate it to easy-to-understand Taglish. Keep it very short. Do not answer it, just rephrase the question and list the simplified choices.";
+            const userQuery = `Original Text:\n${term.question}\n\nSimplify the question and the choices in Taglish.`;
+            
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    term.simplifiedQuestion = candidate.content.parts[0].text;
+                } else {
+                    showToast("Failed to generate simplified question.", "error");
+                }
+            } catch (e) {
+                showToast("Network error. Connect to internet first to use AI.", "error");
+            } finally {
+                term.isGeneratingSimplify = false;
+                saveData(); 
+                renderApp();
+            }
+        };
+
+        function updateTimerUI() {
+            const bar = document.getElementById('timer-bar-fill');
+            if (bar) {
+                const percentage = (state.timeLeft / state.timePerCard) * 100;
+                bar.style.width = `${percentage}%`;
+                bar.className = `h-full transition-all duration-1000 ease-linear ${state.timeLeft <= 3 ? 'bg-red-500' : 'bg-blue-500'}`;
+            }
+        }
+
+        window.setView = (view) => {
+            state.currentView = view;
+            renderApp();
+        };
+
+        window.setStudyFolder = (id) => { state.studyFolderId = id; state.selectedTerms = []; renderApp(); };
+        window.setActiveFolder = (id) => { state.activeFolderId = id; state.selectedTerms = []; renderApp(); };
+        window.setStatsFolder = (id) => { state.statsFolderId = id; renderApp(); };
+        window.setIntakeSize = (val) => { state.intakeSize = Number(val); renderApp(); };
+        window.setLookAheadDays = (val) => { state.lookAheadDays = Number(val); renderApp(); };
+        window.toggleBulk = () => { state.showBulk = !state.showBulk; renderApp(); };
+        
+        window.setForecastMode = (mode) => {
+            state.forecastMode = mode;
+            renderApp();
+        }
+
+        window.toggleTermSelect = (id) => {
+            if (state.selectedTerms.includes(id)) {
+                state.selectedTerms = state.selectedTerms.filter(tid => tid !== id);
+            } else {
+                state.selectedTerms.push(id);
+            }
+            renderApp();
+        };
+
+        window.toggleSelectAll = () => {
+            const activeTerms = state.terms.filter(t => t.folderId === state.activeFolderId);
+            const allSelected = activeTerms.length > 0 && activeTerms.every(t => state.selectedTerms.includes(t.id));
+            if (allSelected) {
+                state.selectedTerms = state.selectedTerms.filter(id => !activeTerms.find(t => t.id === id));
+            } else {
+                const newIds = activeTerms.map(t => t.id).filter(id => !state.selectedTerms.includes(id));
+                state.selectedTerms.push(...newIds);
+            }
+            renderApp();
+        };
+
+        window.deleteSelectedTerms = () => {
+            if (state.selectedTerms.length === 0) return;
+            if (confirm(`Are you sure you want to delete ${state.selectedTerms.length} selected cards?`)) {
+                state.terms = state.terms.filter(t => !state.selectedTerms.includes(t.id));
+                state.selectedTerms = [];
+                saveData();
+                renderApp();
+                showToast("Selected cards deleted successfully.");
+            }
+        };
+
+        window.createFolder = (event, parentId = null) => {
+            if (event) event.preventDefault();
+            const inputId = parentId ? `subfolder-input-${parentId}` : 'new-folder-input';
+            const input = document.getElementById(inputId);
+            const name = input ? input.value.trim() : '';
+            if (!name) return;
+            state.folders.push({ id: generateId(), name: name, parentId: parentId });
+            state.addingSubfolderTo = null;
+            saveData();
+            renderApp();
+        };
+
+        window.startAddingSubfolder = (event, id) => {
+            event.stopPropagation();
+            state.addingSubfolderTo = id;
+            renderApp();
+        };
+        window.cancelAddingSubfolder = () => { state.addingSubfolderTo = null; renderApp(); };
+
+        const getValidParents = (folderId) => {
+            const invalidIds = new Set([folderId]);
+            let currentLevel = [folderId];
+            while (currentLevel.length > 0) {
+                let nextLevel = state.folders.filter(f => currentLevel.includes(f.parentId)).map(f => f.id);
+                nextLevel.forEach(id => invalidIds.add(id));
+                currentLevel = nextLevel;
+            }
+            return state.folders.filter(f => !invalidIds.has(f.id));
+        };
+
+        window.startMovingFolder = (event, id) => {
+            event.stopPropagation();
+            state.movingFolderId = id;
+            renderApp();
+        };
+
+        window.cancelMovingFolder = (event) => {
+            if(event) event.stopPropagation();
+            state.movingFolderId = null;
+            renderApp();
+        };
+
+        window.saveMoveFolder = (folderId) => {
+            const select = document.getElementById(`move-select-${folderId}`);
+            if(!select) return;
+            const newParentId = select.value === 'root' ? null : select.value;
+            state.folders = state.folders.map(f => f.id === folderId ? { ...f, parentId: newParentId } : f);
+            state.movingFolderId = null;
+            saveData();
+            renderApp();
+            showToast("Folder moved successfully!");
+        };
+
+        window.startRenamingFolder = (event, id, name) => {
+            event.stopPropagation();
+            state.editingFolderId = id;
+            renderApp();
+            setTimeout(() => {
+                const el = document.getElementById(`rename-input-${id}`);
+                if (el) { el.value = name; el.focus(); }
+            }, 50);
+        };
+
+        window.saveRenameFolder = (id) => {
+            const input = document.getElementById(`rename-input-${id}`);
+            const name = input ? input.value.trim() : '';
+            if (name) {
+                state.folders = state.folders.map(f => f.id === id ? { ...f, name } : f);
+                saveData();
+            }
+            state.editingFolderId = null;
+            renderApp();
+        };
+
+        window.deleteFolder = (event, id) => {
+            event.stopPropagation();
+            let fallbackFolder = state.folders.find(f => f.id !== id)?.id || 'mdsp';
+            if (state.folders.length <= 1) return showToast("Cannot delete the last folder.", "error");
+
+            state.terms = state.terms.map(t => t.folderId === id ? { ...t, folderId: fallbackFolder } : t);
+            state.folders = state.folders.filter(f => f.id !== id).map(f => f.parentId === id ? { ...f, parentId: null } : f);
+            
+            if (state.activeFolderId === id) state.activeFolderId = fallbackFolder;
+            if (state.studyFolderId === id) state.studyFolderId = 'all';
+            
+            saveData();
+            renderApp();
+            showToast("Folder deleted and terms moved.");
+        };
+
+        window.deleteTerm = (id) => {
+            state.terms = state.terms.filter(t => t.id !== id);
+            saveData();
+            renderApp();
+            showToast("Card deleted.");
+        };
+
+        window.startEditTerm = (id) => {
+            state.editingTermId = id;
+            renderApp();
+        };
+
+        window.saveEditTerm = () => {
+            const q = document.getElementById('edit-term-q').value;
+            const a = document.getElementById('edit-term-a').value;
+            if (!q.trim() || !a.trim()) {
+                showToast("Fields cannot be empty", "error");
+                return;
+            }
+            updateTerm(state.editingTermId, { question: q, answer: a });
+            state.editingTermId = null;
+            renderApp();
+            showToast("Card updated!");
+        };
+
+        window.cancelEditTerm = () => {
+            state.editingTermId = null;
+            renderApp();
+        };
+
+        window.logDailyStats = () => {
+            if (!state.history) state.history = {};
+            const todayStr = new Date().toLocaleDateString('en-CA'); 
+            
+            const computeStats = (termsArray) => {
+                const counts = { new: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, total: termsArray.length };
+                termsArray.forEach(t => {
+                    if (t.isNew) counts.new++;
+                    else if (t.level >= 1 && t.level <= 6) counts[t.level]++;
+                });
+                return counts;
+            };
+
+            state.history['all'] = state.history['all'] || {};
+            state.history['all'][todayStr] = computeStats(state.terms);
+
+            state.folders.forEach(f => {
+                const fTerms = state.terms.filter(t => t.folderId === f.id);
+                state.history[f.id] = state.history[f.id] || {};
+                state.history[f.id][todayStr] = computeStats(fTerms);
+            });
+            
+            saveData();
+        };
+
+        window.moveTerm = (termId, targetFolderId) => {
+            updateTerm(termId, { folderId: targetFolderId });
+            renderApp();
+        };
+
+        window.addSingleTerm = (event) => {
+            event.preventDefault();
+            const qInput = document.getElementById('new-term-q');
+            const aInput = document.getElementById('new-term-a');
+            const q = qInput.value.trim();
+            const a = aInput.value.trim();
+            
+            if (!q || !a) return;
+            
+            state.terms.push({
+                id: generateId(), folderId: state.activeFolderId,
+                question: q, answer: a,
+                level: 0, nextReviewDate: 0, isNew: true, lastReviewedDate: 0, correct: 0, incorrect: 0
+            });
+            saveData();
+            qInput.value = '';
+            aInput.value = '';
+            renderApp();
+            showToast("Card added to deck!");
+        };
+
+        window.bulkMoveTerms = () => {
+            const select = document.getElementById('bulk-move-select');
+            if (!select) return;
+            const targetId = select.value;
+            if (!targetId) return;
+            
+            let count = 0;
+            state.terms = state.terms.map(t => {
+                if (t.folderId === state.activeFolderId) {
+                    count++;
+                    return { ...t, folderId: targetId };
+                }
+                return t;
+            });
+            
+            saveData();
+            renderApp();
+            showToast(`Success! Moved ${count} cards to new deck.`);
+        };
+
+        window.bulkDeleteTerms = () => {
+            const initialLength = state.terms.length;
+            state.terms = state.terms.filter(t => t.folderId !== state.activeFolderId);
+            const removedCount = initialLength - state.terms.length;
+            
+            saveData();
+            renderApp();
+            showToast(`Deck Emptied. Removed ${removedCount} cards.`);
+        };
+
+        window.exportFilteredCSV = () => {
+            const levelSelect = document.getElementById('export-level-select');
+            if (!levelSelect) return;
+            const selectedVal = levelSelect.value;
+            
+            let filteredTerms = state.terms.filter(t => t.folderId === state.activeFolderId);
+            
+            if (selectedVal === 'new') {
+                filteredTerms = filteredTerms.filter(t => t.isNew);
+            } else if (selectedVal !== 'all') {
+                const lvl = parseInt(selectedVal);
+                filteredTerms = filteredTerms.filter(t => !t.isNew && t.level === lvl);
+            }
+            
+            if (filteredTerms.length === 0) {
+                showToast("No cards found for this selection.", "error");
+                return;
+            }
+
+            let csvContent = "Question,Answer\n";
+            filteredTerms.forEach(t => {
+                const q = String(t.question).replace(/"/g, '""');
+                const a = String(t.answer).replace(/"/g, '""');
+                csvContent += `"${q}","${a}"\n`;
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            const folderName = state.folders.find(f => f.id === state.activeFolderId)?.name || 'Deck';
+            const cleanFolderName = folderName.replace(/[^a-z0-9]/gi, '_');
+            anchor.download = `ME_${cleanFolderName}_Lvl_${selectedVal.toUpperCase()}.csv`;
+            
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
+            
+            showToast(`Exported ${filteredTerms.length} cards to CSV successfully!`);
+        };
+
+        window.runForecast = () => {
+            const quota = parseInt(document.getElementById('forecast-quota').value) || 50;
+            const folderId = document.getElementById('forecast-folder').value || 'all';
+            
+            const ratio1Str = document.getElementById('forecast-ratio-1') ? document.getElementById('forecast-ratio-1').value : "0.5";
+            const ratio2Str = document.getElementById('forecast-ratio-2') ? document.getElementById('forecast-ratio-2').value : "1.0";
+            const ratio1 = parseFloat(ratio1Str);
+            const ratio2 = parseFloat(ratio2Str);
+            
+            const date1Str = document.getElementById('forecast-date-1') ? document.getElementById('forecast-date-1').value : '';
+            const startDateStr = document.getElementById('forecast-start-date') ? document.getElementById('forecast-start-date').value : '';
+
+            const extra = state.forecastMode === 'simulated' ? (parseInt(document.getElementById('forecast-extra').value) || 0) : 0;
+
+            state.forecastQuota = quota;
+            state.forecastExtra = extra;
+            state.forecastFolderId = folderId;
+            state.forecastRatio = ratio1;
+            state.forecastPhase1EndDate = date1Str;
+            state.forecastPhase2Ratio = ratio2;
+            if(state.forecastMode === 'simulated') {
+                state.forecastStartDate = startDateStr;
+            }
+
+            const realTodayStart = getTodayStart();
+            let simStart = realTodayStart;
+            if (state.forecastMode === 'simulated' && startDateStr) {
+                const d = new Date(startDateStr);
+                d.setHours(0, 0, 0, 0);
+                simStart = d.getTime();
+            }
+
+            const msPerDay = 24 * 60 * 60 * 1000;
+            
+            let phase1EndTime = Infinity;
+            if (date1Str) {
+                const d = new Date(date1Str);
+                d.setHours(23, 59, 59, 999);
+                phase1EndTime = d.getTime();
+            }
+
+            const intervals = { 0: 1, 1: 1, 2: 3, 3: 7, 4: 15, 5: 30, 6: 60 };
+
+            let targetIds = null;
+            if (folderId !== 'all') {
+                targetIds = [folderId];
+                let i = 0;
+                while (i < targetIds.length) {
+                    let children = state.folders.filter(f => f.parentId === targetIds[i]).map(f => f.id);
+                    targetIds = targetIds.concat(children);
+                    i++;
+                }
+            }
+
+            let baseTerms = targetIds === null ? state.terms : state.terms.filter(t => targetIds.includes(t.folderId));
+
+            let newCardsPool = baseTerms.filter(t => t.isNew).map(t => ({ id: t.id, level: 0 }));
+            for(let i = 0; i < extra; i++) {
+                newCardsPool.push({ id: 'hypo_' + i, level: 0 });
+            }
+
+            let reviewCardsPool = baseTerms.filter(t => !t.isNew).map(t => {
+                let dueDay = 0;
+                if (t.nextReviewDate > simStart) {
+                    dueDay = Math.ceil((t.nextReviewDate - simStart) / msPerDay);
+                }
+                return { id: t.id, level: t.level, dueDay: dueDay };
+            });
+
+            let totalCards = newCardsPool.length + reviewCardsPool.length;
+            if(totalCards === 0) {
+                showToast("No cards available to simulate.", "error");
+                return;
+            }
+
+            let calendar = [];
+            let day = 0;
+
+            while ((newCardsPool.length > 0 || reviewCardsPool.some(c => c.level < 5)) && day < 365) {
+                let currentSimTime = simStart + day * msPerDay;
+                let currentRatio = currentSimTime <= phase1EndTime ? ratio1 : ratio2;
+
+                let dueReviews = reviewCardsPool.filter(c => c.dueDay <= day);
+                dueReviews.sort((a, b) => b.level - a.level);
+
+                let targetReview = Math.floor(quota * currentRatio);
+                let targetNew = quota - targetReview;
+
+                if (dueReviews.length < targetReview) {
+                    targetNew += (targetReview - dueReviews.length);
+                    targetReview = dueReviews.length;
+                }
+                
+                if (newCardsPool.length < targetNew) {
+                    targetReview += (targetNew - newCardsPool.length);
+                    targetNew = newCardsPool.length;
+                    if (targetReview > dueReviews.length) {
+                        targetReview = dueReviews.length;
+                    }
+                }
+
+                let processedThisDay = [];
+                let actualNew = 0;
+                let actualReview = 0;
+
+                for (let i = 0; i < targetNew; i++) {
+                    processedThisDay.push(newCardsPool.pop());
+                    actualNew++;
+                }
+
+                for (let i = 0; i < targetReview; i++) {
+                    let card = dueReviews[i];
+                    processedThisDay.push(card);
+                    actualReview++;
+                    let idx = reviewCardsPool.findIndex(c => c.id === card.id);
+                    if(idx !== -1) reviewCardsPool.splice(idx, 1);
+                }
+
+                for (let i = 0; i < processedThisDay.length; i++) {
+                    let c = processedThisDay[i];
+                    
+                    let passRate = 0.6; // Level 0 to 1
+                    if (c.level === 1) passRate = 0.7;
+                    else if (c.level === 2) passRate = 0.8;
+                    else if (c.level >= 3) passRate = 0.9;
+
+                    let passed = Math.random() < passRate;
+
+                    if (passed) {
+                        c.level = Math.min(c.level + 1, 6);
+                    } else {
+                        c.level = 1;
+                    }
+                    
+                    c.dueDay = day + intervals[c.level];
+                    reviewCardsPool.push(c); 
+                }
+
+                let backlog = dueReviews.length - actualReview;
+                let lvlCounts = { 0: newCardsPool.length, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0 };
+                reviewCardsPool.forEach(c => lvlCounts[c.level]++);
+
+                calendar.push({
+                    day: day,
+                    date: new Date(simStart + day * msPerDay),
+                    actualNew: actualNew,
+                    actualReview: actualReview,
+                    backlogEOD: backlog > 0 ? backlog : 0,
+                    levels: lvlCounts,
+                    total: totalCards
+                });
+
+                day++;
+            }
+
+            if (state.forecastMode === 'simulated') {
+                state.simulatedForecastData = calendar;
+                localStorage.setItem('elementVaultSimForecast', JSON.stringify(calendar));
+            } else {
+                state.actualForecastData = calendar;
+            }
+
+            window.setView('forecast');
+            showToast(`Simulation complete! Finished in ${day} days.`);
+        };
+
+        // --- STREAMING_CHUNK:Graph Export Modal ---
+        window.promptExport = (levelId, levelLabel) => {
+            const targetFolderIds = getStudyFolderIds();
+            const activeStudyTerms = targetFolderIds === null ? state.terms : state.terms.filter(t => targetFolderIds.includes(t.folderId));
+            
+            let filteredTerms = activeStudyTerms;
+            if (levelId === 'new') {
+                filteredTerms = filteredTerms.filter(t => t.isNew);
+            } else {
+                const lvl = parseInt(levelId);
+                filteredTerms = filteredTerms.filter(t => !t.isNew && t.level === lvl);
+            }
+            
+            if (filteredTerms.length === 0) {
+                showToast("No cards found for this level.", "error");
+                return;
+            }
+
+            const modal = document.createElement('div');
+            modal.id = 'export-modal';
+            modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center fade-in cursor-default';
+            modal.innerHTML = `
+                <div class="bg-white rounded-3xl p-6 md:p-8 max-w-sm w-full mx-4 shadow-2xl zoom-in text-center border border-slate-100">
+                    <div class="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <i class="ph-bold ph-file-csv text-3xl"></i>
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-800 mb-2">Export ${levelLabel}?</h3>
+                    <p class="text-sm text-slate-500 mb-6">You are about to export <b>${filteredTerms.length}</b> cards from this level as a CSV file.</p>
+                    <div class="flex gap-3">
+                        <button onclick="document.getElementById('export-modal').remove()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-colors">Cancel</button>
+                        <button onclick="window.executeExport('${levelId}', '${levelLabel}'); document.getElementById('export-modal').remove()" class="flex-1 px-4 py-3 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-bold transition-colors shadow-lg shadow-emerald-200">Export CSV</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        };
+
+        window.executeExport = (levelId, levelLabel) => {
+            const targetFolderIds = getStudyFolderIds();
+            const activeStudyTerms = targetFolderIds === null ? state.terms : state.terms.filter(t => targetFolderIds.includes(t.folderId));
+            
+            let filteredTerms = activeStudyTerms;
+            if (levelId === 'new') {
+                filteredTerms = filteredTerms.filter(t => t.isNew);
+            } else {
+                const lvl = parseInt(levelId);
+                filteredTerms = filteredTerms.filter(t => !t.isNew && t.level === lvl);
+            }
+
+            let csvContent = "Question,Answer\n";
+            filteredTerms.forEach(t => {
+                const q = String(t.question).replace(/"/g, '""');
+                const a = String(t.answer).replace(/"/g, '""');
+                csvContent += `"${q}","${a}"\n`;
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            const folderName = state.studyFolderId === 'all' ? 'All_Sets' : (state.folders.find(f => f.id === state.studyFolderId)?.name || 'Deck');
+            const cleanFolderName = folderName.replace(/[^a-z0-9]/gi, '_');
+            anchor.download = `ME_${cleanFolderName}_${levelLabel.replace(' ', '_')}.csv`;
+            
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
+            
+            showToast(`Exported ${filteredTerms.length} cards successfully!`);
+        };
+
+        // --- STREAMING_CHUNK:Data Import and Export ---
+        window.exportBackup = () => {
+            const backupData = { folders: state.folders, terms: state.terms, history: state.history };
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData));
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            downloadAnchorNode.setAttribute("download", `ME_Elements_Backup_${new Date().toISOString().split('T')[0]}.json`);
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        };
+
+        window.handleImportBackup = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    if (data.folders && data.terms) {
+                        state.folders = data.folders;
+                        state.terms = data.terms;
+                        if (data.history) state.history = data.history;
+                        saveData();
+                        renderApp();
+                        showToast("Offline Backup restored instantly! Success.");
+                    }
+                } catch (err) {
+                    showToast("Backup restore failed. Please check file format.", "error");
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = '';
+        };
+
+        window.handleFileUpload = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => window.processImportData(e.target.result);
+            reader.readAsText(file);
+            event.target.value = '';
+        };
+
+        window.processManualBulk = () => {
+            const input = document.getElementById('bulk-textarea');
+            if (input && input.value) window.processImportData(input.value);
+        };
+
+        window.removeDuplicates = () => {
+            const seen = new Set();
+            const originalLength = state.terms.length;
+            
+            // Prioritize higher level cards. If levels are equal, prioritize the card in the ACTIVE folder.
+            const sortedTerms = [...state.terms].sort((a, b) => {
+                if (b.level !== a.level) return b.level - a.level;
+                if (a.folderId === state.activeFolderId && b.folderId !== state.activeFolderId) return -1;
+                if (b.folderId === state.activeFolderId && a.folderId !== state.activeFolderId) return 1;
+                return 0;
+            });
+            const uniqueTerms = [];
+            
+            for(let t of sortedTerms) {
+                // Ultra-strict duplicate detection: Remove ALL spaces, tabs, and newlines before comparing
+                const cleanQ = t.question.replace(/\s+/g, '').toLowerCase();
+                if(!seen.has(cleanQ)) {
+                    seen.add(cleanQ);
+                    uniqueTerms.push(t);
+                }
+            }
+            
+            const removedCount = originalLength - uniqueTerms.length;
+            if(removedCount > 0) {
+                state.terms = uniqueTerms;
+                saveData();
+                showToast(`Success! Removed ${removedCount} duplicate cards.`);
+            } else {
+                showToast(`No duplicates found.`);
+            }
+            renderApp();
+        };
+
+        window.processImportData = (rawText) => {
+            const lines = rawText.split('\n');
+            let newCards = [];
+            
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+                
+                let parts = [];
+                if (line.includes('\t')) {
+                    parts = line.split('\t'); 
+                } else if (line.includes('|')) {
+                    parts = line.split('|'); 
+                } else {
+                    parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(p => p.replace(/^"|"$/g, '').trim());
+                }
+                
+                if (parts.length >= 3) {
+                    newCards.push({
+                        id: generateId(), folderId: state.activeFolderId,
+                        question: `${parts[0].trim()}\n\n[Choices]:\n${parts[1].trim()}`, answer: parts[2].trim(),
+                        level: 0, nextReviewDate: 0, isNew: true, lastReviewedDate: 0, correct: 0, incorrect: 0
+                    });
+                } else if (parts.length === 2) {
+                    newCards.push({
+                        id: generateId(), folderId: state.activeFolderId,
+                        question: parts[0].trim(), answer: parts[1].trim(),
+                        level: 0, nextReviewDate: 0, isNew: true, lastReviewedDate: 0, correct: 0, incorrect: 0
+                    });
+                }
+            }
+
+            if (newCards.length > 0) {
+                state.terms = [...state.terms, ...newCards];
+                saveData();
+                state.showBulk = false;
+                renderApp();
+                showToast(`Success! Imported ${newCards.length} cards instantly.`);
+            } else {
+                showToast("No valid rows found. Check format.", "error");
+            }
+        };
+
+        // --- STREAMING_CHUNK:Keyboard Shortcuts ---
+        document.addEventListener('keydown', (e) => {
+            // Ignore keypresses if the user is typing in an input or textarea
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            // Only trigger during an active session
+            if (state.currentView !== 'session' || !state.sessionData) return;
+
+            if (!state.showAnswer) {
+                // Reveal Answer shortcuts
+                if (e.code === 'Space' || e.code === 'Enter' || e.code === 'ArrowDown' || e.code === 'ArrowUp') {
+                    e.preventDefault();
+                    window.revealAnswer();
+                }
+            } else {
+                // Submit Answer shortcuts with the New "Perfect" Option included
+                if (e.code === 'ArrowLeft' || e.code === 'Digit1' || e.code === 'Numpad1') {
+                    e.preventDefault();
+                    window.handleAnswer('wrong'); // MALI
+                } else if (e.code === 'ArrowRight' || e.code === 'Digit2' || e.code === 'Numpad2' || e.code === 'Space' || e.code === 'Enter') {
+                    e.preventDefault();
+                    window.handleAnswer('correct'); // TAMA
+                } else if (e.code === 'Digit3' || e.code === 'Numpad3') {
+                    e.preventDefault();
+                    window.handleAnswer('perfect'); // PERFECT (+3 Levels)
+                }
+            }
+        });
+
+        // --- STREAMING_CHUNK:UI Rendering Functions ---
+        
+        function renderNav() {
+            if (state.currentView === 'session') return '';
+            return `
+                <nav class="bg-white border-b border-slate-200 px-4 md:px-6 py-4 flex flex-wrap items-center justify-between sticky top-0 z-10 gap-4">
+                    <div class="flex items-center gap-2 cursor-pointer" onclick="window.setView('dashboard')">
+                        <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+                            <i class="ph-fill ph-book-open text-white text-lg"></i>
+                        </div>
+                        <span class="font-extrabold text-xl tracking-tight hidden sm:inline text-slate-900">Mechanical Elements</span>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <div class="flex gap-2 bg-slate-100 p-1 rounded-xl">
+                            <button onclick="window.setView('dashboard')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'dashboard' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}">
+                                <i class="ph-fill ph-squares-four text-lg"></i> <span class="hidden md:inline">Dashboard</span>
+                            </button>
+                            <button onclick="window.setView('add')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'add' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}">
+                                <i class="ph-fill ph-folder text-lg"></i> <span class="hidden md:inline">Database</span>
+                            </button>
+                            <button onclick="window.setView('stats')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'stats' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}">
+                                <i class="ph-fill ph-users text-lg"></i> <span class="hidden md:inline">Stats</span>
+                            </button>
+                            <button onclick="window.setView('forecast')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'forecast' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-500 hover:text-slate-700'}">
+                                <i class="ph-fill ph-crystal-ball text-lg"></i> <span class="hidden md:inline">Forecast</span>
+                            </button>
+                        </div>
+                        ${userId ? `<button onclick="window.logout()" class="p-2 text-slate-400 hover:text-red-500 transition-colors" title="Logout"><i class="ph-bold ph-sign-out text-xl"></i></button>` : ''}
+                    </div>
+                </nav>
+            `;
+        }
+
+        function escapeHTML(str) {
+            return String(str).replace(/[&<>'"]/g, 
+                tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag])
+            );
+        }
+
+        // --- STREAMING_CHUNK:Dashboard UI ---
+        function renderDashboard() {
+            const todayStart = getTodayStart();
+            
+            const targetFolderIds = getStudyFolderIds();
+            const activeStudyTerms = targetFolderIds === null ? state.terms : state.terms.filter(t => targetFolderIds.includes(t.folderId));
+            
+            const newTerms = activeStudyTerms.filter(t => t.isNew);
+            const dueTerms = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate <= todayStart);
+            const finishedToday = state.terms.filter(t => (t.lastReviewedDate || 0) >= todayStart);
+            
+            // Separation of Finished today stats
+            const newFinishedToday = state.terms.filter(t => (t.graduatedDate || 0) >= todayStart);
+            const totalFinishedToday = finishedToday.length;
+            const reviewFinishedToday = totalFinishedToday - newFinishedToday.length;
+
+            const futureTerms = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate > todayStart && t.nextReviewDate <= todayStart + (state.lookAheadDays * MS_PER_DAY));
+
+            // Generate Folder Drill-Down Breadcrumbs
+            let breadcrumbsHtml = `<button onclick="window.setStudyFolder('all')" class="flex items-center gap-1.5 transition-colors ${state.studyFolderId === 'all' ? 'text-blue-700 font-black' : 'text-slate-500 font-bold hover:text-blue-600'}"><i class="ph-fill ph-books text-xl"></i> All Sets</button>`;
+            
+            if (state.studyFolderId !== 'all') {
+                let path = [];
+                let curr = state.folders.find(f => f.id === state.studyFolderId);
+                while (curr) {
+                    path.unshift(curr);
+                    curr = state.folders.find(f => f.id === curr.parentId);
+                }
+                path.forEach(f => {
+                    breadcrumbsHtml += `<i class="ph-bold ph-caret-right text-slate-300 mx-1"></i>`;
+                    breadcrumbsHtml += `<button onclick="window.setStudyFolder('${f.id}')" class="flex items-center gap-1.5 transition-colors ${state.studyFolderId === f.id ? 'text-blue-700 font-black' : 'text-slate-500 font-bold hover:text-blue-600'}">${escapeHTML(f.name)}</button>`;
+                });
+            }
+
+            // Generate Folder Drill-Down Children
+            let childrenHtml = '';
+            const childrenToDisplay = state.studyFolderId === 'all' 
+                ? state.folders.filter(f => !f.parentId) 
+                : state.folders.filter(f => f.parentId === state.studyFolderId);
+
+            if (childrenToDisplay.length > 0) {
+                childrenHtml += `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">`;
+                childrenToDisplay.forEach(f => {
+                    childrenHtml += `
+                    <button onclick="window.setStudyFolder('${f.id}')" class="p-4 rounded-2xl font-bold text-sm transition-all shadow-sm bg-white text-slate-700 border border-slate-200 hover:border-blue-400 hover:bg-blue-50 flex flex-col items-center justify-center gap-2 group active:scale-95">
+                        <i class="ph-fill ph-folder text-4xl text-blue-300 group-hover:text-blue-500 transition-colors"></i>
+                        <span class="text-center line-clamp-2 w-full">${escapeHTML(f.name)}</span>
+                    </button>`;
+                });
+                childrenHtml += `</div>`;
+            } else {
+                childrenHtml += `<div class="mt-4 text-center text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-50 py-4 rounded-xl border border-slate-200 border-dashed"><i class="ph-bold ph-file-dashed text-lg mb-1 block"></i> No Subfolders (Bottom Level)</div>`;
+            }
+
+            // Analytics Calc
+            let totalCorrect = 0, totalIncorrect = 0;
+            const levelCounts = { new: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+            activeStudyTerms.forEach(t => {
+                totalCorrect += (t.correct || 0); totalIncorrect += (t.incorrect || 0);
+                if (t.isNew) levelCounts.new++;
+                else if (t.level >= 1 && t.level <= 6) levelCounts[t.level]++;
+            });
+            const totalAttempts = totalCorrect + totalIncorrect;
+            const accuracy = totalAttempts > 0 ? Math.round((totalCorrect / totalAttempts) * 100) : 0;
+            const masteryPercent = activeStudyTerms.length > 0 ? Math.round(((levelCounts[5] + levelCounts[6]) / activeStudyTerms.length) * 100) : 0;
+
+            let barsHtml = '';
+            const cols = [
+                { id: 'new', label: 'New', count: levelCounts.new, color: 'bg-blue-200' },
+                { id: '1', label: 'Lvl 1', count: levelCounts[1], color: 'bg-slate-300' },
+                { id: '2', label: 'Lvl 2', count: levelCounts[2], color: 'bg-amber-300' },
+                { id: '3', label: 'Lvl 3', count: levelCounts[3], color: 'bg-amber-500' },
+                { id: '4', label: 'Lvl 4', count: levelCounts[4], color: 'bg-emerald-300' },
+                { id: '5', label: 'Lvl 5', count: levelCounts[5], color: 'bg-emerald-500' },
+                { id: '6', label: 'Lvl 6', count: levelCounts[6], color: 'bg-emerald-700' }
+            ];
+            cols.forEach(col => {
+                const h = activeStudyTerms.length > 0 ? Math.max((col.count / activeStudyTerms.length) * 100, 5) : 5;
+                barsHtml += `
+                    <div class="flex-1 flex flex-col items-center justify-end h-full group cursor-pointer hover:bg-slate-50 rounded-lg transition-colors p-1" onclick="window.promptExport('${col.id}', '${col.label}')" title="Click to export ${col.label} cards">
+                        <span class="text-xs font-bold text-slate-500 mb-2 opacity-0 group-hover:opacity-100 transition-opacity">${col.count}</span>
+                        <div class="w-full ${col.color} rounded-t-md transition-all duration-500 min-h-[4px]" style="height: ${h}%"></div>
+                        <span class="text-[10px] font-bold text-slate-400 uppercase mt-3">${col.label}</span>
+                    </div>
+                `;
+            });
+
+            return `
+            <div class="max-w-4xl mx-auto p-6 space-y-8 fade-in zoom-in">
+                <div class="text-center space-y-4 mb-2">
+                    <h1 class="text-4xl font-extrabold tracking-tight text-slate-900">Mechanical<span class="text-blue-600">Elements</span> <span class="text-xs align-top bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full"><i class="ph-fill ph-cloud-check"></i> SYNCED</span></h1>
+                </div>
+
+                <div class="bg-white p-4 md:p-6 rounded-3xl border border-slate-200 shadow-sm relative overflow-hidden">
+                    <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
+                    <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2"><i class="ph-bold ph-folder-open text-base"></i> Select Deck / Folder</h2>
+                    
+                    <div class="flex items-center flex-wrap gap-2 mb-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                        ${breadcrumbsHtml}
+                    </div>
+                    
+                    ${childrenHtml}
+                </div>
+
+                <div class="flex justify-center mb-8">
+                    <div class="bg-slate-800 text-white p-1 rounded-2xl shadow-lg flex items-center text-sm font-bold border border-slate-700 flex-wrap justify-center">
+                        <div class="flex items-center gap-2 px-3 md:px-4 py-2">
+                            <i class="ph-fill ph-sparkle text-blue-400 text-lg"></i> 
+                            <span class="text-slate-300">New Done:</span> 
+                            <span class="text-blue-400 text-lg">${newFinishedToday.length}</span>
+                        </div>
+                        <div class="hidden sm:block w-px h-6 bg-slate-600"></div>
+                        <div class="flex items-center gap-2 px-3 md:px-4 py-2">
+                            <i class="ph-fill ph-arrows-clockwise text-amber-400 text-lg"></i> 
+                            <span class="text-slate-300">Review Done:</span> 
+                            <span class="text-amber-400 text-lg">${reviewFinishedToday}</span>
+                        </div>
+                        <div class="hidden sm:block w-px h-6 bg-slate-600"></div>
+                        <div class="flex items-center gap-2 px-3 md:px-4 py-2 bg-slate-700/50 rounded-xl m-1">
+                            <i class="ph-fill ph-check-circle text-green-400 text-lg"></i> 
+                            <span class="text-white">Total:</span> 
+                            <span class="text-green-400 text-lg">${totalFinishedToday}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid md:grid-cols-3 gap-4">
+                    <!-- Intake -->
+                    <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="p-2 bg-blue-100 rounded-lg"><i class="ph-fill ph-target text-blue-600 text-xl"></i></div>
+                                <h3 class="font-bold text-slate-800">Micro-Loop Intake</h3>
+                            </div>
+                            <p class="text-xs text-slate-500 mb-4 h-8">Learn new terms by repeating until perfect.</p>
+                            <div class="flex justify-between items-end mb-6">
+                                <div>
+                                    <span class="text-4xl font-black text-slate-800">${newTerms.length}</span>
+                                    <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">New Cards Left</span>
+                                </div>
+                                <select onchange="window.setIntakeSize(this.value)" class="bg-slate-50 border border-slate-200 text-xs font-bold text-slate-700 rounded-lg p-2 outline-none cursor-pointer hover:bg-slate-100">
+                                    ${[10,20,30,40,50].map(n => `<option value="${n}" ${state.intakeSize === n ? 'selected' : ''}>${n} / set</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>
+                        <button onclick="window.startSession('intake')" ${newTerms.length === 0 ? 'disabled' : ''} class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Start Intake</button>
+                    </div>
+
+                    <!-- Review -->
+                    <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow relative overflow-hidden">
+                        ${dueTerms.length > 0 ? '<div class="absolute top-0 left-0 w-full h-1 bg-red-500"></div>' : ''}
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="p-2 bg-red-100 rounded-lg"><i class="ph-fill ph-clock text-red-600 text-xl"></i></div>
+                                <h3 class="font-bold text-slate-800">Fast-Track Review</h3>
+                            </div>
+                            <p class="text-xs text-slate-500 mb-4 h-8">Spaced repetition. Terms scheduled for today.</p>
+                            <div class="mb-6">
+                                <span class="text-4xl font-black ${dueTerms.length > 0 ? 'text-red-500' : 'text-slate-800'}">${dueTerms.length}</span>
+                                <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Due Today</span>
+                            </div>
+                        </div>
+                        <button onclick="window.startSession('review')" ${dueTerms.length === 0 ? 'disabled' : ''} class="w-full bg-red-500 hover:bg-red-600 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Start Review</button>
+                    </div>
+
+                    <!-- Ahead -->
+                    <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="p-2 bg-amber-100 rounded-lg"><i class="ph-fill ph-arrow-right text-amber-600 text-xl"></i></div>
+                                <h3 class="font-bold text-slate-800">Review Ahead</h3>
+                            </div>
+                            <p class="text-xs text-slate-500 mb-4 h-8">Advance your studying for the upcoming days.</p>
+                            <div class="flex justify-between items-end mb-6">
+                                <div>
+                                    <span class="text-4xl font-black text-slate-800">${futureTerms.length}</span>
+                                    <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Future Cards</span>
+                                </div>
+                                <select onchange="window.setLookAheadDays(this.value)" class="bg-slate-50 border border-slate-200 text-xs font-bold text-slate-700 rounded-lg p-2 outline-none cursor-pointer hover:bg-slate-100">
+                                    ${[1,2,3,4,5].map(d => `<option value="${d}" ${state.lookAheadDays === d ? 'selected' : ''}>+${d} Day${d>1?'s':''}</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>
+                        <button onclick="window.startSession('review_ahead')" ${futureTerms.length === 0 ? 'disabled' : ''} class="w-full bg-slate-800 hover:bg-slate-900 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Jump Ahead</button>
+                    </div>
+                </div>
+
+                ${activeStudyTerms.length > 0 ? `
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 mt-8">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="p-2 bg-emerald-100 rounded-lg"><i class="ph-fill ph-trend-up text-emerald-600 text-xl"></i></div>
+                        <h2 class="text-xl font-bold text-slate-800">Deck Performance & Analytics</h2>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-8">
+                        <div class="space-y-6">
+                            <div class="bg-slate-50 rounded-2xl p-4 border border-slate-100 flex items-center justify-between">
+                                <div class="flex items-center gap-3">
+                                    <i class="ph-fill ph-target text-blue-500 text-3xl"></i>
+                                    <div>
+                                        <p class="text-sm font-semibold text-slate-500">Historical Accuracy</p>
+                                        <p class="text-xs text-slate-400">Total hit rate (All time)</p>
+                                    </div>
+                                </div>
+                                <span class="text-3xl font-black ${accuracy >= 80 ? 'text-green-500' : accuracy >= 50 ? 'text-amber-500' : 'text-slate-700'}">${accuracy}%</span>
+                            </div>
+                            <div class="space-y-2">
+                                <div class="flex justify-between text-sm font-semibold">
+                                    <span class="text-slate-600">Deck Mastery (Lvl 5 & 6)</span>
+                                    <span class="text-emerald-600">${masteryPercent}%</span>
+                                </div>
+                                <div class="w-full h-3 bg-slate-100 rounded-full overflow-hidden flex">
+                                    <div class="h-full bg-emerald-500 transition-all duration-500" style="width: ${masteryPercent}%"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-bold text-slate-500 mb-4 flex items-center gap-2 uppercase tracking-wider"><i class="ph-fill ph-chart-bar"></i> Level Distribution</h3>
+                            <div class="flex items-end gap-2 h-40 w-full">
+                                ${barsHtml}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+            </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:Database UI (Folders & Terms) ---
+        function getFolderTreeHtml(parentId = null, depth = 0) {
+            const children = state.folders.filter(f => (f.parentId || null) === parentId);
+            let html = '';
+            children.forEach(f => {
+                const isEditing = state.editingFolderId === f.id;
+                const isAddingSub = state.addingSubfolderTo === f.id;
+                const isMoving = state.movingFolderId === f.id;
+                const pad = (depth * 16) + 16;
+                
+                html += `
+                <div class="w-full">
+                    <div class="flex items-center justify-between group rounded-xl px-4 py-3 cursor-pointer transition-colors ${state.activeFolderId === f.id ? 'bg-blue-50 border border-blue-100' : 'hover:bg-slate-50 border border-transparent'}" onclick="window.setActiveFolder('${f.id}')" style="padding-left: ${pad}px">
+                        <div class="flex items-center gap-3 overflow-hidden flex-1">
+                            ${depth > 0 ? `<i class="ph-fill ph-arrow-elbow-down-right shrink-0 text-xl ${state.activeFolderId === f.id ? 'text-blue-500' : 'text-slate-300'}"></i>` : `<i class="ph-fill ph-folder shrink-0 text-xl ${state.activeFolderId === f.id ? 'text-blue-600' : 'text-slate-400'}"></i>`}
+                            ${isEditing ? `
+                                <input id="rename-input-${f.id}" type="text" onblur="window.saveRenameFolder('${f.id}')" onkeydown="event.key==='Enter' && window.saveRenameFolder('${f.id}')" class="w-full text-base font-extrabold bg-white border border-blue-300 rounded px-2 py-1 outline-none text-blue-800" onclick="event.stopPropagation()">
+                            ` : isMoving ? `
+                                <div class="flex-1 flex gap-1 items-center min-w-0" onclick="event.stopPropagation()">
+                                    <select id="move-select-${f.id}" class="w-full text-xs font-bold bg-white border border-blue-300 rounded p-1.5 outline-none text-blue-800 truncate cursor-pointer">
+                                        <option value="root">-- Move to Root (Top Level) --</option>
+                                        ${getValidParents(f.id).map(p => `<option value="${p.id}" ${f.parentId === p.id ? 'selected' : ''}>${escapeHTML(getFolderFullPath(p.id, state.folders))}</option>`).join('')}
+                                    </select>
+                                    <button onclick="window.saveMoveFolder('${f.id}')" class="p-1.5 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200" title="Confirm Move"><i class="ph-bold ph-check"></i></button>
+                                    <button onclick="window.cancelMovingFolder(event)" class="p-1.5 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200" title="Cancel"><i class="ph-bold ph-x"></i></button>
+                                </div>
+                            ` : `
+                                <span class="font-extrabold truncate text-base ${state.activeFolderId === f.id ? 'text-blue-700' : 'text-slate-700'}">${escapeHTML(f.name)}</span>
+                            `}
+                        </div>
+                        ${!isMoving ? `
+                        <div class="opacity-0 group-hover:opacity-100 flex items-center gap-1 shrink-0 ml-2 transition-opacity">
+                            <button onclick="window.startAddingSubfolder(event, '${f.id}')" class="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-blue-50" title="Add Subfolder"><i class="ph-bold ph-plus text-lg"></i></button>
+                            <button onclick="window.startMovingFolder(event, '${f.id}')" class="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50" title="Move Folder"><i class="ph-bold ph-arrows-out-line-horizontal text-lg"></i></button>
+                            <button onclick="window.startRenamingFolder(event, '${f.id}', '${escapeHTML(f.name).replace(/'/g, "\\'")}')" class="p-1.5 text-slate-400 hover:text-amber-500 rounded-lg hover:bg-amber-50" title="Rename"><i class="ph-fill ph-pencil-simple text-lg"></i></button>
+                            ${state.folders.length > 1 ? `<button onclick="window.deleteFolder(event, '${f.id}')" class="p-1.5 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50" title="Delete"><i class="ph-fill ph-trash text-lg"></i></button>` : ''}
+                        </div>
+                        ` : ''}
+                    </div>
+                    ${isAddingSub ? `
+                    <div class="flex items-center gap-2 mt-1 mb-2 pr-4" style="padding-left: ${pad + 24}px">
+                        <i class="ph-bold ph-arrow-elbow-down-right text-slate-300 shrink-0 text-xl"></i>
+                        <input id="subfolder-input-${f.id}" type="text" placeholder="Subfolder name..." onkeydown="event.key==='Enter' && window.createFolder(event, '${f.id}')" class="flex-1 text-sm p-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-blue-500 outline-none font-bold">
+                        <button onclick="window.createFolder(null, '${f.id}')" class="p-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200"><i class="ph-bold ph-check"></i></button>
+                        <button onclick="window.cancelAddingSubfolder()" class="p-2 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200"><i class="ph-bold ph-x"></i></button>
+                    </div>
+                    ` : ''}
+                    ${getFolderTreeHtml(f.id, depth + 1)}
+                </div>
+                `;
+            });
+            return html;
+        }
+
+        function renderDatabase() {
+            const activeTerms = state.terms.filter(t => t.folderId === state.activeFolderId);
+            const fullPath = getFolderFullPath(state.activeFolderId, state.folders);
+            
+            // Checkbox logic variables
+            const allSelected = activeTerms.length > 0 && activeTerms.every(t => state.selectedTerms.includes(t.id));
+            
+            let termsHtml = '';
+            activeTerms.forEach(t => {
+                const isNewBadge = t.isNew ? '<span class="px-2 py-1 rounded text-xs font-bold bg-blue-100 text-blue-700">NEW</span>' : `<span class="px-2 py-1 rounded text-xs font-bold bg-slate-200 text-slate-600">LVL ${t.level}</span>`;
+                let optionsHtml = '';
+                state.folders.forEach(f => {
+                    optionsHtml += `<option value="${f.id}" ${f.id === t.folderId ? 'selected' : ''}>${escapeHTML(getFolderFullPath(f.id, state.folders))}</option>`;
+                });
+                
+                const isChecked = state.selectedTerms.includes(t.id);
+
+                termsHtml += `
+                <div class="p-4 flex flex-col sm:flex-row sm:items-center justify-between hover:bg-slate-50 transition-colors gap-4">
+                    <div class="flex-1 min-w-0">
+                        <p class="font-bold text-slate-800 truncate">${escapeHTML(t.question.split('\n')[0])}</p>
+                        <p class="text-sm text-slate-500 line-clamp-1">${escapeHTML(t.answer)}</p>
+                    </div>
+                    <div class="flex items-center gap-3 shrink-0">
+                        ${isNewBadge}
+                        <select onchange="window.moveTerm('${t.id}', this.value)" class="text-xs border border-slate-200 rounded-md p-1 bg-white max-w-[100px] md:max-w-[130px] outline-none">
+                            ${optionsHtml}
+                        </select>
+                        <button onclick="window.startEditTerm('${t.id}')" class="text-blue-400 hover:text-blue-600 p-1" title="Edit Card"><i class="ph-fill ph-pencil-simple text-lg"></i></button>
+                        <button onclick="window.deleteTerm('${t.id}')" class="text-red-400 hover:text-red-600 p-1" title="Delete Card"><i class="ph-fill ph-trash text-lg"></i></button>
+                    </div>
+                </div>
+                `;
+            });
+
+            return `
+            <div class="max-w-6xl mx-auto p-4 md:p-6 space-y-6 fade-in">
+                <div class="flex flex-col md:flex-row gap-6">
+                    <!-- Folders Sidebar -->
+                    <div class="w-full md:w-80 lg:w-96 shrink-0 space-y-4">
+                        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-5 flex flex-col h-full min-h-[600px] max-h-[85vh]">
+                            <h3 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2"><i class="ph-fill ph-folders text-lg"></i> Your Decks (Offline)</h3>
+                            <div class="space-y-1 mb-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                                ${getFolderTreeHtml()}
+                            </div>
+                            <form onsubmit="window.createFolder(event)" class="border-t border-slate-100 pt-5 mb-6">
+                                <div class="flex gap-2">
+                                    <input id="new-folder-input" type="text" placeholder="New Deck Name" class="w-full text-base font-bold p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
+                                    <button type="submit" class="bg-slate-800 text-white p-3 rounded-xl hover:bg-slate-900 transition-colors"><i class="ph-bold ph-folder-plus text-2xl"></i></button>
+                                </div>
+                            </form>
+                            
+                            <!-- Backup Section -->
+                            <div class="border-t border-slate-100 pt-4 space-y-2">
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Data Security</h3>
+                                <button onclick="window.exportBackup()" class="w-full bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 py-2 px-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors">
+                                    <i class="ph-bold ph-download-simple"></i> Export Backup
+                                </button>
+                                <label class="w-full bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 py-2 px-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer">
+                                    <i class="ph-bold ph-upload-simple"></i> Restore Backup
+                                    <input type="file" accept=".json" class="hidden" onchange="window.handleImportBackup(event)" />
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Content Area -->
+                    <div class="flex-1 space-y-6">
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+                            <div>
+                                <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">${escapeHTML(fullPath)}</h2>
+                                <p class="text-sm text-slate-500">${activeTerms.length} cards in this deck</p>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <button onclick="window.removeDuplicates()" class="flex items-center justify-center gap-2 bg-rose-100 hover:bg-rose-200 text-rose-700 px-4 py-2 rounded-xl font-bold transition-colors text-sm">
+                                    <i class="ph-bold ph-broom"></i> Clean Duplicates
+                                </button>
+                                <button onclick="window.toggleBulk()" class="flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-bold transition-colors text-sm">
+                                    ${state.showBulk ? 'Manual Add' : '<i class="ph-bold ph-upload-simple"></i> Bulk Import'}
+                                </button>
+                            </div>
+                        </div>
+
+                        ${state.showBulk ? `
+                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                            <h3 class="font-semibold text-slate-700 mb-2">Import to "${escapeHTML(fullPath)}"</h3>
+                            <p class="text-sm text-slate-500 mb-4">Paste directly from Excel/Sheets (Supports 2 or 3 columns).</p>
+                            <textarea id="bulk-textarea" placeholder="Paste rows here..." class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none h-40 font-mono text-sm whitespace-pre-wrap mb-4"></textarea>
+                            <div class="flex flex-col sm:flex-row items-center gap-4">
+                                <button onclick="window.processManualBulk()" class="w-full sm:w-auto bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors">Import Pasted Text</button>
+                                <span class="text-slate-400 font-bold text-sm">OR</span>
+                                <label class="w-full sm:w-auto bg-slate-800 text-white px-6 py-3 rounded-xl font-bold hover:bg-slate-900 cursor-pointer transition-colors flex items-center justify-center gap-2">
+                                    <i class="ph-bold ph-file-csv text-xl"></i> Upload .TSV / .CSV
+                                    <input type="file" accept=".csv, .tsv, .txt" class="hidden" onchange="window.handleFileUpload(event)" />
+                                </label>
+                            </div>
+                        </div>
+                        ` : `
+                        <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                            <form onsubmit="window.addSingleTerm(event)" class="space-y-4">
+                                <input id="new-term-q" type="text" placeholder="Question / Term" required class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
+                                <textarea id="new-term-a" placeholder="Answer / Definition" required class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none h-24"></textarea>
+                                <button type="submit" class="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors flex items-center gap-2"><i class="ph-bold ph-plus text-lg"></i> Add to Deck</button>
+                            </form>
+                        </div>
+                        `}
+
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[500px]">
+                            <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center flex-wrap gap-4">
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" ${allSelected ? 'checked' : ''} onclick="window.toggleSelectAll()" class="w-5 h-5 rounded text-blue-600 border-slate-300 cursor-pointer shadow-sm">
+                                    <span class="font-semibold text-slate-700">Cards (${activeTerms.length})</span>
+                                </div>
+                                ${activeTerms.length > 0 ? `
+                                <div class="flex flex-wrap items-center gap-2">
+                                    ${state.selectedTerms.length > 0 ? `
+                                        <button onclick="window.deleteSelectedTerms()" class="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1 shadow-sm mr-2">
+                                            <i class="ph-bold ph-trash"></i> Delete (${state.selectedTerms.length})
+                                        </button>
+                                        <div class="w-px h-6 bg-slate-300 mr-1"></div>
+                                    ` : ''}
+                                    <div class="flex items-center gap-1 border-r border-slate-200 pr-2 mr-1">
+                                        <select id="export-level-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer">
+                                            <option value="all">All Levels</option>
+                                            <option value="new">New Cards</option>
+                                            <option value="1">Level 1</option>
+                                            <option value="2">Level 2</option>
+                                            <option value="3">Level 3</option>
+                                            <option value="4">Level 4</option>
+                                            <option value="5">Level 5</option>
+                                            <option value="6">Level 6</option>
+                                        </select>
+                                        <button onclick="window.exportFilteredCSV()" class="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1" title="Export as CSV"><i class="ph-bold ph-download-simple"></i> CSV</button>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <select id="bulk-move-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer">
+                                            <option value="">Move all to...</option>
+                                            ${state.folders.filter(f => f.id !== state.activeFolderId).map(f => `<option value="${f.id}">${escapeHTML(f.name)}</option>`).join('')}
+                                        </select>
+                                        <button onclick="window.bulkMoveTerms()" class="text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-2 rounded-md font-bold transition-colors">Move</button>
+                                        <button onclick="window.bulkDeleteTerms()" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1"><i class="ph-bold ph-trash"></i> Empty</button>
+                                    </div>
+                                </div>
+                                ` : ''}
+                            </div>
+                            <div class="flex-1 overflow-y-auto divide-y divide-slate-100">
+                                ${termsHtml}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:Stats UI ---
+        function renderStats() {
+            const localScore = state.terms.reduce((acc, t) => acc + (t.level || 0), 0);
+            const localCompletedToday = state.terms.filter(t => (t.lastReviewedDate || 0) >= getTodayStart()).length;
+
+            // Calculate Answer Probability Meta-Stats
+            const ansCounts = { 'A': 0, 'B': 0, 'C': 0, 'D': 0 };
+            let totalMultipleChoice = 0;
+            state.terms.forEach(t => {
+                const cleanAns = String(t.answer).trim().toUpperCase();
+                if (['A', 'B', 'C', 'D'].includes(cleanAns)) {
+                    ansCounts[cleanAns]++;
+                    totalMultipleChoice++;
+                }
+            });
+
+            // Generate UI Cards for each letter
+            let letterStatsHtml = '';
+            ['A', 'B', 'C', 'D'].forEach(letter => {
+                const count = ansCounts[letter];
+                const percent = totalMultipleChoice > 0 ? Math.round((count / totalMultipleChoice) * 100) : 0;
+                
+                const colors = { A: 'bg-rose-500', B: 'bg-blue-500', C: 'bg-amber-500', D: 'bg-emerald-500' };
+                const lightColors = { A: 'bg-rose-100 text-rose-700', B: 'bg-blue-100 text-blue-700', C: 'bg-amber-100 text-amber-700', D: 'bg-emerald-100 text-emerald-700' };
+                
+                letterStatsHtml += `
+                <div class="bg-slate-50 rounded-2xl p-4 border border-slate-100 flex flex-col justify-between hover:shadow-md transition-shadow">
+                    <div class="flex justify-between items-center mb-3">
+                        <span class="w-8 h-8 rounded-full flex items-center justify-center font-black ${lightColors[letter]}">${letter}</span>
+                        <span class="text-xl font-black text-slate-700">${percent}%</span>
+                    </div>
+                    <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                        <div class="h-full ${colors[letter]} transition-all duration-1000" style="width: ${percent}%"></div>
+                    </div>
+                    <span class="text-[10px] font-bold text-slate-400 mt-2 uppercase text-center">${count} cards</span>
+                </div>
+                `;
+            });
+            
+            // --- STREAMING_CHUNK:Daily Tracker Analytics UI ---
+            let historyHtml = '';
+            let trendHtml = `<div class="p-3 bg-slate-100 text-slate-500 rounded-xl font-bold flex items-center gap-2 text-sm"><i class="ph-bold ph-info"></i> Kulang pa sa data. Mag-review muna para ma-track ang progress!</div>`;
+            
+            // Determine active tracking level
+            let currentStatsHistory = {};
+            if(state.statsFolderId === 'all') {
+                currentStatsHistory = state.history['all'] || {};
+            } else {
+                let targetIds = [state.statsFolderId];
+                let isParent = false;
+                let i = 0;
+                while (i < targetIds.length) {
+                    let children = state.folders.filter(f => f.parentId === targetIds[i]).map(f => f.id);
+                    if(children.length > 0) isParent = true;
+                    targetIds = targetIds.concat(children);
+                    i++;
+                }
+
+                if (isParent) {
+                    targetIds.forEach(folderId => {
+                       const fHist = state.history[folderId] || {};
+                       Object.keys(fHist).forEach(dateStr => {
+                           if(!currentStatsHistory[dateStr]) {
+                               currentStatsHistory[dateStr] = { new: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, total: 0 };
+                           }
+                           const dayStats = fHist[dateStr];
+                           currentStatsHistory[dateStr].new += dayStats.new || 0;
+                           currentStatsHistory[dateStr][1] += dayStats[1] || 0;
+                           currentStatsHistory[dateStr][2] += dayStats[2] || 0;
+                           currentStatsHistory[dateStr][3] += dayStats[3] || 0;
+                           currentStatsHistory[dateStr][4] += dayStats[4] || 0;
+                           currentStatsHistory[dateStr][5] += dayStats[5] || 0;
+                           currentStatsHistory[dateStr][6] += dayStats[6] || 0;
+                           currentStatsHistory[dateStr].total += dayStats.total || 0;
+                       });
+                    });
+                } else {
+                    currentStatsHistory = state.history[state.statsFolderId] || {};
+                }
+            }
+
+            const sortedDates = Object.keys(currentStatsHistory).sort((a,b) => new Date(b) - new Date(a));
+            
+            if (sortedDates.length > 0) {
+                if (sortedDates.length >= 2) {
+                    const todayStats = currentStatsHistory[sortedDates[0]];
+                    const pastStats = currentStatsHistory[sortedDates[1]];
+                    const todayMastery = todayStats[4] + todayStats[5] + todayStats[6];
+                    const pastMastery = pastStats[4] + pastStats[5] + pastStats[6];
+                    const todayWeak = todayStats.new + todayStats[1];
+                    const pastWeak = pastStats.new + pastStats[1];
+                    
+                    const diffMastery = todayMastery - pastMastery;
+                    const diffWeak = todayWeak - pastWeak;
+                    
+                    if (diffMastery > 0) {
+                        trendHtml = `<div class="p-3 bg-green-100 text-green-800 rounded-xl font-bold flex items-center gap-2 text-sm"><i class="ph-bold ph-trend-up text-lg"></i> Gumagaling! Mastery mo (Lvl 4-6) ay tumaas ng +${diffMastery} cards.</div>`;
+                    } else if (diffWeak > 0 && diffMastery <= 0) {
+                        trendHtml = `<div class="p-3 bg-rose-100 text-rose-800 rounded-xl font-bold flex items-center gap-2 text-sm"><i class="ph-bold ph-warning text-lg"></i> Needs Review! Dumami ng +${diffWeak} yung nasa Level 1 / New cards.</div>`;
+                    } else if (diffMastery < 0) {
+                        trendHtml = `<div class="p-3 bg-orange-100 text-orange-800 rounded-xl font-bold flex items-center gap-2 text-sm"><i class="ph-bold ph-trend-down text-lg"></i> Nakakalimot? Bumaba ng ${Math.abs(diffMastery)} ang Mastery cards mo.</div>`;
+                    } else {
+                        trendHtml = `<div class="p-3 bg-blue-100 text-blue-800 rounded-xl font-bold flex items-center gap-2 text-sm"><i class="ph-bold ph-minus text-lg"></i> Stable Progress. Walang nag-iba sa Mastery count mo.</div>`;
+                    }
+                } else {
+                    trendHtml = `<div class="p-3 bg-blue-100 text-blue-800 rounded-xl font-bold flex items-center gap-2 text-sm"><i class="ph-bold ph-rocket text-lg"></i> Araw 1 ng pag-track! Ipagpatuloy lang para makita ang trend bukas.</div>`;
+                }
+
+                sortedDates.slice(0, 7).forEach(dateStr => {
+                    const stats = currentStatsHistory[dateStr];
+                    const masterySum = stats[4] + stats[5] + stats[6];
+                    const dangerSum = stats.new + stats[1] + stats[2];
+                    
+                    historyHtml += `
+                    <div class="grid grid-cols-4 gap-4 p-3 items-center border-b border-slate-100 hover:bg-slate-50 transition-colors text-sm">
+                        <div class="col-span-1 font-bold text-slate-700">${dateStr}</div>
+                        <div class="col-span-1 text-center font-bold text-slate-500">${stats.total}</div>
+                        <div class="col-span-1 text-center font-bold text-emerald-600">${masterySum}</div>
+                        <div class="col-span-1 text-center font-bold text-rose-500">${dangerSum}</div>
+                    </div>
+                    `;
+                });
+            } else {
+                historyHtml = `<div class="p-6 text-center text-slate-400 font-bold text-sm">Walang recorded log for this folder.</div>`;
+            }
+
+            return `
+            <div class="max-w-4xl mx-auto p-6 fade-in zoom-in">
+                <div class="text-center mb-10 space-y-2">
+                    <div class="inline-block p-3 bg-amber-100 text-amber-600 rounded-full mb-2"><i class="ph-fill ph-trophy text-4xl"></i></div>
+                    <h1 class="text-3xl font-extrabold text-slate-800">Your Local Stats</h1>
+                    <p class="text-slate-500">Offline Mode: Rankings are based on your total Mastery Points.</p>
+                </div>
+
+                <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 mb-8 flex gap-4 items-start shadow-sm">
+                    <div class="bg-blue-100 text-blue-600 p-2 rounded-xl shrink-0">
+                        <i class="ph-fill ph-info text-2xl"></i>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-blue-900 mb-1">Paano tumaas ang Points? (How to earn points)</h3>
+                        <ul class="text-sm text-blue-800 space-y-1 list-disc list-inside">
+                            <li>Ang pag-import ng madaming cards ay <b>HINDI</b> nagbibigay ng points.</li>
+                            <li>Nakakakuha ka ng points tuwing nagle-<b>LEVEL UP</b> ang card mo sa Intake at Review.</li>
+                            <li>(Level 1 = 1 Point, Level 2 = 2 Points ... Level 5 = 5 Points).</li>
+                            <li>Dahil naka-offline ka ngayon, track mo ang sariling High Score mo!</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="grid grid-cols-12 gap-4 p-4 bg-slate-50 border-b border-slate-100 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        <div class="col-span-1 text-center">Rank</div>
+                        <div class="col-span-5">Engineer</div>
+                        <div class="col-span-3 text-center">Mastery Score</div>
+                        <div class="col-span-3 text-center">Activity Today</div>
+                    </div>
+                    <div class="divide-y divide-slate-50">
+                        <div class="grid grid-cols-12 gap-4 p-4 items-center hover:bg-slate-50 transition-colors bg-blue-50/50">
+                            <div class="col-span-1 flex justify-center">
+                                <i class="ph-fill ph-medal text-2xl text-amber-400"></i>
+                            </div>
+                            <div class="col-span-5 flex items-center gap-3">
+                                <div class="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center font-bold text-white text-xs">ME</div>
+                                <span class="font-bold text-blue-700">You (Offline) <span class="text-[10px] ml-2 bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">LOCAL</span></span>
+                            </div>
+                            <div class="col-span-3 text-center font-black text-slate-800 text-lg">
+                                ${localScore.toLocaleString()} <span class="text-[10px] text-slate-400 font-bold uppercase block">Pts</span>
+                            </div>
+                            <div class="col-span-3 flex justify-center">
+                                <span class="px-3 py-1 bg-green-100 text-green-700 font-bold text-sm rounded-full flex items-center gap-1">
+                                    <i class="ph-fill ph-check-circle"></i> ${localCompletedToday}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 mt-8">
+                    <div class="flex items-center justify-between mb-6 flex-wrap gap-4">
+                        <div class="flex items-center gap-3">
+                            <div class="p-2 bg-blue-100 rounded-lg"><i class="ph-fill ph-calendar-check text-blue-600 text-xl"></i></div>
+                            <div>
+                                <h2 class="text-xl font-bold text-slate-800">Daily Log & Progress Rate</h2>
+                                <p class="text-xs text-slate-500">Track how your card levels shift day by day.</p>
+                            </div>
+                        </div>
+                        <select onchange="window.setStatsFolder(this.value)" class="text-sm border border-slate-200 rounded-xl p-2 bg-slate-50 font-bold outline-none cursor-pointer">
+                            <option value="all" ${state.statsFolderId === 'all' ? 'selected' : ''}>All Sets</option>
+                            ${state.folders.map(f => `<option value="${f.id}" ${state.statsFolderId === f.id ? 'selected' : ''}>${escapeHTML(f.name)}</option>`).join('')}
+                        </select>
+                    </div>
+
+                    ${trendHtml}
+
+                    <div class="mt-6 border border-slate-200 rounded-2xl overflow-hidden">
+                        <div class="grid grid-cols-4 gap-4 p-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                            <div class="col-span-1">Date</div>
+                            <div class="col-span-1 text-center">Total Cards</div>
+                            <div class="col-span-1 text-center text-emerald-600">Mastery (L4-6)</div>
+                            <div class="col-span-1 text-center text-rose-500">Needs Work (New-L2)</div>
+                        </div>
+                        <div class="divide-y divide-slate-50 bg-white">
+                            ${historyHtml}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 mt-8">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="p-2 bg-purple-100 rounded-lg"><i class="ph-fill ph-chart-pie-slice text-purple-600 text-xl"></i></div>
+                        <div>
+                            <h2 class="text-xl font-bold text-slate-800">Answer Probability (Meta-Stats)</h2>
+                            <p class="text-xs text-slate-500">Distribution of correct answers across your entire multiple-choice deck.</p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        ${letterStatsHtml}
+                    </div>
+                    <p class="text-center text-xs text-slate-400 font-medium mt-6 bg-slate-50 py-2 rounded-lg">Based on ${totalMultipleChoice} valid multiple choice cards (A, B, C, D)</p>
+                </div>
+            </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:Forecast UI ---
+        function renderForecast() {
+            let optionsHtml = `<option value="all" ${state.forecastFolderId === 'all' ? 'selected' : ''}>All Sets</option>`;
+            state.folders.forEach(f => {
+                optionsHtml += `<option value="${f.id}" ${state.forecastFolderId === f.id ? 'selected' : ''}>${escapeHTML(f.name)}</option>`;
+            });
+
+            const getRatioOptions = (selectedValue) => {
+                return [
+                    { val: "1.0", label: "100% Review / 0% New" },
+                    { val: "0.75", label: "75% Review / 25% New" },
+                    { val: "0.50", label: "50% Review / 50% New" },
+                    { val: "0.25", label: "25% Review / 75% New" },
+                    { val: "0.0", label: "0% Review / 100% New" }
+                ].map(o => `<option value="${o.val}" ${selectedValue == o.val ? 'selected' : ''}>${o.label}</option>`).join('');
+            };
+
+            const ratio1Options = getRatioOptions(state.forecastRatio);
+            const ratio2Options = getRatioOptions(state.forecastPhase2Ratio);
+
+            const modeToggleHtml = `
+                <div class="flex bg-slate-100 p-1 rounded-xl w-fit mb-6 mx-auto">
+                    <button onclick="window.setForecastMode('actual')" class="px-6 py-2 rounded-lg font-bold text-sm transition-all ${state.forecastMode === 'actual' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-500 hover:text-slate-700'}">Actual Forecast</button>
+                    <button onclick="window.setForecastMode('simulated')" class="px-6 py-2 rounded-lg font-bold text-sm transition-all ${state.forecastMode === 'simulated' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-500 hover:text-slate-700'}">Simulated Forecast</button>
+                </div>
+            `;
+
+            const todayStr = new Date().toLocaleDateString('en-CA');
+            const startVal = state.forecastMode === 'simulated' && state.forecastStartDate ? state.forecastStartDate : todayStr;
+            const startDateHtml = `
+                <div>
+                    <label class="text-[10px] font-bold text-purple-600 uppercase tracking-wider mb-2 block">Start Date</label>
+                    <div class="relative">
+                        <i class="ph-bold ph-calendar-blank absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                        <input id="forecast-start-date" type="date" value="${startVal}" ${state.forecastMode === 'actual' ? 'disabled' : ''} onchange="state.forecastStartDate = this.value" class="w-full pl-10 pr-2 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700 ${state.forecastMode === 'actual' ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}">
+                    </div>
+                </div>
+            `;
+
+            const extraCardsHtml = state.forecastMode === 'simulated' ? `
+                <div>
+                    <label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 block">+ Extra New</label>
+                    <div class="relative">
+                        <i class="ph-bold ph-cards absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                        <input id="forecast-extra" type="number" value="${state.forecastExtra}" min="0" class="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700">
+                    </div>
+                </div>
+            ` : '';
+
+            let calendarHtml = '';
+            const activeData = state.forecastMode === 'actual' ? state.actualForecastData : state.simulatedForecastData;
+
+            if (activeData && activeData.length > 0) {
+                const months = {};
+                activeData.forEach(d => {
+                    const monthKey = d.date.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+                    if (!months[monthKey]) months[monthKey] = [];
+                    months[monthKey].push(d);
+                });
+
+                for (const [monthName, days] of Object.entries(months)) {
+                    calendarHtml += `
+                        <div class="mb-8 bg-white p-6 rounded-3xl border border-slate-200 shadow-sm relative overflow-hidden">
+                            <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center gap-2"><i class="ph-fill ph-calendar-blank text-purple-500"></i> ${monthName}</h3>
+                            <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 gap-4">
+                    `;
+                    
+                    days.forEach(d => {
+                        let dateStr = d.date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                        let isOverload = d.backlogEOD > 0;
+                        let cardClass = isOverload ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100';
+                        let textClass = isOverload ? 'text-rose-600' : 'text-emerald-600';
+                        let masterPercent = Math.round(((d.levels[5] + d.levels[6]) / d.total) * 100);
+                        let estSeconds = (d.actualNew + d.actualReview) * state.timePerCard;
+                        let timeLabel = estSeconds >= 3600 ? (estSeconds/3600).toFixed(1) + ' hrs' : Math.ceil(estSeconds/60) + ' mins';
+
+                        calendarHtml += `
+                            <div class="border rounded-2xl p-4 flex flex-col justify-between ${cardClass} shadow-sm transition-all hover:scale-[1.02]">
+                                <div class="text-[10px] font-black uppercase text-slate-400 mb-2 flex justify-between"><span>Day ${d.day + 1}</span> <span>${dateStr}</span></div>
+                                <div class="flex gap-2 items-center mb-1">
+                                    <div class="text-3xl font-black tracking-tighter ${textClass} leading-none">${d.actualNew + d.actualReview}</div>
+                                    <div class="text-[9px] font-bold opacity-70 uppercase leading-tight">Total<br/>Done</div>
+                                </div>
+                                <div class="mb-2"><span class="text-[9px] font-black text-slate-500 uppercase bg-white border border-slate-200 rounded px-1.5 py-0.5 inline-block"><i class="ph-bold ph-hourglass-high"></i> Est: ${timeLabel}</span></div>
+                                <div class="space-y-1 bg-white/60 p-2 rounded-lg border border-slate-200/50 mb-2">
+                                    <div class="text-[10px] font-bold text-slate-600 flex justify-between items-center"><span><i class="ph-bold ph-sparkle text-blue-500"></i> New</span> <span class="font-black text-blue-600">${d.actualNew}</span></div>
+                                    <div class="text-[10px] font-bold text-slate-600 flex justify-between items-center"><span><i class="ph-bold ph-arrows-clockwise text-amber-500"></i> Repeat</span> <span class="font-black text-amber-600">${d.actualReview}</span></div>
+                                </div>
+                                ${d.backlogEOD > 0 ? `<div class="mb-2 text-[9px] font-black text-rose-600 bg-rose-100/80 px-2 py-1.5 rounded-md text-center uppercase tracking-wider">Backlog: ${d.backlogEOD}</div>` : `<div class="mb-2 text-[9px] font-black text-emerald-600 bg-emerald-100/80 px-2 py-1.5 rounded-md text-center uppercase tracking-wider">Quota Cleared</div>`}
+                                <div class="mt-auto flex h-2 w-full rounded-full overflow-hidden bg-slate-200 border border-slate-200/50" title="Level Distribution at EOD">
+                                    <div style="width: ${(d.levels[6]/d.total)*100}%" class="bg-emerald-600"></div>
+                                    <div style="width: ${(d.levels[5]/d.total)*100}%" class="bg-emerald-400"></div>
+                                    <div style="width: ${(d.levels[4]/d.total)*100}%" class="bg-emerald-300"></div>
+                                    <div style="width: ${(d.levels[3]/d.total)*100}%" class="bg-amber-400"></div>
+                                    <div style="width: ${(d.levels[2]/d.total)*100}%" class="bg-amber-300"></div>
+                                    <div style="width: ${(d.levels[1]/d.total)*100}%" class="bg-rose-400"></div>
+                                    <div style="width: ${(d.levels[0]/d.total)*100}%" class="bg-slate-300"></div>
+                                </div>
+                                <div class="text-center text-[9px] font-black text-slate-400 uppercase mt-1.5">${masterPercent}% Mastery</div>
+                            </div>
+                        `;
+                    });
+                    
+                    calendarHtml += `</div></div>`;
+                }
+            }
+
+            return `
+            <div class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 fade-in zoom-in">
+                <div class="text-center mb-8 space-y-2">
+                    <div class="inline-block p-3 bg-purple-100 text-purple-600 rounded-full mb-2"><i class="ph-fill ph-crystal-ball text-4xl"></i></div>
+                    <h1 class="text-3xl font-extrabold text-slate-800">Actual Forecast & Workload</h1>
+                    <p class="text-slate-500 text-sm max-w-2xl mx-auto">Simulate your journey until all cards reach Level 5 Mastery (capped at 1 year). This visualizer assumes a <span class="font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded">Dynamic Level-Weighted Pass Rate</span> (60% to 90%) on your daily reviews.</p>
+                </div>
+
+                ${modeToggleHtml}
+
+                <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                    <div class="grid grid-cols-2 ${state.forecastMode === 'simulated' ? 'md:grid-cols-3 lg:grid-cols-6' : 'md:grid-cols-3 lg:grid-cols-5'} gap-4 items-end">
+                        ${startDateHtml}
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 block">Daily Quota limit</label>
+                            <div class="relative">
+                                <i class="ph-bold ph-target absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                                <input id="forecast-quota" type="number" value="${state.forecastQuota}" min="1" class="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 block">Secs / Card (Timer)</label>
+                            <div class="relative">
+                                <i class="ph-bold ph-timer absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                                <input id="forecast-timer" type="number" value="${state.timePerCard}" min="1" onchange="window.setTimePerCard(this.value)" class="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700">
+                            </div>
+                        </div>
+                        ${extraCardsHtml}
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 block">Select Deck</label>
+                            <div class="relative">
+                                <i class="ph-bold ph-folder absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                                <select id="forecast-folder" class="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700 appearance-none cursor-pointer">
+                                    ${optionsHtml}
+                                </select>
+                            </div>
+                        </div>
+                        <div>
+                            <button onclick="window.runForecast()" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-md shadow-purple-200 flex items-center justify-center gap-2 active:scale-95">
+                                <i class="ph-fill ph-play-circle text-xl"></i> Run Simulation
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="p-4 bg-purple-50 rounded-2xl border border-purple-100 grid md:grid-cols-3 gap-4 items-end mt-4">
+                        <div>
+                            <label class="text-[10px] font-bold text-purple-600 uppercase tracking-wider mb-2 block"><i class="ph-bold ph-calendar-star"></i> Phase 1: Initial Ratio</label>
+                            <div class="relative">
+                                <i class="ph-bold ph-faders absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                                <select id="forecast-ratio-1" class="w-full pl-10 pr-4 py-2.5 bg-white border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700 appearance-none cursor-pointer text-sm">
+                                    ${ratio1Options}
+                                </select>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-purple-600 uppercase tracking-wider mb-2 block"><i class="ph-bold ph-hourglass-high"></i> Phase 1 Ends On (Cut-off)</label>
+                            <div class="relative">
+                                <i class="ph-bold ph-calendar absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                                <input id="forecast-date-1" type="date" value="${state.forecastPhase1EndDate}" class="w-full pl-10 pr-4 py-2.5 bg-white border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700 text-sm">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-purple-600 uppercase tracking-wider mb-2 block"><i class="ph-bold ph-fast-forward-circle"></i> Phase 2: Ratio Thereafter</label>
+                            <div class="relative">
+                                <i class="ph-bold ph-faders absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg"></i>
+                                <select id="forecast-ratio-2" class="w-full pl-10 pr-4 py-2.5 bg-white border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none font-bold text-slate-700 appearance-none cursor-pointer text-sm">
+                                    ${ratio2Options}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                ${activeData && activeData.length > 0 ? `
+                <div class="bg-slate-800 text-white p-6 rounded-3xl mt-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-lg relative overflow-hidden mb-8">
+                    <div class="absolute top-0 left-0 w-full h-1 bg-purple-500"></div>
+                    <div class="flex items-center gap-4">
+                        <div class="p-3 bg-slate-700/50 rounded-2xl"><i class="ph-fill ph-flag-checkered text-3xl text-purple-400"></i></div>
+                        <div>
+                            <h3 class="font-bold text-xl text-white">Target Reached in ${activeData.length} Days!</h3>
+                            <p class="text-slate-400 text-sm font-medium">Tracking ${activeData[0].total} total cards to Mastery.</p>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+
+                ${calendarHtml}
+            </div>
+            `;
+        }
+
+        function renderSession() {
+            if (!state.sessionData || state.sessionData.queue.length === 0) return '';
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const progressPercentage = state.timerEnabled ? (state.timeLeft / state.timePerCard) * 100 : 100;
+            const timerColor = state.timeLeft <= 3 ? 'bg-red-500' : 'bg-blue-500';
+
+            function renderFormattedQuestion(rawQuestion, showAns, ansText) {
+                if (!rawQuestion.includes('[Choices]:')) {
+                    return `
+                    <div class="w-full py-10 px-6 bg-slate-50 rounded-3xl border-2 border-slate-100 mb-4 flex flex-col items-center justify-center min-h-[160px] relative transition-all">
+                        <span class="absolute top-4 left-6 text-[10px] font-black text-slate-400 uppercase tracking-widest"><i class="ph-fill ph-cards"></i> Term / Question</span>
+                        <h3 class="text-xl md:text-2xl font-black text-slate-800 leading-relaxed whitespace-pre-wrap text-center mt-4">${escapeHTML(rawQuestion)}</h3>
+                    </div>`;
+                }
+
+                const parts = rawQuestion.split('[Choices]:');
+                const qText = escapeHTML(parts[0].trim());
+                const cText = parts[1] || '';
+
+                const regex = /A\.\s*(.*?)\s*B\.\s*(.*?)\s*C\.\s*(.*?)\s*D\.\s*(.*)/is;
+                const match = cText.match(regex);
+                const cleanAns = String(ansText).trim().toUpperCase();
+                const isLetterAns = ['A', 'B', 'C', 'D'].includes(cleanAns);
+
+                if (match) {
+                    const [, a, b, c, d] = match;
+                    
+                    const getOptionStyle = (letter) => {
+                        if (!showAns || !isLetterAns) return 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'; 
+                        if (cleanAns === letter) return 'bg-green-50 border-green-400 text-green-900 ring-2 ring-green-400 shadow-md transform scale-[1.02] transition-all z-10'; 
+                        return 'bg-slate-50 border-slate-100 text-slate-400 opacity-50'; 
+                    };
+                    
+                    const getBadgeStyle = (letter) => {
+                        if (!showAns || !isLetterAns) return 'bg-slate-200 text-slate-500';
+                        if (cleanAns === letter) return 'bg-green-500 text-white shadow-sm';
+                        return 'bg-slate-200 text-slate-400';
+                    };
+
+                    return `
+                        <h3 class="text-lg md:text-xl font-black text-slate-800 mb-4 leading-relaxed whitespace-pre-wrap text-left">${qText}</h3>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-left w-full mt-2 mb-6">
+                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('A')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('A')}">A</span> <span class="font-medium mt-0.5">${escapeHTML(a)}</span></div>
+                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('B')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('B')}">B</span> <span class="font-medium mt-0.5">${escapeHTML(b)}</span></div>
+                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('C')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('C')}">C</span> <span class="font-medium mt-0.5">${escapeHTML(c)}</span></div>
+                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('D')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('D')}">D</span> <span class="font-medium mt-0.5">${escapeHTML(d)}</span></div>
+                        </div>
+                    `;
+                } else {
+                    return `
+                        <h3 class="text-lg md:text-xl font-black text-slate-800 mb-4 leading-relaxed whitespace-pre-wrap text-left">${qText}</h3>
+                        <div class="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200 text-left whitespace-pre-wrap text-sm md:text-base font-medium text-slate-700 mb-6">${escapeHTML(cText.trim())}</div>
+                    `;
+                }
+            }
+
+            let lvlDots = '';
+            if (state.sessionData.type === 'review') {
+                for(let i=1; i<=5; i++) {
+                    lvlDots += `<div class="w-2 h-2 rounded-full ${currentCard.level >= i ? 'bg-green-500' : 'bg-slate-200'}"></div>`;
+                }
+            }
+
+            let sessionProgressHtml = '';
+            if (state.sessionData.type === 'review') {
+                const totalCards = state.sessionData.initialQueueLength || state.sessionData.queue.length;
+                const completedCount = state.currentCardIndex;
+                
+                let remainingQueue = state.sessionData.queue.slice(state.currentCardIndex);
+                let redCount = remainingQueue.filter(c => c.level <= 2).length;
+                let greenCount = remainingQueue.filter(c => c.level > 2).length;
+                
+                let completedPct = (completedCount / totalCards) * 100;
+                let redPct = (redCount / totalCards) * 100;
+                let greenPct = (greenCount / totalCards) * 100;
+
+                sessionProgressHtml = `
+                <div class="w-full max-w-2xl mx-auto mb-6 fade-in">
+                    <div class="flex justify-between items-end mb-2">
+                        <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Daily Review Load Queue</span>
+                        <div class="flex gap-3 text-xs font-bold">
+                            <span class="text-rose-500"><i class="ph-fill ph-warning-circle"></i> Weak (L1-L2): ${redCount}</span>
+                            <span class="text-emerald-500"><i class="ph-fill ph-check-circle"></i> Strong (L3+): ${greenCount}</span>
+                        </div>
+                    </div>
+                    <div class="w-full h-3 bg-slate-100 rounded-full flex overflow-hidden border border-slate-200 shadow-inner">
+                        <div class="h-full bg-slate-300 transition-all duration-300" style="width: ${completedPct}%" title="Completed"></div>
+                        <div class="h-full bg-rose-500 transition-all duration-300" style="width: ${redPct}%" title="Weak Cards Remaining"></div>
+                        <div class="h-full bg-emerald-400 transition-all duration-300" style="width: ${greenPct}%" title="Strong Cards Remaining"></div>
+                    </div>
+                </div>
+                `;
+            }
+
+            return `
+            <div class="max-w-2xl mx-auto p-4 flex flex-col h-[90vh]">
+                <div class="flex flex-wrap items-center justify-between mb-8 gap-4">
+                    <button onclick="window.endSession()" class="text-slate-400 hover:text-slate-700 font-medium transition-colors">Exit Session</button>
+                    <div class="flex items-center gap-2">
+                        <select onchange="window.setTimePerCard(this.value)" class="bg-slate-100 border-none text-xs font-bold text-slate-600 rounded-lg px-2 py-1.5 outline-none cursor-pointer" title="Time per card">
+                            ${[5, 10, 15, 20, 30, 45, 60].map(s => `<option value="${s}" ${state.timePerCard === s ? 'selected' : ''}>${s}s Timer</option>`).join('')}
+                        </select>
+                        <button onclick="window.toggleTimer()" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold transition-colors ${state.timerEnabled ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-500'}">
+                            <i class="ph-fill ${state.timerEnabled ? 'ph-toggle-right' : 'ph-toggle-left'} text-lg"></i> ${state.timerEnabled ? 'Timer ON' : 'Timer OFF'}
+                        </button>
+                    </div>
+                    <div class="flex gap-2">
+                        <span class="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-sm font-bold uppercase tracking-wider">${state.sessionData.type === 'intake' ? 'Intake' : state.sessionData.type === 'review_ahead' ? 'Ahead' : 'Review'}</span>
+                        <span class="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-bold">${state.sessionData.type === 'intake' ? `${state.sessionData.queue.length} Left` : `${state.currentCardIndex + 1} / ${state.sessionData.queue.length}`}</span>
+                    </div>
+                </div>
+
+                ${sessionProgressHtml}
+
+                <div class="flex-1 flex flex-col items-center justify-center relative w-full">
+                    ${!state.showAnswer && state.timerEnabled ? `
+                    <div class="w-full max-w-md h-2 bg-slate-200 rounded-full mb-6 overflow-hidden">
+                        <div id="timer-bar-fill" class="h-full ${timerColor} transition-all duration-1000 ease-linear" style="width: ${progressPercentage}%"></div>
+                    </div>
+                    ` : ''}
+                    
+                    <div class="w-full max-w-md bg-white rounded-3xl shadow-xl p-8 md:p-10 text-center border border-slate-100 flex flex-col min-h-[350px] justify-center relative transition-all duration-300">
+                        ${state.sessionData.type === 'review' ? `
+                        <div class="absolute top-4 right-4 flex gap-1">${lvlDots}</div>
+                        ` : ''}
+                        <div class="text-left w-full mb-6">
+                            <span class="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-100 px-2 py-1 rounded">
+                                ${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}
+                            </span>
+                        </div>
+                        
+                        ${renderFormattedQuestion(currentCard.question, state.showAnswer, currentCard.answer)}
+                        
+                        ${currentCard.simplifiedQuestion ? `
+                        <div class="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-left relative overflow-hidden fade-in shadow-sm">
+                            <span class="text-[10px] font-black text-amber-600 uppercase tracking-widest block mb-1.5"><i class="ph-fill ph-lightbulb"></i> Simplified Question & Choices (Taglish)</span>
+                            <p class="text-sm font-medium text-amber-900 whitespace-pre-wrap">${escapeHTML(currentCard.simplifiedQuestion)}</p>
+                        </div>
+                        ` : currentCard.isGeneratingSimplify ? `
+                        <div class="mb-6 p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-center gap-2 animate-pulse text-slate-500 font-bold text-xs w-full max-w-[200px] mx-auto">
+                            <i class="ph-bold ph-spinner-gap animate-spin text-lg"></i> Sini-simplify...
+                        </div>
+                        ` : `
+                        <div class="mb-6 text-center">
+                             <button onclick="window.generateAISimplification('${currentCard.id}')" class="text-xs font-bold text-slate-400 hover:text-amber-500 transition-colors flex items-center justify-center gap-1 mx-auto bg-slate-50 hover:bg-amber-50 px-3 py-1.5 rounded-full border border-slate-200 hover:border-amber-200">
+                                <i class="ph-fill ph-magic-wand"></i> Simplify Question & Choices (AI)
+                             </button>
+                        </div>
+                        `}
+
+                        ${state.showAnswer ? `
+                        <div class="fade-in slide-up duration-300 w-full mt-2">
+                            <div class="p-6 bg-blue-50 border-2 border-blue-100 rounded-3xl text-center relative overflow-hidden">
+                                <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
+                                <span class="text-[10px] font-black text-blue-500 uppercase tracking-widest block mb-2"><i class="ph-fill ph-check-circle"></i> Answer / Definition</span>
+                                <p class="text-xl md:text-2xl text-blue-900 font-black whitespace-pre-wrap">${escapeHTML(currentCard.answer)}</p>
+                            </div>
+                            
+                            ${currentCard.explanation ? `
+                            <div class="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-2xl text-left relative overflow-hidden fade-in shadow-sm">
+                                <span class="text-[10px] font-black text-purple-600 uppercase tracking-widest block mb-1.5"><i class="ph-fill ph-magic-wand"></i> AI Tutor Explanation (Saved Offline)</span>
+                                <p class="text-sm font-medium text-purple-900 whitespace-pre-wrap">${escapeHTML(currentCard.explanation)}</p>
+                            </div>
+                            ` : currentCard.isGeneratingAI ? `
+                            <div class="mt-4 p-4 bg-slate-100 rounded-2xl flex items-center justify-center gap-2 animate-pulse text-slate-500 font-bold text-sm border border-slate-200">
+                                <i class="ph-bold ph-spinner-gap animate-spin text-xl"></i> Nag-iisip si AI...
+                            </div>
+                            ` : `
+                            <button onclick="window.generateAIExplanation('${currentCard.id}')" class="mt-4 w-full py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-colors active:scale-95 border border-purple-200">
+                                <i class="ph-fill ph-sparkle text-lg"></i> Explain with AI (Taglish)
+                            </button>
+                            `}
+
+                            ${currentCard.derivation ? `
+                            <div class="mt-3 p-4 bg-indigo-50 border border-indigo-200 rounded-2xl text-left relative overflow-hidden fade-in shadow-sm">
+                                <span class="text-[10px] font-black text-indigo-600 uppercase tracking-widest block mb-1.5"><i class="ph-fill ph-math-operations"></i> Formula Breakdown / Derivation</span>
+                                <p class="text-sm font-medium text-indigo-900 whitespace-pre-wrap leading-relaxed">${escapeHTML(currentCard.derivation)}</p>
+                            </div>
+                            ` : currentCard.isGeneratingDerivation ? `
+                            <div class="mt-3 p-4 bg-slate-100 rounded-2xl flex items-center justify-center gap-2 animate-pulse text-slate-500 font-bold text-sm border border-slate-200">
+                                <i class="ph-bold ph-spinner-gap animate-spin text-xl"></i> Hinuhimay ang formula...
+                            </div>
+                            ` : `
+                            <button onclick="window.generateAIDerivation('${currentCard.id}')" class="mt-3 w-full py-3 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-colors active:scale-95 border border-indigo-200">
+                                <i class="ph-fill ph-math-operations text-lg"></i> Derive Formula (AI)
+                            </button>
+                            `}
+                        </div>
+                        ` : `
+                        <div class="mt-auto">
+                            <button onclick="window.revealAnswer()" class="mt-6 text-slate-400 hover:text-blue-600 font-semibold flex items-center justify-center gap-2 w-full transition-colors"><i class="ph-fill ph-keyboard text-xl"></i> Tap or press [SPACE] to reveal</button>
+                        </div>
+                        `}
+                    </div>
+                </div>
+
+                <div class="h-32 flex items-center justify-center gap-3 mt-4 w-full max-w-md mx-auto">
+                    ${state.showAnswer ? `
+                    <button onclick="window.handleAnswer('wrong')" class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 py-4 md:py-5 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm">
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MALI</span><span class="text-[10px] opacity-60">[1] Reset</span>
+                    </button>
+                    <button onclick="window.handleAnswer('correct')" class="flex-1 bg-green-500 hover:bg-green-600 text-white py-4 md:py-5 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-green-200">
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> TAMA</span><span class="text-[10px] opacity-80">[2] +1 Lvl</span>
+                    </button>
+                    <button onclick="window.handleAnswer('perfect')" class="flex-1 bg-amber-400 hover:bg-amber-500 text-white py-4 md:py-5 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-amber-200">
+                        <span class="flex items-center gap-1"><i class="ph-fill ph-shooting-star text-xl"></i> PERFECT</span><span class="text-[10px] opacity-80">[3] +3 Lvl</span>
+                    </button>
+                    ` : ''}
+                </div>
+            </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:App Initialization & Main Render ---
+        function renderApp() {
+            const appDiv = document.getElementById('app');
+            
+            if (!state.isLoaded) {
+                appDiv.innerHTML = `<div class="flex-1 flex items-center justify-center font-bold text-slate-500 animate-pulse text-lg"><i class="ph-bold ph-spinner-gap animate-spin mr-2"></i> Connecting to Vault...</div>`;
+                return;
+            }
+
+            // Authentication View
+            if (isFirebaseConfigured && !userId) {
+                appDiv.innerHTML = `
+                    <div class="flex-1 flex items-center justify-center bg-slate-50 p-6">
+                        <div class="bg-white p-8 md:p-12 rounded-3xl shadow-xl border border-slate-100 max-w-md w-full text-center zoom-in">
+                            <div class="w-20 h-20 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-200">
+                                <i class="ph-fill ph-book-open text-white text-4xl"></i>
+                            </div>
+                            <h1 class="text-3xl font-extrabold text-slate-900 mb-2">Elements Vault</h1>
+                            <p class="text-slate-500 mb-8">Sign in to sync your progress across all your devices and access your offline database.</p>
+                            <button onclick="window.loginWithGoogle()" class="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-4 px-6 rounded-xl transition-all shadow-md flex items-center justify-center gap-3">
+                                <i class="ph-bold ph-google-logo text-xl"></i> Continue with Google
+                            </button>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Single Session Blocked View
+            if (state.sessionConflict) {
+                appDiv.innerHTML = `
+                    <div class="flex-1 flex items-center justify-center bg-slate-900 p-6">
+                        <div class="bg-white p-8 rounded-3xl max-w-md w-full text-center zoom-in">
+                            <div class="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <i class="ph-fill ph-warning-circle text-4xl"></i>
+                            </div>
+                            <h2 class="text-2xl font-bold text-slate-900 mb-2">Session Paused</h2>
+                            <p class="text-slate-600 mb-6">You opened Mechanical Elements on another tab or device. To prevent data corruption, this screen has been locked.</p>
+                            <button onclick="window.takeoverSession()" class="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-md shadow-rose-200">
+                                Use Here Instead
+                            </button>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            let content = '';
+            content += renderNav();
+            
+            content += `<main class="flex-1">`;
+            if (state.currentView === 'dashboard') content += renderDashboard();
+            else if (state.currentView === 'add') content += renderDatabase();
+            else if (state.currentView === 'stats') content += renderStats();
+            else if (state.currentView === 'forecast') content += renderForecast();
+            else if (state.currentView === 'session') content += renderSession();
+            content += `</main>`;
+            
+            // --- STREAMING_CHUNK:Edit Term Modal Overlay ---
+            if (state.editingTermId) {
+                const termToEdit = state.terms.find(t => t.id === state.editingTermId);
+                content += `
+                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl zoom-in flex flex-col max-h-[90vh]">
+                        <h3 class="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2"><i class="ph-bold ph-pencil-simple text-blue-600"></i> Edit Card</h3>
+                        <div class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
+                            <div>
+                                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">Question / Term</label>
+                                <textarea id="edit-term-q" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none min-h-[120px] font-medium text-slate-800">${escapeHTML(termToEdit.question)}</textarea>
+                            </div>
+                            <div>
+                                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">Answer / Definition</label>
+                                <textarea id="edit-term-a" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none min-h-[100px] font-medium text-slate-800">${escapeHTML(termToEdit.answer)}</textarea>
+                            </div>
+                        </div>
+                        <div class="flex gap-3 mt-6 pt-4 border-t border-slate-100">
+                            <button onclick="window.cancelEditTerm()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-colors">Cancel</button>
+                            <button onclick="window.saveEditTerm()" class="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-colors shadow-lg shadow-blue-200">Save Changes</button>
+                        </div>
+                    </div>
+                </div>
+                `;
+            }
+
+            appDiv.innerHTML = content;
+
+            // --- STREAMING_CHUNK:Rendering Math Formulas ---
+            if (window.renderMathInElement) {
+                renderMathInElement(appDiv, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\(', right: '\\)', display: false},
+                        {left: '\\[', right: '\\]', display: true}
+                    ],
+                    throwOnError: false
+                });
+            }
+        }
+
+        window.initApp = () => {
+            loadData();
+            window.logDailyStats(); // Log stats on startup
+            renderApp();
+        };
+
+        // Initialize safely after DOM elements are accessible
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', window.initApp);
+        } else {
+            window.initApp();
+        }
+
+    </script>
+</body>
+</html>
