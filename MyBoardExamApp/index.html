@@ -112,7 +112,7 @@
             parkingLotFilter: false, // View/filter Parking Lot cards
             erroneousFilter: false, // View/filter Erroneous Tracker cards
             geminiApiKey: '', // Synced per-account via Firebase Vault & localStorage (never hardcoded in GitHub)
-            geminiModel: 'gemini-3.5-flash-lite', // Active AI model (500 RPD Flash-Lite default, synced per-account)
+            geminiModel: 'auto', // Active AI model ('auto' discovers & locks onto 500 RPD Flash-Lite / 14.4k RPD Gemma)
             showApiKeyModal: false,
             forecastMode: 'actual', 
             forecastQuota: 50,
@@ -216,7 +216,11 @@
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
             if (savedApiKey) state.geminiApiKey = savedApiKey;
-            if (savedModel) state.geminiModel = savedModel;
+            if (savedModel && savedModel !== 'gemini-3-flash-preview') {
+                state.geminiModel = savedModel;
+            } else {
+                state.geminiModel = 'auto';
+            }
             if (savedSimForecast) {
                 state.simulatedForecastData = JSON.parse(savedSimForecast);
                 state.simulatedForecastData.forEach(d => d.date = new Date(d.date)); // Revive date objects
@@ -358,9 +362,12 @@
                         state.geminiApiKey = data.geminiApiKey;
                         localStorage.setItem('elementVaultGeminiKey', state.geminiApiKey);
                     }
-                    if (data.geminiModel) {
+                    if (data.geminiModel && data.geminiModel !== 'gemini-3-flash-preview') {
                         state.geminiModel = data.geminiModel;
                         localStorage.setItem('elementVaultGeminiModel', state.geminiModel);
+                    } else {
+                        state.geminiModel = 'auto';
+                        localStorage.setItem('elementVaultGeminiModel', 'auto');
                     }
                     
                     ensureValidActiveFolder();
@@ -387,7 +394,7 @@
                         terms: cleanTermsForStorage(state.terms),
                         history: state.history,
                         geminiApiKey: state.geminiApiKey || '',
-                        geminiModel: state.geminiModel || 'gemini-3.5-flash-lite'
+                        geminiModel: state.geminiModel || 'auto'
                     });
                 } catch (e) {
                     console.error("Error saving to cloud:", e);
@@ -396,18 +403,59 @@
         };
 
         const AVAILABLE_GEMINI_MODELS = [
-            { id: 'gemini-3.5-flash-lite', label: '🔥 Gemini 3.5 Flash Lite (500 RPD / 15 RPM - Best Free Quota!)' },
-            { id: 'auto', label: '⚡ Auto Flash-Lite (Kusang hahanapin ang 500 RPD Flash-Lite model)' },
-            { id: 'gemini-3.5-flash-lite-preview', label: 'Gemini 3.5 Flash Lite Preview (500 RPD)' },
-            { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (High Free Quota)' },
+            { id: 'auto', label: '⚡ Auto Best Quota (500 RPD Flash-Lite / 14.4K RPD Gemma 3)' },
+            { id: 'gemini-3.1-flash-lite-preview', label: '🔥 Gemini 3.1 / 3.5 Flash Lite (500 RPD Limit)' },
+            { id: 'gemini-2.5-flash-lite', label: '🔥 Gemini 2.5 Flash Lite (500 RPD Limit)' },
+            { id: 'gemma-3-27b-it', label: '💎 Gemma 3 27B IT (14,400 RPD Free sa Google Key!)' },
             { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Standard)' },
-            { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite' },
+            { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
             { id: 'gemini-3-flash-preview', label: '⚠️ Gemini 3 Flash (20 RPD limit lang sa Free Tier!)' },
             { id: 'llama-3.3-70b-versatile', label: 'Groq: Llama 3.3 70B (14,400 RPD Free w/ gsk_ key)' },
             { id: 'llama-3.1-8b-instant', label: 'Groq: Llama 3.1 8B Instant (Ultra Fast w/ gsk_ key)' }
         ];
 
         const discoveredModelsByKey = {};
+        const workingModelByKey = {};
+        const deadModelsByKey = {};
+
+        function scoreModelForFreeTier(m) {
+            const id = String(m.id || '').toLowerCase();
+            const disp = String(m.displayName || '').toLowerCase();
+            const combined = `${id} ${disp}`;
+
+            // Exclude non-text or deprecated zero-quota models
+            if (/tts|image|imagen|veo|embedding|aqa|audio|robotics|computer-use|learnlm|thinking|2\.0-flash-exp|2\.0-flash-lite-preview|1\.5/i.test(id)) {
+                return -9999;
+            }
+            // Gemini 3 Flash has only 20 RPD on free tier -> keep as absolute last resort
+            if (/gemini-3-flash/i.test(id) && !/lite/i.test(combined)) {
+                return 10;
+            }
+
+            let ver = 20;
+            const verMatch = combined.match(/(\d+\.\d+|\d+)/);
+            if (verMatch) {
+                const parsed = parseFloat(verMatch[1]);
+                if (!isNaN(parsed) && parsed <= 9) ver = Math.round(parsed * 10);
+            }
+
+            // 1. Flash-Lite models (500 RPD on Free Tier!) -> Newest version first (3.5 / 3.1 / 2.5)
+            if (/lite/i.test(combined) && /flash/i.test(combined)) {
+                const stableBonus = /preview|exp/i.test(id) ? 0 : 5;
+                return 1000 + (ver * 10) + stableBonus;
+            }
+            // 2. Gemma 3 IT models on Google AI Studio (14,400 RPD on Free Tier with standard AIza key!)
+            if (/^gemma-3-.*-it$/i.test(id)) {
+                if (/27b/i.test(id)) return 950;
+                if (/12b/i.test(id)) return 940;
+                return 920;
+            }
+            // 3. Standard Flash models (2.5 Flash, etc.)
+            if (/flash/i.test(combined)) {
+                return 700 + (ver * 10);
+            }
+            return 100 + ver;
+        }
 
         async function discoverKeyModels(activeKey) {
             if (!activeKey || activeKey.startsWith('gsk_')) return null;
@@ -416,28 +464,36 @@
                 const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${activeKey}`);
                 if (!res.ok) return null;
                 const data = await res.json();
-                const list = (data.models || []).filter(m =>
+                const rawList = (data.models || []).filter(m =>
                     Array.isArray(m.supportedGenerationMethods) &&
                     m.supportedGenerationMethods.includes('generateContent')
-                ).map(m => ({
-                    id: String(m.name || '').replace(/^models\//, ''),
-                    displayName: String(m.displayName || m.name || '')
-                })).filter(m => m.id);
+                ).map(m => {
+                    const obj = {
+                        id: String(m.name || '').replace(/^models\//, ''),
+                        displayName: String(m.displayName || m.name || '')
+                    };
+                    obj.score = scoreModelForFreeTier(obj);
+                    return obj;
+                }).filter(m => m.id && m.score > 0);
 
-                if (list.length > 0) {
-                    discoveredModelsByKey[activeKey] = list;
-                    // Also add any newly discovered Flash-Lite / Flash models into AVAILABLE_GEMINI_MODELS dropdown
-                    list.forEach(dm => {
-                        if (/flash/i.test(dm.id) && !AVAILABLE_GEMINI_MODELS.some(existing => existing.id === dm.id)) {
+                // Sort highest free-tier quota models first (Newest Flash-Lite 500 RPD -> Gemma 3 14.4K RPD -> Standard Flash)
+                rawList.sort((a, b) => b.score - a.score);
+
+                if (rawList.length > 0) {
+                    discoveredModelsByKey[activeKey] = rawList;
+                    rawList.forEach(dm => {
+                        if (dm.score >= 700 && !AVAILABLE_GEMINI_MODELS.some(existing => existing.id === dm.id)) {
                             const isLite = /lite/i.test(dm.id) || /lite/i.test(dm.displayName);
-                            AVAILABLE_GEMINI_MODELS.splice(isLite ? 1 : AVAILABLE_GEMINI_MODELS.length - 2, 0, {
+                            const isGemma = /gemma/i.test(dm.id);
+                            const badge = isLite ? '🔥 (500 RPD) ' : isGemma ? '💎 (14.4K RPD) ' : '';
+                            AVAILABLE_GEMINI_MODELS.splice(1, 0, {
                                 id: dm.id,
-                                label: `${ isLite ? '🔥 ' : '' }${dm.displayName} (${dm.id})`
+                                label: `${badge}${dm.displayName} [${dm.id}]`
                             });
                         }
                     });
                 }
-                return list;
+                return rawList;
             } catch (e) {
                 return null;
             }
@@ -452,18 +508,17 @@
                 showToast("Maglagay muna ng Gemini API Key (AIza...).", "error");
                 return;
             }
-            showToast("Checking available models on your API key...");
+            showToast("Scanning your API key for 500 RPD Flash-Lite models...");
             delete discoveredModelsByKey[firstGeminiKey];
+            delete deadModelsByKey[firstGeminiKey];
+            delete workingModelByKey[firstGeminiKey];
             const list = await discoverKeyModels(firstGeminiKey);
             if (list && list.length > 0) {
-                const liteModel = list.find(m => /3\.5.*lite/i.test(m.id) || /3\.5.*lite/i.test(m.displayName))
-                    || list.find(m => /lite/i.test(m.id) || /lite/i.test(m.displayName));
-                if (liteModel) {
-                    state.geminiModel = liteModel.id;
-                    localStorage.setItem('elementVaultGeminiModel', liteModel.id);
-                }
+                const bestModel = list[0];
+                state.geminiModel = bestModel.id;
+                localStorage.setItem('elementVaultGeminiModel', bestModel.id);
                 renderApp();
-                showToast(`Found ${list.length} models! Selected: ${state.geminiModel}`);
+                showToast(`Detected ${list.length} valid models! Best: ${bestModel.displayName} (${bestModel.id})`);
             } else {
                 showToast("Could not fetch model list. Check your API key.", "error");
             }
@@ -496,7 +551,7 @@
             const input = document.getElementById('gemini-api-key-input');
             const modelSelect = document.getElementById('gemini-model-select');
             const val = input ? input.value.trim() : '';
-            const modelVal = modelSelect ? modelSelect.value : (state.geminiModel || 'gemini-3.5-flash-lite');
+            const modelVal = modelSelect ? modelSelect.value : (state.geminiModel || 'auto');
             state.geminiApiKey = val;
             state.geminiModel = modelVal;
             localStorage.setItem('elementVaultGeminiKey', val);
@@ -567,40 +622,54 @@
                 }
 
                 // 2. Standard Google Gemini API Key (AIza...)
-                // Discover exact model IDs supported by this API key (0 quota cost, cached per key)
-                const discovered = await discoverKeyModels(activeKey);
-                let exact35LiteId = null;
-                let allDiscoveredLiteIds = [];
-                if (discovered && discovered.length > 0) {
-                    const m35 = discovered.find(m => /3\.5.*lite/i.test(m.id) || /3\.5.*lite/i.test(m.displayName));
-                    if (m35) exact35LiteId = m35.id;
-                    allDiscoveredLiteIds = discovered
-                        .filter(m => /lite/i.test(m.id) || /lite/i.test(m.displayName))
-                        .map(m => m.id);
-                }
+                if (!deadModelsByKey[activeKey]) deadModelsByKey[activeKey] = new Set();
+                const deadSet = deadModelsByKey[activeKey];
 
-                const geminiFallbackOrder = [
-                    ...(exact35LiteId ? [exact35LiteId] : []),
-                    ...allDiscoveredLiteIds,
-                    'gemini-3.5-flash-lite',
-                    'gemini-3.5-flash-lite-preview',
-                    'gemini-2.5-flash-lite',
-                    'gemini-2.0-flash-lite',
-                    'gemini-2.5-flash'
-                ].filter((v, i, a) => v && a.indexOf(v) === i);
+                // Discover exact valid model IDs supported by this API key (0 quota cost, sorted newest Flash-Lite 500 RPD first!)
+                const discovered = await discoverKeyModels(activeKey);
+                let candidatePool = [];
+
+                if (discovered && discovered.length > 0) {
+                    // Use ONLY verified model IDs that actually exist on Google's server for this key (prevents 404 NotFound!)
+                    candidatePool = discovered.map(m => m.id).filter(id => !deadSet.has(id));
+                } else {
+                    candidatePool = [
+                        'gemini-2.5-flash-lite',
+                        'gemini-3.1-flash-lite-preview',
+                        'gemma-3-27b-it',
+                        'gemini-2.5-flash',
+                        'gemini-2.0-flash'
+                    ].filter(id => !deadSet.has(id));
+                }
 
                 let modelsToTry = [];
-                const chosen = state.geminiModel || 'gemini-3.5-flash-lite';
-                if (chosen === 'auto' || chosen.startsWith('llama-')) {
-                    modelsToTry = geminiFallbackOrder;
-                } else if (chosen === 'gemini-3.5-flash-lite' && exact35LiteId) {
-                    modelsToTry = [exact35LiteId, ...geminiFallbackOrder.filter(m => m !== exact35LiteId).slice(0, 2)];
-                } else {
-                    modelsToTry = [
-                        chosen,
-                        ...geminiFallbackOrder.filter(m => m !== chosen).slice(0, 2)
-                    ];
+                const chosen = state.geminiModel || 'auto';
+
+                // Priority 1: If user chose a specific model and it's not dead, match it against discovered models first
+                if (chosen !== 'auto' && !chosen.startsWith('llama-') && !deadSet.has(chosen)) {
+                    if (discovered && discovered.length > 0) {
+                        const exactMatch = discovered.find(m => m.id === chosen);
+                        const fuzzyLiteMatch = (!exactMatch && /lite/i.test(chosen))
+                            ? discovered.find(m => (/lite/i.test(m.id) || /lite/i.test(m.displayName)) && !deadSet.has(m.id))
+                            : null;
+                        if (exactMatch) {
+                            modelsToTry.push(exactMatch.id);
+                        } else if (fuzzyLiteMatch) {
+                            modelsToTry.push(fuzzyLiteMatch.id);
+                        }
+                    } else {
+                        modelsToTry.push(chosen);
+                    }
                 }
+
+                // Priority 2: Previously verified working model in this session
+                if (workingModelByKey[activeKey] && !deadSet.has(workingModelByKey[activeKey])) {
+                    modelsToTry.push(workingModelByKey[activeKey]);
+                }
+
+                // Priority 3: All other high-quota discovered models (500 RPD Flash-Lite -> 14.4K RPD Gemma 3 -> Standard Flash)
+                modelsToTry.push(...candidatePool);
+                modelsToTry = modelsToTry.filter((v, i, a) => v && a.indexOf(v) === i).slice(0, 6);
 
                 for (let mIdx = 0; mIdx < modelsToTry.length; mIdx++) {
                     const modelName = modelsToTry[mIdx];
@@ -618,15 +687,24 @@
                             const text = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
                             if (text) {
                                 currentKeyIndex = idx;
+                                workingModelByKey[activeKey] = modelName;
+                                if (state.geminiModel !== 'auto' && state.geminiModel !== modelName) {
+                                    state.geminiModel = modelName;
+                                    localStorage.setItem('elementVaultGeminiModel', modelName);
+                                }
                                 return text;
                             }
                         } else {
                             const errBody = await response.json().catch(() => ({}));
                             const errText = errBody.error?.message || `HTTP ${response.status}`;
-                            lastErrorMsg = `${modelName}: ${errText}`;
-                            // If API key itself is invalid (400 API_KEY_INVALID or 403), break model loop and try next key
+                            lastErrorMsg = `${modelName} (${response.status}): ${errText}`;
+                            // If API key itself is invalid (403 or 400 API_KEY_INVALID), break model loop and try next key
                             if (response.status === 403 || (response.status === 400 && /key/i.test(errText))) {
                                 break;
+                            }
+                            // Mark this specific model as dead (404 NotFound / 429 Quota Exceeded / 400 Unsupported) so we immediately switch to the next working model!
+                            if (response.status === 404 || response.status === 429 || response.status === 400) {
+                                deadSet.add(modelName);
                             }
                         }
                     } catch (e) {
@@ -636,8 +714,8 @@
             }
 
             if (!silent && lastErrorMsg) {
-                const shortErr = lastErrorMsg.length > 90 ? lastErrorMsg.slice(0, 90) + '…' : lastErrorMsg;
-                showToast(`AI Quota/Error: ${shortErr}`, "error");
+                const shortErr = lastErrorMsg.length > 95 ? lastErrorMsg.slice(0, 95) + '…' : lastErrorMsg;
+                showToast(`AI Error: ${shortErr}`, "error");
             }
             return null;
         }
@@ -1172,8 +1250,6 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     updateTerm(termId, { keywords, explanation, isGeneratingAI: false });
                     renderApp();
                     return;
-                } else {
-                    showToast("AI request failed. Check your Gemini API Key (🔑) or internet connection.", "error");
                 }
             } catch (e) {
                 showToast("Offline / Network error. Keywords underlined locally; you can type your notes below.", "error");
