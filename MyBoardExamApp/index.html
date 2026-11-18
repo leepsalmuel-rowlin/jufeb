@@ -43,6 +43,16 @@
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Board Exam Typography (Philippine ME Board Exam Simulation) */
+        .board-exam-font {
+            font-family: 'Courier New', Courier, monospace;
+            letter-spacing: -0.01em;
+        }
+        .touch-card {
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
     </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-blue-200">
@@ -77,6 +87,11 @@
             sessionData: null,
             currentCardIndex: 0,
             showAnswer: false,
+            revealStep: 0, // 0: chunk2 blurred, 1: full stem visible, 2: all choices visible
+            revealedChoicesCount: 0, // Number of choices unblurred one-by-one (0 -> 1(A) -> 2(B) -> 3(C) -> 4(D))
+            selectedChoice: null,
+            currentShuffledChoices: null,
+            showKeywordsExp: false,
             timerEnabled: true,
             timeLeft: 10,
             timePerCard: 10, 
@@ -92,6 +107,11 @@
             editingTermId: null, 
             sessionConflict: false, 
             selectedTerms: [], 
+            expandedFolders: [], // File Explorer open folder IDs (collapsed by default)
+            hideFolderSidebar: false, // Toggleable File Explorer panel visibility
+            parkingLotFilter: false, // View/filter Parking Lot cards
+            geminiApiKey: '', // Synced per-account via Firebase Vault & localStorage (never hardcoded in GitHub)
+            showApiKeyModal: false,
             forecastMode: 'actual', 
             forecastQuota: 50,
             forecastExtra: 0,
@@ -165,14 +185,34 @@
         };
 
         // --- DATA MANAGEMENT & CLOUD SYNC ---
+        function ensureValidActiveFolder() {
+            if (state.folders.length > 0 && !state.folders.some(f => f.id === state.activeFolderId)) {
+                const folderWithCards = state.folders.find(f => state.terms.some(t => t.folderId === f.id));
+                state.activeFolderId = folderWithCards ? folderWithCards.id : state.folders[0].id;
+            }
+        }
+
+        function cleanTermsForStorage(terms) {
+            return (terms || []).map(t => {
+                const copy = { ...t };
+                delete copy.isGeneratingAI;
+                delete copy.isGeneratingDerivation;
+                delete copy.isGeneratingSimplify;
+                delete copy.isSplittingStem;
+                return copy;
+            });
+        }
+
         function loadData() {
             const savedFolders = localStorage.getItem('elementVaultFolders');
             const savedTerms = localStorage.getItem('elementVaultTerms');
             const savedHistory = localStorage.getItem('elementVaultHistory');
             const savedSimForecast = localStorage.getItem('elementVaultSimForecast');
+            const savedApiKey = localStorage.getItem('elementVaultGeminiKey');
             
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
+            if (savedApiKey) state.geminiApiKey = savedApiKey;
             if (savedSimForecast) {
                 state.simulatedForecastData = JSON.parse(savedSimForecast);
                 state.simulatedForecastData.forEach(d => d.date = new Date(d.date)); // Revive date objects
@@ -191,13 +231,18 @@
                 });
                 if (needsSave) saveData();
             }
+            ensureValidActiveFolder();
             state.isLoaded = true;
         }
 
         function saveData() {
+            const cleanedTerms = cleanTermsForStorage(state.terms);
             localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
-            localStorage.setItem('elementVaultTerms', JSON.stringify(state.terms));
+            localStorage.setItem('elementVaultTerms', JSON.stringify(cleanedTerms));
             localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
+            if (state.geminiApiKey !== undefined) {
+                localStorage.setItem('elementVaultGeminiKey', state.geminiApiKey || '');
+            }
             
             if (window.saveToCloud) window.saveToCloud();
         }
@@ -302,9 +347,14 @@
                     if (data.folders) state.folders = data.folders;
                     if (data.terms) state.terms = data.terms;
                     if (data.history) state.history = data.history;
+                    if (data.geminiApiKey) {
+                        state.geminiApiKey = data.geminiApiKey;
+                        localStorage.setItem('elementVaultGeminiKey', state.geminiApiKey);
+                    }
                     
+                    ensureValidActiveFolder();
                     localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
-                    localStorage.setItem('elementVaultTerms', JSON.stringify(state.terms));
+                    localStorage.setItem('elementVaultTerms', JSON.stringify(cleanTermsForStorage(state.terms)));
                     localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
                 }
             } catch (e) {
@@ -323,13 +373,297 @@
                 try {
                     await setDoc(docRef, {
                         folders: state.folders,
-                        terms: state.terms,
-                        history: state.history
+                        terms: cleanTermsForStorage(state.terms),
+                        history: state.history,
+                        geminiApiKey: state.geminiApiKey || ''
                     });
                 } catch (e) {
                     console.error("Error saving to cloud:", e);
                 }
             }, 2500); 
+        };
+
+        window.openApiKeyModal = (event) => {
+            if (event) event.stopPropagation();
+            clearInterval(timerInterval);
+            state.showApiKeyModal = true;
+            renderApp();
+        };
+
+        window.closeApiKeyModal = () => {
+            state.showApiKeyModal = false;
+            if (state.currentView === 'session') manageTimer();
+            renderApp();
+        };
+
+        window.saveGeminiApiKey = () => {
+            const input = document.getElementById('gemini-api-key-input');
+            const val = input ? input.value.trim() : '';
+            state.geminiApiKey = val;
+            localStorage.setItem('elementVaultGeminiKey', val);
+            saveData();
+            state.showApiKeyModal = false;
+            if (state.currentView === 'session') manageTimer();
+            renderApp();
+            showToast(val ? "Gemini API Key saved & synced to your account! 🔑" : "Gemini API Key cleared.");
+        };
+
+        async function callGeminiAPI(systemPrompt, userQuery) {
+            const apiKey = (state.geminiApiKey || '').trim();
+            if (!apiKey) return null;
+
+            const models = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.0-flash'];
+            for (const modelName of models) {
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: userQuery }] }],
+                            systemInstruction: { parts: [{ text: systemPrompt }] },
+                            generationConfig: { responseMimeType: "application/json" }
+                        })
+                    });
+                    if (response.ok) {
+                        const result = await response.json();
+                        const text = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        if (text) return text;
+                    }
+                } catch (e) {
+                    // Try next model or fallback
+                }
+            }
+            return null;
+        }
+
+        // --- QUESTION PARSING, PROGRESSIVE BLUR & DYNAMIC CHOICE SHUFFLING HELPERS ---
+        function parseQuestionAndChoices(rawQuestion) {
+            const raw = String(rawQuestion || '');
+            if (!raw.includes('[Choices]:')) {
+                return { stem: raw.trim(), choicesRaw: '', hasChoices: false, parsedChoices: null };
+            }
+            const parts = raw.split('[Choices]:');
+            const stem = parts[0].trim();
+            const choicesRaw = (parts[1] || '').trim();
+
+            const regex4 = /A\.\s*(.*?)\s*B\.\s*(.*?)\s*C\.\s*(.*?)\s*D\.\s*(.*)/is;
+            const match4 = choicesRaw.match(regex4);
+            if (match4) {
+                return {
+                    stem,
+                    choicesRaw,
+                    hasChoices: true,
+                    parsedChoices: [
+                        { origLetter: 'A', text: match4[1].trim() },
+                        { origLetter: 'B', text: match4[2].trim() },
+                        { origLetter: 'C', text: match4[3].trim() },
+                        { origLetter: 'D', text: match4[4].trim() }
+                    ]
+                };
+            }
+
+            const regex3 = /A\.\s*(.*?)\s*B\.\s*(.*?)\s*C\.\s*(.*)/is;
+            const match3 = choicesRaw.match(regex3);
+            if (match3) {
+                return {
+                    stem,
+                    choicesRaw,
+                    hasChoices: true,
+                    parsedChoices: [
+                        { origLetter: 'A', text: match3[1].trim() },
+                        { origLetter: 'B', text: match3[2].trim() },
+                        { origLetter: 'C', text: match3[3].trim() }
+                    ]
+                };
+            }
+
+            return { stem, choicesRaw, hasChoices: true, parsedChoices: null };
+        }
+
+        function isLongQuestionStem(stemText) {
+            const clean = String(stemText || '').trim();
+            const explicitLines = clean.split(/\r?\n/).filter(l => l.trim().length > 0);
+            if (explicitLines.length >= 3) return true;
+            // In Courier New monospace inside the review card (~42-48 chars/line), 3+ lines is >= 110 characters
+            return clean.length >= 110;
+        }
+
+        function fallbackLogicalStemSplit(stemText) {
+            const clean = String(stemText || '').trim();
+            if (!isLongQuestionStem(clean)) return [clean];
+
+            // 1. Check for Roman numeral list or multi-sentence boundary
+            const trapOrQuestionRegex = /\b(which of the following|what is the|what are the|determine the|find the|calculate the|this phenomenon is|this process is|it is called|is called|is known as|is termed|the allowance is|some metal parts|the sum of these|there must be|except\b|not true)/ig;
+            let bestIdx = -1;
+            let match;
+            while ((match = trapOrQuestionRegex.exec(clean)) !== null) {
+                const idx = match.index;
+                if (idx >= clean.length * 0.28 && idx <= clean.length * 0.85) {
+                    bestIdx = idx;
+                    break;
+                }
+            }
+
+            if (bestIdx !== -1) {
+                const c1 = clean.slice(0, bestIdx).trim();
+                const c2 = clean.slice(bestIdx).trim();
+                if (c1 && c2) return [c1, c2];
+            }
+
+            // 2. Sentence boundary (. / ; / ?) between 30% and 80%
+            const punctRegex = /[.;?]\s+/g;
+            let punctMatch;
+            let candidateSplit = -1;
+            const mid = clean.length * 0.55;
+            while ((punctMatch = punctRegex.exec(clean)) !== null) {
+                const splitPos = punctMatch.index + punctMatch[0].length;
+                if (splitPos >= clean.length * 0.25 && splitPos <= clean.length * 0.85) {
+                    if (candidateSplit === -1 || Math.abs(splitPos - mid) < Math.abs(candidateSplit - mid)) {
+                        candidateSplit = splitPos;
+                    }
+                }
+            }
+            if (candidateSplit !== -1) {
+                return [clean.slice(0, candidateSplit).trim(), clean.slice(candidateSplit).trim()];
+            }
+
+            // 3. Comma boundary near middle
+            const commaRegex = /,\s+/g;
+            let commaMatch;
+            while ((commaMatch = commaRegex.exec(clean)) !== null) {
+                const splitPos = commaMatch.index + commaMatch[0].length;
+                if (splitPos >= clean.length * 0.35 && splitPos <= clean.length * 0.75) {
+                    if (candidateSplit === -1 || Math.abs(splitPos - mid) < Math.abs(candidateSplit - mid)) {
+                        candidateSplit = splitPos;
+                    }
+                }
+            }
+            if (candidateSplit !== -1) {
+                return [clean.slice(0, candidateSplit).trim(), clean.slice(candidateSplit).trim()];
+            }
+
+            // 4. Word boundary around 58%
+            const targetIdx = Math.floor(clean.length * 0.58);
+            const spaceIdx = clean.indexOf(' ', targetIdx);
+            if (spaceIdx !== -1 && spaceIdx < clean.length - 10) {
+                return [clean.slice(0, spaceIdx).trim(), clean.slice(spaceIdx + 1).trim()];
+            }
+            return [clean];
+        }
+
+        function isLockedLastChoiceText(choiceText) {
+            const t = String(choiceText || '').trim();
+            if (/^(all|none)\.?$/i.test(t)) return true;
+            return /\b(all of the above|none of the above|all of these|none of these|all the above|none the above|both a and b|both a\s*&\s*b|both b and c|both a and c|a and b|a\s*&\s*b)\b/i.test(t);
+        }
+
+        function buildShuffledChoicesForCard(card) {
+            const parsed = parseQuestionAndChoices(card.question);
+            if (!parsed.parsedChoices) return null;
+
+            const cleanAns = String(card.answer || '').trim();
+            const upperAns = cleanAns.toUpperCase();
+            const isLetterAns = ['A', 'B', 'C', 'D'].includes(upperAns);
+
+            const annotated = parsed.parsedChoices.map(opt => {
+                let isCorrect = false;
+                if (isLetterAns) {
+                    isCorrect = (opt.origLetter === upperAns);
+                } else if (upperAns.startsWith(opt.origLetter + '.')) {
+                    isCorrect = true;
+                } else {
+                    isCorrect = (opt.text.trim().toUpperCase() === upperAns);
+                }
+                return {
+                    ...opt,
+                    isCorrect,
+                    lockLast: isLockedLastChoiceText(opt.text)
+                };
+            });
+
+            const normalChoices = annotated.filter(o => !o.lockLast);
+            const lockedChoices = annotated.filter(o => o.lockLast);
+
+            shuffleArray(normalChoices);
+
+            const combined = [...normalChoices, ...lockedChoices];
+            const letters = ['A', 'B', 'C', 'D'];
+            return combined.map((opt, idx) => ({
+                ...opt,
+                displayLetter: letters[idx] || String.fromCharCode(65 + idx)
+            }));
+        }
+
+        function initCardSessionState() {
+            if (!state.sessionData || !state.sessionData.queue[state.currentCardIndex]) return;
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const { stem } = parseQuestionAndChoices(currentCard.question);
+            const longStem = isLongQuestionStem(stem);
+
+            state.showAnswer = false;
+            state.selectedChoice = null;
+            state.showKeywordsExp = false;
+            state.revealedChoicesCount = 0;
+            state.currentShuffledChoices = {
+                cardId: currentCard.id,
+                questionSnapshot: currentCard.question,
+                answerSnapshot: currentCard.answer,
+                options: buildShuffledChoicesForCard(currentCard)
+            };
+
+            if (longStem) {
+                state.revealStep = 0; // Blur Chunk 2 + Blur All Choices
+                if (!Array.isArray(currentCard.stemChunks) || currentCard.stemChunks.length < 2) {
+                    window.ensureAIStemSplit(currentCard.id);
+                }
+            } else {
+                state.revealStep = 1; // Full short stem readable; Blur All Choices initially
+            }
+        }
+
+        window.ensureAIStemSplit = async (termId) => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term || term.isSplittingStem) return;
+            const { stem } = parseQuestionAndChoices(term.question);
+            if (!isLongQuestionStem(stem)) return;
+            if (Array.isArray(term.stemChunks) && term.stemChunks.length === 2) return;
+
+            // Set immediate fallback split so UI has zero delay, then refine/cache with AI
+            const initialChunks = fallbackLogicalStemSplit(stem);
+            if (initialChunks.length === 2) {
+                term.stemChunks = initialChunks;
+            }
+            term.isSplittingStem = true;
+
+            const systemPrompt = `You are a Philippine Mechanical Engineering Board Exam assistant. Split the provided long question stem into a MAXIMUM of 2 logical chunks:
+- chunk1: The setup, background, or given context.
+- chunk2: The actual question being asked, the concluding phrase, or trap words like "EXCEPT", "NOT", "FALSE".
+CRITICAL: chunk1 + " " + chunk2 must preserve the exact original words of the question stem in order. Respond ONLY with valid JSON: {"chunk1": "...", "chunk2": "..."}`;
+            const userQuery = `Question Stem:\n${stem}`;
+
+            try {
+                const rawText = await callGeminiAPI(systemPrompt, userQuery);
+                if (rawText) {
+                    const cleanedJson = rawText.replace(/^```json\s*|\s*```$/g, '').trim();
+                    const parsed = JSON.parse(cleanedJson);
+                    if (parsed && parsed.chunk1 && parsed.chunk2) {
+                        updateTerm(termId, {
+                            stemChunks: [String(parsed.chunk1).trim(), String(parsed.chunk2).trim()],
+                            isSplittingStem: false
+                        });
+                        renderApp();
+                        return;
+                    }
+                }
+            } catch (e) {
+                // Offline or API unavailable: cache the logical fallback split
+            }
+            updateTerm(termId, {
+                stemChunks: initialChunks,
+                isSplittingStem: false
+            });
+            renderApp();
         };
 
         // --- SESSION LOGIC ---
@@ -358,6 +692,10 @@
                 let futureCards = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate > todayStart && t.nextReviewDate <= todayStart + (state.lookAheadDays * MS_PER_DAY));
                 shuffleArray(futureCards);
                 queue = futureCards;
+            } else if (type === 'parking_lot') {
+                let parkedCards = state.terms.filter(t => t.parkingLot);
+                shuffleArray(parkedCards);
+                queue = parkedCards;
             }
 
             if (queue.length === 0) {
@@ -367,8 +705,8 @@
 
             state.sessionData = { type, queue, initialQueueLength: queue.length };
             state.currentCardIndex = 0;
-            state.showAnswer = false;
             state.timeLeft = state.timePerCard;
+            initCardSessionState();
             window.setView('session');
             manageTimer();
         };
@@ -421,26 +759,32 @@
                 state.sessionData.queue = nextQueue;
             } else {
                 if (answerType === 'perfect') {
-                    const nextLevel = Math.min(currentCard.level + 3, 6);
+                    const nextLevel = Math.min((currentCard.level || 1) + 3, 6);
                     updateTerm(currentCard.id, {
+                        isNew: false,
                         level: nextLevel,
                         nextReviewDate: todayStart + (INTERVALS[nextLevel] * MS_PER_DAY),
                         lastReviewedDate: Date.now(),
+                        graduatedDate: currentCard.graduatedDate || Date.now(),
                         correct: currentCorrect + 1
                     });
                 } else if (answerType === 'correct') {
-                    const nextLevel = Math.min(currentCard.level + 1, 6);
+                    const nextLevel = Math.min((currentCard.level || 1) + 1, 6);
                     updateTerm(currentCard.id, {
+                        isNew: false,
                         level: nextLevel,
                         nextReviewDate: todayStart + (INTERVALS[nextLevel] * MS_PER_DAY),
                         lastReviewedDate: Date.now(),
+                        graduatedDate: currentCard.graduatedDate || Date.now(),
                         correct: currentCorrect + 1
                     });
                 } else {
                     updateTerm(currentCard.id, {
+                        isNew: false,
                         level: 1,
                         nextReviewDate: todayStart + (INTERVALS[1] * MS_PER_DAY),
                         lastReviewedDate: Date.now(),
+                        graduatedDate: currentCard.graduatedDate || Date.now(),
                         incorrect: currentIncorrect + 1
                     });
                 }
@@ -452,20 +796,23 @@
                 }
             }
 
-            state.showAnswer = false;
             state.timeLeft = state.timePerCard;
+            initCardSessionState();
             renderApp();
             manageTimer();
         };
 
         function updateTerm(id, updates) {
             state.terms = state.terms.map(t => t.id === id ? { ...t, ...updates } : t);
+            if (state.sessionData && Array.isArray(state.sessionData.queue)) {
+                state.sessionData.queue = state.sessionData.queue.map(t => t.id === id ? { ...t, ...updates } : t);
+            }
             saveData();
         }
 
         function manageTimer() {
             clearInterval(timerInterval);
-            if (state.currentView !== 'session' || !state.sessionData) return;
+            if (state.currentView !== 'session' || !state.sessionData || state.editingTermId) return;
             
             if (state.timerEnabled && !state.showAnswer) {
                 timerInterval = setInterval(() => {
@@ -486,136 +833,207 @@
             renderApp();
         };
 
+        window.handleCardBodyTap = (event) => {
+            if (state.currentView !== 'session' || !state.sessionData || state.showAnswer) return;
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const { hasChoices } = parseQuestionAndChoices(currentCard.question);
+            const shuffledOpts = state.currentShuffledChoices && state.currentShuffledChoices.options ? state.currentShuffledChoices.options : null;
+            const totalChoicesCount = shuffledOpts ? shuffledOpts.length : (hasChoices ? 1 : 0);
+
+            if (state.revealStep === 0) {
+                state.revealStep = 1; // Unblur Chunk 2 first
+                renderApp();
+            } else if (totalChoicesCount > 0 && state.revealedChoicesCount < totalChoicesCount) {
+                state.revealedChoicesCount++; // Unblur choices one by one (A -> B -> C -> D)
+                if (state.revealedChoicesCount >= totalChoicesCount) {
+                    state.revealStep = 2;
+                }
+                renderApp();
+            } else {
+                window.revealAnswer();
+            }
+        };
+
+        window.selectChoiceOption = (event, displayLetter) => {
+            if (event) event.stopPropagation();
+            if (state.currentView !== 'session' || !state.sessionData || state.showAnswer) return;
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const { hasChoices } = parseQuestionAndChoices(currentCard.question);
+            const shuffledOpts = state.currentShuffledChoices && state.currentShuffledChoices.options ? state.currentShuffledChoices.options : null;
+            const totalChoicesCount = shuffledOpts ? shuffledOpts.length : (hasChoices ? 1 : 0);
+
+            // If stem or choices are still being progressively unblurred, advance the next unblur step
+            if (state.revealStep === 0 || state.revealedChoicesCount < totalChoicesCount) {
+                window.handleCardBodyTap(event);
+                return;
+            }
+
+            state.selectedChoice = displayLetter;
+            window.revealAnswer();
+        };
+
         window.revealAnswer = () => {
+            state.revealStep = 2;
+            state.revealedChoicesCount = 99;
             state.showAnswer = true;
             clearInterval(timerInterval);
             renderApp();
         };
 
-        window.generateAIExplanation = async (termId) => {
-            const termIndex = state.terms.findIndex(t => t.id === termId);
-            if (termIndex === -1) return;
-
-            const term = state.terms[termIndex];
-            term.isGeneratingAI = true;
-            renderApp();
-
-            const systemPrompt = "Act as a helpful Mechanical Engineering Board Exam tutor. Explain the answer briefly in Taglish. Limit to 2 to 3 short and concise sentences. State why the correct answer is right, and quickly point out why the other choices are wrong.";
-            const userQuery = `Question:\n${term.question}\n\nCorrect Answer:\n${term.answer}\n\nExplain this to me in Taglish.`;
-            
-            const apiKey = ""; 
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-
-            const payload = {
-                contents: [{ parts: [{ text: userQuery }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-            };
-
-            try {
-                const response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const result = await response.json();
-                const candidate = result.candidates?.[0];
-                
-                if (candidate && candidate.content?.parts?.[0]?.text) {
-                    term.explanation = candidate.content.parts[0].text;
-                } else {
-                    showToast("Failed to generate explanation. Baka mahina ang net.", "error");
+        // --- POST-REVEAL KEYWORD UNDERLINING & EDITABLE EXPLANATION ---
+        function extractFallbackKeywords(stemText) {
+            const clean = String(stemText || '').replace(/^\d+\.\s*/, '').trim();
+            const stopWords = new Set(['which', 'following', 'what', 'when', 'where', 'that', 'this', 'these', 'those', 'from', 'with', 'into', 'under', 'over', 'between', 'usually', 'often', 'called', 'known', 'termed', 'about', 'have', 'been', 'would', 'should', 'could', 'their', 'there', 'other']);
+            const words = clean.match(/[A-Za-z][A-Za-z0-9-]{3,}/g) || [];
+            const candidates = [];
+            for (const w of words) {
+                const lw = w.toLowerCase();
+                if (!stopWords.has(lw) && !candidates.some(c => c.toLowerCase() === lw)) {
+                    candidates.push(w);
                 }
-            } catch (e) {
-                showToast("Network error. Kailangan mo ng internet para makapag-generate ng AI.", "error");
-            } finally {
-                term.isGeneratingAI = false;
-                window.saveToCloud(); 
+                if (candidates.length >= 3) break;
+            }
+            return candidates;
+        }
+
+        window.triggerKeywordsAndExplanation = (termId) => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+            state.showKeywordsExp = true;
+            const hasCachedKeywords = Array.isArray(term.keywords) && term.keywords.length > 0;
+            const hasCachedExp = Boolean(term.explanation && String(term.explanation).trim());
+            if (hasCachedKeywords && hasCachedExp) {
                 renderApp();
+                return;
+            }
+            window.generateKeywordsAndExplanation(termId, '');
+        };
+
+        window.regenerateCustomExplanation = (termId) => {
+            const inputEl = document.getElementById(`custom-regen-input-${termId}`);
+            const customInstruction = inputEl ? inputEl.value.trim() : '';
+            window.generateKeywordsAndExplanation(termId, customInstruction);
+        };
+
+        window.handleExplanationAutoSave = (termId, newText) => {
+            updateTerm(termId, { explanation: newText });
+            const badge = document.getElementById(`exp-autosave-${termId}`);
+            if (badge) {
+                badge.textContent = '✓ Auto-saved';
+                badge.classList.remove('opacity-0');
             }
         };
 
-        window.generateAIDerivation = async (termId) => {
-            const termIndex = state.terms.findIndex(t => t.id === termId);
-            if (termIndex === -1) return;
+        window.generateKeywordsAndExplanation = async (termId, customInstruction = '') => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
 
-            const term = state.terms[termIndex];
-            term.isGeneratingDerivation = true;
+            state.showKeywordsExp = true;
+            updateTerm(termId, { isGeneratingAI: true });
             renderApp();
 
-            const systemPrompt = "Act as a Mechanical Engineering Board Exam tutor. Check if the provided question or answer involves a mathematical formula, equation, or principle that can be derived or mathematically broken down. If it DOES NOT involve any formula, reply exactly with 'Hindi ito formula o equation.'. If it DOES, provide a step-by-step mathematical derivation, breakdown, or proof of the formula in Taglish. Focus on where the formula came from. Use LaTeX formatting (wrap inline math in single $ and block math in double $$) for all equations.";
-            const userQuery = `Question:\n${term.question}\n\nAnswer:\n${term.answer}\n\nDerive or breakdown the formula if applicable.`;
-            
-            const apiKey = ""; 
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+            const { stem, choicesRaw } = parseQuestionAndChoices(term.question);
+            let choicesContext = choicesRaw;
+            let correctContext = term.answer;
 
-            const payload = {
-                contents: [{ parts: [{ text: userQuery }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-            };
+            if (state.currentShuffledChoices && state.currentShuffledChoices.cardId === termId && state.currentShuffledChoices.options) {
+                choicesContext = state.currentShuffledChoices.options
+                    .map(o => `${o.displayLetter}. ${o.text}`)
+                    .join('\n');
+                const correctOpt = state.currentShuffledChoices.options.find(o => o.isCorrect);
+                if (correctOpt) {
+                    correctContext = `${correctOpt.displayLetter}. ${correctOpt.text}`;
+                }
+            }
+
+            const systemPrompt = `You are a Philippine Mechanical Engineering Board Exam tutor.
+Analyze the question stem, choices, and correct answer, then return a JSON object with two fields:
+1. "keywords": An array of 1 to 4 exact critical keywords or short phrases copied verbatim from the Question Stem that serve as key clues or trap words (e.g. "pure torsion", "maximum", "EXCEPT").
+2. "explanation": A concise 1–2 sentence explanation (in clear English or Taglish) directly linking those keywords in the stem to why the correct answer is right.${customInstruction ? `\nIMPORTANT USER INSTRUCTION FOR EXPLANATION: "${customInstruction}"` : ''}
+Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
+
+            const userQuery = `Question Stem:\n${stem}\n\nChoices:\n${choicesContext}\n\nCorrect Answer:\n${correctContext}${customInstruction ? `\n\nSpecific Instruction: ${customInstruction}` : ''}`;
+
+            if (!(state.geminiApiKey || '').trim()) {
+                const fallbackKw = (Array.isArray(term.keywords) && term.keywords.length > 0)
+                    ? term.keywords
+                    : extractFallbackKeywords(stem);
+                updateTerm(termId, {
+                    keywords: fallbackKw,
+                    explanation: term.explanation || '',
+                    isGeneratingAI: false
+                });
+                showToast("Mag-set ng Gemini API Key (🔑) para sa AI Explanation. Local keywords underlined!", "error");
+                renderApp();
+                return;
+            }
 
             try {
-                const response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const result = await response.json();
-                const candidate = result.candidates?.[0];
-                
-                if (candidate && candidate.content?.parts?.[0]?.text) {
-                    term.derivation = candidate.content.parts[0].text;
+                const rawText = await callGeminiAPI(systemPrompt, userQuery);
+
+                if (rawText) {
+                    let keywords = term.keywords;
+                    let explanation = term.explanation || '';
+                    try {
+                        const cleanedJson = rawText.replace(/^```json\s*|\s*```$/g, '').trim();
+                        const parsed = JSON.parse(cleanedJson);
+                        if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
+                            keywords = parsed.keywords.map(k => String(k).trim()).filter(Boolean);
+                        }
+                        if (parsed.explanation) {
+                            explanation = String(parsed.explanation).trim();
+                        }
+                    } catch (parseErr) {
+                        explanation = rawText.trim();
+                    }
+                    if (!Array.isArray(keywords) || keywords.length === 0) {
+                        keywords = extractFallbackKeywords(stem);
+                    }
+                    updateTerm(termId, { keywords, explanation, isGeneratingAI: false });
+                    renderApp();
+                    return;
                 } else {
-                    showToast("Failed to generate derivation.", "error");
+                    showToast("AI request failed. Check your Gemini API Key (🔑) or internet connection.", "error");
                 }
             } catch (e) {
-                showToast("Network error. Kailangan mo ng internet.", "error");
-            } finally {
-                term.isGeneratingDerivation = false;
-                window.saveToCloud(); 
-                renderApp();
+                showToast("Offline / Network error. Keywords underlined locally; you can type your notes below.", "error");
             }
+
+            const fallbackKw = (Array.isArray(term.keywords) && term.keywords.length > 0)
+                ? term.keywords
+                : extractFallbackKeywords(stem);
+            updateTerm(termId, {
+                keywords: fallbackKw,
+                explanation: term.explanation || '',
+                isGeneratingAI: false
+            });
+            renderApp();
         };
 
-        window.generateAISimplification = async (termId) => {
-            const termIndex = state.terms.findIndex(t => t.id === termId);
-            if (termIndex === -1) return;
+        window.generateAIExplanation = (termId) => window.triggerKeywordsAndExplanation(termId);
 
-            const term = state.terms[termIndex];
-            term.isGeneratingSimplify = true;
+        // --- PARKING LOT FLAG & UPGRADED EXCEL EXPORT ---
+        window.toggleParkingLot = (termId, event) => {
+            if (event) event.stopPropagation();
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+            const nextState = !term.parkingLot;
+            updateTerm(termId, { parkingLot: nextState });
+            showToast(nextState ? "Flagged to Parking Lot 🚩" : "Removed from Parking Lot");
             renderApp();
+        };
 
-            const systemPrompt = "Act as a helpful Mechanical Engineering Board Exam tutor. Rephrase and simplify the following board exam question AND its choices. Remove complex jargon, make it direct, and translate it to easy-to-understand Taglish. Keep it very short. Do not answer it, just rephrase the question and list the simplified choices.";
-            const userQuery = `Original Text:\n${term.question}\n\nSimplify the question and the choices in Taglish.`;
-            
-            const apiKey = ""; 
-            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+        window.resolveParkingLot = (termId, event) => {
+            if (event) event.stopPropagation();
+            updateTerm(termId, { parkingLot: false });
+            showToast("Resolved & removed from Parking Lot!");
+            renderApp();
+        };
 
-            const payload = {
-                contents: [{ parts: [{ text: userQuery }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-            };
-
-            try {
-                const response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const result = await response.json();
-                const candidate = result.candidates?.[0];
-                
-                if (candidate && candidate.content?.parts?.[0]?.text) {
-                    term.simplifiedQuestion = candidate.content.parts[0].text;
-                } else {
-                    showToast("Failed to generate simplified question.", "error");
-                }
-            } catch (e) {
-                showToast("Network error. Connect to internet first to use AI.", "error");
-            } finally {
-                term.isGeneratingSimplify = false;
-                saveData(); 
-                renderApp();
-            }
+        window.setParkingLotFilter = (enabled) => {
+            state.parkingLotFilter = enabled;
+            state.selectedTerms = [];
+            renderApp();
         };
 
         function updateTimerUI() {
@@ -633,7 +1051,46 @@
         };
 
         window.setStudyFolder = (id) => { state.studyFolderId = id; state.selectedTerms = []; renderApp(); };
-        window.setActiveFolder = (id) => { state.activeFolderId = id; state.selectedTerms = []; renderApp(); };
+        window.setActiveFolder = (id) => {
+            state.activeFolderId = id;
+            state.parkingLotFilter = false;
+            state.selectedTerms = [];
+            renderApp();
+        };
+        window.toggleFolderExpand = (event, folderId) => {
+            if (event) event.stopPropagation();
+            if (state.expandedFolders.includes(folderId)) {
+                state.expandedFolders = state.expandedFolders.filter(id => id !== folderId);
+            } else {
+                state.expandedFolders.push(folderId);
+            }
+            renderApp();
+        };
+        window.handleFolderExplorerClick = (folderId, hasChildren) => {
+            state.activeFolderId = folderId;
+            state.parkingLotFilter = false;
+            state.selectedTerms = [];
+            if (hasChildren) {
+                if (state.expandedFolders.includes(folderId)) {
+                    state.expandedFolders = state.expandedFolders.filter(id => id !== folderId);
+                } else {
+                    state.expandedFolders.push(folderId);
+                }
+            }
+            renderApp();
+        };
+        window.expandAllFolders = () => {
+            state.expandedFolders = state.folders.map(f => f.id);
+            renderApp();
+        };
+        window.collapseAllFolders = () => {
+            state.expandedFolders = [];
+            renderApp();
+        };
+        window.toggleFolderSidebar = () => {
+            state.hideFolderSidebar = !state.hideFolderSidebar;
+            renderApp();
+        };
         window.setStatsFolder = (id) => { state.statsFolderId = id; renderApp(); };
         window.setIntakeSize = (val) => { state.intakeSize = Number(val); renderApp(); };
         window.setLookAheadDays = (val) => { state.lookAheadDays = Number(val); renderApp(); };
@@ -654,7 +1111,9 @@
         };
 
         window.toggleSelectAll = () => {
-            const activeTerms = state.terms.filter(t => t.folderId === state.activeFolderId);
+            const activeTerms = state.parkingLotFilter
+                ? state.terms.filter(t => t.parkingLot)
+                : state.terms.filter(t => t.folderId === state.activeFolderId);
             const allSelected = activeTerms.length > 0 && activeTerms.every(t => state.selectedTerms.includes(t.id));
             if (allSelected) {
                 state.selectedTerms = state.selectedTerms.filter(id => !activeTerms.find(t => t.id === id));
@@ -682,15 +1141,23 @@
             const input = document.getElementById(inputId);
             const name = input ? input.value.trim() : '';
             if (!name) return;
-            state.folders.push({ id: generateId(), name: name, parentId: parentId });
+            const newId = generateId();
+            state.folders.push({ id: newId, name: name, parentId: parentId });
+            if (parentId && !state.expandedFolders.includes(parentId)) {
+                state.expandedFolders.push(parentId);
+            }
+            state.activeFolderId = newId;
             state.addingSubfolderTo = null;
             saveData();
             renderApp();
         };
 
         window.startAddingSubfolder = (event, id) => {
-            event.stopPropagation();
+            if (event) event.stopPropagation();
             state.addingSubfolderTo = id;
+            if (!state.expandedFolders.includes(id)) {
+                state.expandedFolders.push(id);
+            }
             renderApp();
         };
         window.cancelAddingSubfolder = () => { state.addingSubfolderTo = null; renderApp(); };
@@ -707,7 +1174,7 @@
         };
 
         window.startMovingFolder = (event, id) => {
-            event.stopPropagation();
+            if (event) event.stopPropagation();
             state.movingFolderId = id;
             renderApp();
         };
@@ -723,6 +1190,9 @@
             if(!select) return;
             const newParentId = select.value === 'root' ? null : select.value;
             state.folders = state.folders.map(f => f.id === folderId ? { ...f, parentId: newParentId } : f);
+            if (newParentId && !state.expandedFolders.includes(newParentId)) {
+                state.expandedFolders.push(newParentId);
+            }
             state.movingFolderId = null;
             saveData();
             renderApp();
@@ -730,7 +1200,7 @@
         };
 
         window.startRenamingFolder = (event, id, name) => {
-            event.stopPropagation();
+            if (event) event.stopPropagation();
             state.editingFolderId = id;
             renderApp();
             setTimeout(() => {
@@ -751,7 +1221,7 @@
         };
 
         window.deleteFolder = (event, id) => {
-            event.stopPropagation();
+            if (event) event.stopPropagation();
             let fallbackFolder = state.folders.find(f => f.id !== id)?.id || 'mdsp';
             if (state.folders.length <= 1) return showToast("Cannot delete the last folder.", "error");
 
@@ -773,26 +1243,66 @@
             showToast("Card deleted.");
         };
 
-        window.startEditTerm = (id) => {
+        window.startEditTerm = (id, event) => {
+            if (event) event.stopPropagation();
+            clearInterval(timerInterval);
             state.editingTermId = id;
             renderApp();
         };
 
         window.saveEditTerm = () => {
-            const q = document.getElementById('edit-term-q').value;
-            const a = document.getElementById('edit-term-a').value;
-            if (!q.trim() || !a.trim()) {
-                showToast("Fields cannot be empty", "error");
+            const qStemEl = document.getElementById('edit-term-q');
+            const qChoicesEl = document.getElementById('edit-term-choices');
+            const aEl = document.getElementById('edit-term-a');
+            const qStem = qStemEl ? qStemEl.value.trim() : '';
+            const qChoices = qChoicesEl ? qChoicesEl.value.trim() : '';
+            const a = aEl ? aEl.value.trim() : '';
+
+            if (!qStem || !a) {
+                showToast("Question and Correct Answer cannot be empty", "error");
                 return;
             }
-            updateTerm(state.editingTermId, { question: q, answer: a });
+
+            let combinedQuestion = qStem;
+            if (qChoices && !qStem.includes('[Choices]:')) {
+                combinedQuestion = `${qStem}\n\n[Choices]:\n${qChoices}`;
+            }
+
+            // Cache Invalidation Rule: Whenever Question text is edited and saved, clear cached AI blur chunks & keyword underlines
+            updateTerm(state.editingTermId, {
+                question: combinedQuestion,
+                answer: a,
+                stemChunks: null,
+                keywords: null
+            });
+
+            const editedId = state.editingTermId;
             state.editingTermId = null;
+
+            if (state.currentView === 'session' && state.sessionData) {
+                const currentCard = state.sessionData.queue[state.currentCardIndex];
+                if (currentCard && currentCard.id === editedId) {
+                    state.currentShuffledChoices = {
+                        cardId: currentCard.id,
+                        questionSnapshot: currentCard.question,
+                        answerSnapshot: currentCard.answer,
+                        options: buildShuffledChoicesForCard(currentCard)
+                    };
+                    const { stem } = parseQuestionAndChoices(currentCard.question);
+                    if (isLongQuestionStem(stem)) {
+                        window.ensureAIStemSplit(currentCard.id);
+                    }
+                }
+                manageTimer();
+            }
+
             renderApp();
-            showToast("Card updated!");
+            showToast("Card updated & AI caches reset!");
         };
 
         window.cancelEditTerm = () => {
             state.editingTermId = null;
+            if (state.currentView === 'session') manageTimer();
             renderApp();
         };
 
@@ -877,12 +1387,60 @@
             showToast(`Deck Emptied. Removed ${removedCount} cards.`);
         };
 
+        // Upgraded Excel/CSV Export: Question | Choices | Correct Answer | Explanation
+        function downloadExcelCSV(termsArray, filename) {
+            if (!termsArray || termsArray.length === 0) {
+                showToast("No cards found for this selection.", "error");
+                return;
+            }
+
+            let csvContent = "\uFEFFQuestion,Choices,Correct Answer,Explanation\n";
+            termsArray.forEach(t => {
+                const { stem, choicesRaw } = parseQuestionAndChoices(t.question);
+                const cleanChoices = choicesRaw.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+                const qEsc = String(stem || '').replace(/"/g, '""');
+                const cEsc = String(cleanChoices || '').replace(/"/g, '""');
+                const aEsc = String(t.answer || '').trim().replace(/"/g, '""');
+                const eEsc = String(t.explanation || '').trim().replace(/"/g, '""');
+                csvContent += `"${qEsc}","${cEsc}","${aEsc}","${eEsc}"\n`;
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = filename;
+
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
+
+            showToast(`Exported ${termsArray.length} cards to Excel CSV!`);
+        }
+
+        window.exportParkingLotCSV = () => {
+            const parkedTerms = state.terms.filter(t => t.parkingLot);
+            downloadExcelCSV(parkedTerms, `ME_Parking_Lot_Export.csv`);
+        };
+
         window.exportFilteredCSV = () => {
             const levelSelect = document.getElementById('export-level-select');
             if (!levelSelect) return;
             const selectedVal = levelSelect.value;
+
+            if (selectedVal === 'parking_lot') {
+                const parkedTerms = state.parkingLotFilter
+                    ? state.terms.filter(t => t.parkingLot)
+                    : state.terms.filter(t => t.folderId === state.activeFolderId && t.parkingLot);
+                const targetTerms = parkedTerms.length > 0 ? parkedTerms : state.terms.filter(t => t.parkingLot);
+                downloadExcelCSV(targetTerms, `ME_Parking_Lot_Export.csv`);
+                return;
+            }
             
-            let filteredTerms = state.terms.filter(t => t.folderId === state.activeFolderId);
+            let filteredTerms = state.parkingLotFilter
+                ? state.terms.filter(t => t.parkingLot)
+                : state.terms.filter(t => t.folderId === state.activeFolderId);
             
             if (selectedVal === 'new') {
                 filteredTerms = filteredTerms.filter(t => t.isNew);
@@ -891,32 +1449,11 @@
                 filteredTerms = filteredTerms.filter(t => !t.isNew && t.level === lvl);
             }
             
-            if (filteredTerms.length === 0) {
-                showToast("No cards found for this selection.", "error");
-                return;
-            }
-
-            let csvContent = "Question,Answer\n";
-            filteredTerms.forEach(t => {
-                const q = String(t.question).replace(/"/g, '""');
-                const a = String(t.answer).replace(/"/g, '""');
-                csvContent += `"${q}","${a}"\n`;
-            });
-
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
-            const folderName = state.folders.find(f => f.id === state.activeFolderId)?.name || 'Deck';
+            const folderName = state.parkingLotFilter
+                ? 'Parking_Lot'
+                : (state.folders.find(f => f.id === state.activeFolderId)?.name || 'Deck');
             const cleanFolderName = folderName.replace(/[^a-z0-9]/gi, '_');
-            anchor.download = `ME_${cleanFolderName}_Lvl_${selectedVal.toUpperCase()}.csv`;
-            
-            document.body.appendChild(anchor);
-            anchor.click();
-            document.body.removeChild(anchor);
-            URL.revokeObjectURL(url);
-            
-            showToast(`Exported ${filteredTerms.length} cards to CSV successfully!`);
+            downloadExcelCSV(filteredTerms, `ME_${cleanFolderName}_Lvl_${selectedVal.toUpperCase()}.csv`);
         };
 
         window.runForecast = () => {
@@ -1091,7 +1628,10 @@
             const activeStudyTerms = targetFolderIds === null ? state.terms : state.terms.filter(t => targetFolderIds.includes(t.folderId));
             
             let filteredTerms = activeStudyTerms;
-            if (levelId === 'new') {
+            if (levelId === 'parking_lot') {
+                filteredTerms = activeStudyTerms.filter(t => t.parkingLot);
+                if (filteredTerms.length === 0) filteredTerms = state.terms.filter(t => t.parkingLot);
+            } else if (levelId === 'new') {
                 filteredTerms = filteredTerms.filter(t => t.isNew);
             } else {
                 const lvl = parseInt(levelId);
@@ -1112,7 +1652,7 @@
                         <i class="ph-bold ph-file-csv text-3xl"></i>
                     </div>
                     <h3 class="text-xl font-bold text-slate-800 mb-2">Export ${levelLabel}?</h3>
-                    <p class="text-sm text-slate-500 mb-6">You are about to export <b>${filteredTerms.length}</b> cards from this level as a CSV file.</p>
+                    <p class="text-sm text-slate-500 mb-6">You are about to export <b>${filteredTerms.length}</b> cards (with Question, Choices, Correct Answer & Explanation) as an Excel CSV file.</p>
                     <div class="flex gap-3">
                         <button onclick="document.getElementById('export-modal').remove()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-colors">Cancel</button>
                         <button onclick="window.executeExport('${levelId}', '${levelLabel}'); document.getElementById('export-modal').remove()" class="flex-1 px-4 py-3 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-bold transition-colors shadow-lg shadow-emerald-200">Export CSV</button>
@@ -1127,39 +1667,24 @@
             const activeStudyTerms = targetFolderIds === null ? state.terms : state.terms.filter(t => targetFolderIds.includes(t.folderId));
             
             let filteredTerms = activeStudyTerms;
-            if (levelId === 'new') {
+            if (levelId === 'parking_lot') {
+                filteredTerms = activeStudyTerms.filter(t => t.parkingLot);
+                if (filteredTerms.length === 0) filteredTerms = state.terms.filter(t => t.parkingLot);
+            } else if (levelId === 'new') {
                 filteredTerms = filteredTerms.filter(t => t.isNew);
             } else {
                 const lvl = parseInt(levelId);
                 filteredTerms = filteredTerms.filter(t => !t.isNew && t.level === lvl);
             }
 
-            let csvContent = "Question,Answer\n";
-            filteredTerms.forEach(t => {
-                const q = String(t.question).replace(/"/g, '""');
-                const a = String(t.answer).replace(/"/g, '""');
-                csvContent += `"${q}","${a}"\n`;
-            });
-
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
             const folderName = state.studyFolderId === 'all' ? 'All_Sets' : (state.folders.find(f => f.id === state.studyFolderId)?.name || 'Deck');
             const cleanFolderName = folderName.replace(/[^a-z0-9]/gi, '_');
-            anchor.download = `ME_${cleanFolderName}_${levelLabel.replace(' ', '_')}.csv`;
-            
-            document.body.appendChild(anchor);
-            anchor.click();
-            document.body.removeChild(anchor);
-            URL.revokeObjectURL(url);
-            
-            showToast(`Exported ${filteredTerms.length} cards successfully!`);
+            downloadExcelCSV(filteredTerms, `ME_${cleanFolderName}_${levelLabel.replace(/\s+/g, '_')}.csv`);
         };
 
         // --- STREAMING_CHUNK:Data Import and Export ---
         window.exportBackup = () => {
-            const backupData = { folders: state.folders, terms: state.terms, history: state.history };
+            const backupData = { folders: state.folders, terms: cleanTermsForStorage(state.terms), history: state.history };
             const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData));
             const downloadAnchorNode = document.createElement('a');
             downloadAnchorNode.setAttribute("href", dataStr);
@@ -1180,6 +1705,7 @@
                         state.folders = data.folders;
                         state.terms = data.terms;
                         if (data.history) state.history = data.history;
+                        ensureValidActiveFolder();
                         saveData();
                         renderApp();
                         showToast("Offline Backup restored instantly! Success.");
@@ -1255,13 +1781,23 @@
                 } else {
                     parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(p => p.replace(/^"|"$/g, '').trim());
                 }
+
+                // Skip header row if importing an exported CSV
+                if (parts.length >= 2 && /^question$/i.test(parts[0].trim()) && /^(choices|answer)$/i.test(parts[1].trim())) {
+                    continue;
+                }
                 
                 if (parts.length >= 3) {
-                    newCards.push({
+                    const cardObj = {
                         id: generateId(), folderId: state.activeFolderId,
-                        question: `${parts[0].trim()}\n\n[Choices]:\n${parts[1].trim()}`, answer: parts[2].trim(),
+                        question: parts[1].trim() ? `${parts[0].trim()}\n\n[Choices]:\n${parts[1].trim()}` : parts[0].trim(),
+                        answer: parts[2].trim(),
                         level: 0, nextReviewDate: 0, isNew: true, lastReviewedDate: 0, correct: 0, incorrect: 0
-                    });
+                    };
+                    if (parts[3] && parts[3].trim()) {
+                        cardObj.explanation = parts[3].trim();
+                    }
+                    newCards.push(cardObj);
                 } else if (parts.length === 2) {
                     newCards.push({
                         id: generateId(), folderId: state.activeFolderId,
@@ -1288,13 +1824,13 @@
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
             // Only trigger during an active session
-            if (state.currentView !== 'session' || !state.sessionData) return;
+            if (state.currentView !== 'session' || !state.sessionData || state.editingTermId) return;
 
             if (!state.showAnswer) {
-                // Reveal Answer shortcuts
+                // Progressive Blur & Reveal Answer shortcuts
                 if (e.code === 'Space' || e.code === 'Enter' || e.code === 'ArrowDown' || e.code === 'ArrowUp') {
                     e.preventDefault();
-                    window.revealAnswer();
+                    window.handleCardBodyTap();
                 }
             } else {
                 // Submit Answer shortcuts with the New "Perfect" Option included
@@ -1315,6 +1851,7 @@
         
         function renderNav() {
             if (state.currentView === 'session') return '';
+            const parkedCount = state.terms.filter(t => t.parkingLot).length;
             return `
                 <nav class="bg-white border-b border-slate-200 px-4 md:px-6 py-4 flex flex-wrap items-center justify-between sticky top-0 z-10 gap-4">
                     <div class="flex items-center gap-2 cursor-pointer" onclick="window.setView('dashboard')">
@@ -1330,6 +1867,7 @@
                             </button>
                             <button onclick="window.setView('add')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'add' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}">
                                 <i class="ph-fill ph-folder text-lg"></i> <span class="hidden md:inline">Database</span>
+                                ${parkedCount > 0 ? `<span class="bg-amber-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">${parkedCount}</span>` : ''}
                             </button>
                             <button onclick="window.setView('stats')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'stats' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}">
                                 <i class="ph-fill ph-users text-lg"></i> <span class="hidden md:inline">Stats</span>
@@ -1338,6 +1876,10 @@
                                 <i class="ph-fill ph-crystal-ball text-lg"></i> <span class="hidden md:inline">Forecast</span>
                             </button>
                         </div>
+                        <button onclick="window.openApiKeyModal(event)" class="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all border ${state.geminiApiKey ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'}" title="Set Gemini API Key (Synced to your account)">
+                            <i class="ph-fill ph-key text-base"></i>
+                            <span class="hidden sm:inline">${state.geminiApiKey ? 'AI Key Ready' : 'Set AI Key'}</span>
+                        </button>
                         ${userId ? `<button onclick="window.logout()" class="p-2 text-slate-400 hover:text-red-500 transition-colors" title="Logout"><i class="ph-bold ph-sign-out text-xl"></i></button>` : ''}
                     </div>
                 </nav>
@@ -1367,6 +1909,8 @@
             const reviewFinishedToday = totalFinishedToday - newFinishedToday.length;
 
             const futureTerms = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate > todayStart && t.nextReviewDate <= todayStart + (state.lookAheadDays * MS_PER_DAY));
+            const parkedTerms = activeStudyTerms.filter(t => t.parkingLot);
+            const allParkedTerms = state.terms.filter(t => t.parkingLot);
 
             // Generate Folder Drill-Down Breadcrumbs
             let breadcrumbsHtml = `<button onclick="window.setStudyFolder('all')" class="flex items-center gap-1.5 transition-colors ${state.studyFolderId === 'all' ? 'text-blue-700 font-black' : 'text-slate-500 font-bold hover:text-blue-600'}"><i class="ph-fill ph-books text-xl"></i> All Sets</button>`;
@@ -1424,7 +1968,8 @@
                 { id: '3', label: 'Lvl 3', count: levelCounts[3], color: 'bg-amber-500' },
                 { id: '4', label: 'Lvl 4', count: levelCounts[4], color: 'bg-emerald-300' },
                 { id: '5', label: 'Lvl 5', count: levelCounts[5], color: 'bg-emerald-500' },
-                { id: '6', label: 'Lvl 6', count: levelCounts[6], color: 'bg-emerald-700' }
+                { id: '6', label: 'Lvl 6', count: levelCounts[6], color: 'bg-emerald-700' },
+                { id: 'parking_lot', label: 'Parked', count: parkedTerms.length, color: 'bg-rose-400' }
             ];
             cols.forEach(col => {
                 const h = activeStudyTerms.length > 0 ? Math.max((col.count / activeStudyTerms.length) * 100, 5) : 5;
@@ -1445,7 +1990,19 @@
 
                 <div class="bg-white p-4 md:p-6 rounded-3xl border border-slate-200 shadow-sm relative overflow-hidden">
                     <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
-                    <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2"><i class="ph-bold ph-folder-open text-base"></i> Select Deck / Folder</h2>
+                    <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
+                        <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><i class="ph-bold ph-folder-open text-base"></i> Select Deck / Folder</h2>
+                        ${allParkedTerms.length > 0 ? `
+                        <div class="flex items-center gap-2">
+                            <button onclick="window.setParkingLotFilter(true); window.setView('add')" class="px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 text-xs font-bold flex items-center gap-1.5 transition-colors">
+                                <i class="ph-fill ph-flag text-amber-500"></i> View Parking Lot (${allParkedTerms.length})
+                            </button>
+                            <button onclick="window.exportParkingLotCSV()" class="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1.5 transition-colors" title="Export Parking Lot to Excel CSV">
+                                <i class="ph-bold ph-file-csv"></i> Export Parked
+                            </button>
+                        </div>
+                        ` : ''}
+                    </div>
                     
                     <div class="flex items-center flex-wrap gap-2 mb-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
                         ${breadcrumbsHtml}
@@ -1578,54 +2135,97 @@
             `;
         }
 
-        // --- STREAMING_CHUNK:Database UI (Folders & Terms) ---
+        // --- STREAMING_CHUNK:Database UI (File Explorer Folders & Terms) ---
+        function getFolderRecursiveCardCount(folderId) {
+            let ids = [folderId];
+            let idx = 0;
+            while (idx < ids.length) {
+                const subIds = state.folders.filter(f => f.parentId === ids[idx]).map(f => f.id);
+                ids = ids.concat(subIds);
+                idx++;
+            }
+            return state.terms.filter(t => ids.includes(t.folderId)).length;
+        }
+
         function getFolderTreeHtml(parentId = null, depth = 0) {
             const children = state.folders.filter(f => (f.parentId || null) === parentId);
             let html = '';
             children.forEach(f => {
+                const subChildren = state.folders.filter(sub => sub.parentId === f.id);
+                const hasChildren = subChildren.length > 0;
+                const isExpanded = state.expandedFolders.includes(f.id);
+                const isActive = !state.parkingLotFilter && state.activeFolderId === f.id;
                 const isEditing = state.editingFolderId === f.id;
                 const isAddingSub = state.addingSubfolderTo === f.id;
                 const isMoving = state.movingFolderId === f.id;
-                const pad = (depth * 16) + 16;
-                
+                const indentPx = (depth * 18) + 10;
+                const cardCount = getFolderRecursiveCardCount(f.id);
+
+                let folderIcon = '';
+                if (hasChildren) {
+                    folderIcon = isExpanded
+                        ? `<i class="ph-fill ph-folder-open shrink-0 text-xl ${isActive ? 'text-blue-600' : 'text-amber-500'}"></i>`
+                        : `<i class="ph-fill ph-folder shrink-0 text-xl ${isActive ? 'text-blue-600' : 'text-amber-400'}"></i>`;
+                } else {
+                    folderIcon = `<i class="ph-fill ph-files shrink-0 text-lg ${isActive ? 'text-blue-600' : 'text-slate-400'}"></i>`;
+                }
+
                 html += `
-                <div class="w-full">
-                    <div class="flex items-center justify-between group rounded-xl px-4 py-3 cursor-pointer transition-colors ${state.activeFolderId === f.id ? 'bg-blue-50 border border-blue-100' : 'hover:bg-slate-50 border border-transparent'}" onclick="window.setActiveFolder('${f.id}')" style="padding-left: ${pad}px">
-                        <div class="flex items-center gap-3 overflow-hidden flex-1">
-                            ${depth > 0 ? `<i class="ph-fill ph-arrow-elbow-down-right shrink-0 text-xl ${state.activeFolderId === f.id ? 'text-blue-500' : 'text-slate-300'}"></i>` : `<i class="ph-fill ph-folder shrink-0 text-xl ${state.activeFolderId === f.id ? 'text-blue-600' : 'text-slate-400'}"></i>`}
-                            ${isEditing ? `
-                                <input id="rename-input-${f.id}" type="text" onblur="window.saveRenameFolder('${f.id}')" onkeydown="event.key==='Enter' && window.saveRenameFolder('${f.id}')" class="w-full text-base font-extrabold bg-white border border-blue-300 rounded px-2 py-1 outline-none text-blue-800" onclick="event.stopPropagation()">
-                            ` : isMoving ? `
-                                <div class="flex-1 flex gap-1 items-center min-w-0" onclick="event.stopPropagation()">
-                                    <select id="move-select-${f.id}" class="w-full text-xs font-bold bg-white border border-blue-300 rounded p-1.5 outline-none text-blue-800 truncate cursor-pointer">
-                                        <option value="root">-- Move to Root (Top Level) --</option>
-                                        ${getValidParents(f.id).map(p => `<option value="${p.id}" ${f.parentId === p.id ? 'selected' : ''}>${escapeHTML(getFolderFullPath(p.id, state.folders))}</option>`).join('')}
-                                    </select>
-                                    <button onclick="window.saveMoveFolder('${f.id}')" class="p-1.5 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200" title="Confirm Move"><i class="ph-bold ph-check"></i></button>
-                                    <button onclick="window.cancelMovingFolder(event)" class="p-1.5 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200" title="Cancel"><i class="ph-bold ph-x"></i></button>
-                                </div>
+                <div class="w-full select-none">
+                    <div class="flex flex-col rounded-xl transition-all ${isActive ? 'bg-blue-50/90 border border-blue-200 shadow-sm' : 'hover:bg-slate-50 border border-transparent'}" style="padding-left: ${indentPx}px">
+                        <div class="flex items-start gap-2 py-2.5 pr-3 cursor-pointer" onclick="window.handleFolderExplorerClick('${f.id}', ${hasChildren})">
+                            ${hasChildren ? `
+                                <button onclick="window.toggleFolderExpand(event, '${f.id}')" class="mt-0.5 p-0.5 rounded hover:bg-slate-200/70 text-slate-500 shrink-0 transition-transform" title="${isExpanded ? 'Collapse folder' : 'Expand folder'}">
+                                    <i class="ph-bold ${isExpanded ? 'ph-caret-down' : 'ph-caret-right'} text-sm"></i>
+                                </button>
                             ` : `
-                                <span class="font-extrabold truncate text-base ${state.activeFolderId === f.id ? 'text-blue-700' : 'text-slate-700'}">${escapeHTML(f.name)}</span>
+                                <span class="w-5 shrink-0"></span>
                             `}
+                            <div class="mt-0.5 shrink-0">${folderIcon}</div>
+                            <div class="flex-1 min-w-0">
+                                ${isEditing ? `
+                                    <input id="rename-input-${f.id}" type="text" onblur="window.saveRenameFolder('${f.id}')" onkeydown="event.key==='Enter' && window.saveRenameFolder('${f.id}')" class="w-full text-sm font-bold bg-white border border-blue-400 rounded-lg px-2.5 py-1.5 outline-none text-blue-900 shadow-sm" onclick="event.stopPropagation()">
+                                ` : isMoving ? `
+                                    <div class="flex flex-col gap-1.5 bg-white p-2 rounded-lg border border-blue-200" onclick="event.stopPropagation()">
+                                        <select id="move-select-${f.id}" class="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded p-1.5 outline-none text-slate-800 cursor-pointer">
+                                            <option value="root">-- Move to Root (Top Level) --</option>
+                                            ${getValidParents(f.id).map(p => `<option value="${p.id}" ${f.parentId === p.id ? 'selected' : ''}>${escapeHTML(getFolderFullPath(p.id, state.folders))}</option>`).join('')}
+                                        </select>
+                                        <div class="flex gap-1 justify-end">
+                                            <button onclick="window.saveMoveFolder('${f.id}')" class="px-2.5 py-1 bg-emerald-600 text-white text-xs font-bold rounded hover:bg-emerald-700">Move Here</button>
+                                            <button onclick="window.cancelMovingFolder(event)" class="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold rounded hover:bg-slate-200">Cancel</button>
+                                        </div>
+                                    </div>
+                                ` : `
+                                    <div class="flex items-start justify-between gap-2">
+                                        <span class="font-bold text-sm leading-snug break-words ${isActive ? 'text-blue-800' : 'text-slate-700'}">${escapeHTML(f.name)}</span>
+                                        <span class="text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0 ${isActive ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}">${cardCount}</span>
+                                    </div>
+                                `}
+                            </div>
                         </div>
-                        ${!isMoving ? `
-                        <div class="opacity-0 group-hover:opacity-100 flex items-center gap-1 shrink-0 ml-2 transition-opacity">
-                            <button onclick="window.startAddingSubfolder(event, '${f.id}')" class="p-1.5 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-blue-50" title="Add Subfolder"><i class="ph-bold ph-plus text-lg"></i></button>
-                            <button onclick="window.startMovingFolder(event, '${f.id}')" class="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50" title="Move Folder"><i class="ph-bold ph-arrows-out-line-horizontal text-lg"></i></button>
-                            <button onclick="window.startRenamingFolder(event, '${f.id}', '${escapeHTML(f.name).replace(/'/g, "\\'")}')" class="p-1.5 text-slate-400 hover:text-amber-500 rounded-lg hover:bg-amber-50" title="Rename"><i class="ph-fill ph-pencil-simple text-lg"></i></button>
-                            ${state.folders.length > 1 ? `<button onclick="window.deleteFolder(event, '${f.id}')" class="p-1.5 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50" title="Delete"><i class="ph-fill ph-trash text-lg"></i></button>` : ''}
+                        ${isActive && !isMoving && !isEditing ? `
+                        <div class="flex items-center gap-1 pb-2 pr-3 pt-0.5 border-t border-blue-100/80 mt-0.5 flex-wrap" onclick="event.stopPropagation()">
+                            <button onclick="window.startAddingSubfolder(event, '${f.id}')" class="px-2 py-1 text-[11px] font-bold text-blue-700 hover:bg-blue-100 rounded-md flex items-center gap-1 transition-colors" title="New Subfolder"><i class="ph-bold ph-folder-plus"></i> Subfolder</button>
+                            <button onclick="window.startRenamingFolder(event, '${f.id}', '${escapeHTML(f.name).replace(/'/g, "\\'")}')" class="px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-200/70 rounded-md flex items-center gap-1 transition-colors" title="Rename Folder"><i class="ph-fill ph-pencil-simple"></i> Rename</button>
+                            <button onclick="window.startMovingFolder(event, '${f.id}')" class="px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-200/70 rounded-md flex items-center gap-1 transition-colors" title="Move Folder"><i class="ph-bold ph-arrows-out-line-horizontal"></i> Move</button>
+                            ${state.folders.length > 1 ? `<button onclick="window.deleteFolder(event, '${f.id}')" class="px-2 py-1 text-[11px] font-bold text-red-600 hover:bg-red-100 rounded-md flex items-center gap-1 transition-colors ml-auto" title="Delete Folder"><i class="ph-fill ph-trash"></i></button>` : ''}
                         </div>
                         ` : ''}
                     </div>
                     ${isAddingSub ? `
-                    <div class="flex items-center gap-2 mt-1 mb-2 pr-4" style="padding-left: ${pad + 24}px">
-                        <i class="ph-bold ph-arrow-elbow-down-right text-slate-300 shrink-0 text-xl"></i>
-                        <input id="subfolder-input-${f.id}" type="text" placeholder="Subfolder name..." onkeydown="event.key==='Enter' && window.createFolder(event, '${f.id}')" class="flex-1 text-sm p-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-1 focus:ring-blue-500 outline-none font-bold">
-                        <button onclick="window.createFolder(null, '${f.id}')" class="p-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200"><i class="ph-bold ph-check"></i></button>
-                        <button onclick="window.cancelAddingSubfolder()" class="p-2 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200"><i class="ph-bold ph-x"></i></button>
+                    <div class="flex items-center gap-1.5 mt-1.5 mb-2 pr-3" style="padding-left: ${indentPx + 24}px">
+                        <i class="ph-bold ph-arrow-elbow-down-right text-blue-400 shrink-0 text-base"></i>
+                        <input id="subfolder-input-${f.id}" type="text" placeholder="New subfolder name..." onkeydown="event.key==='Enter' && window.createFolder(event, '${f.id}')" class="flex-1 text-xs p-2 bg-white border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-bold">
+                        <button onclick="window.createFolder(null, '${f.id}')" class="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"><i class="ph-bold ph-check text-xs"></i></button>
+                        <button onclick="window.cancelAddingSubfolder()" class="p-2 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200"><i class="ph-bold ph-x text-xs"></i></button>
                     </div>
                     ` : ''}
-                    ${getFolderTreeHtml(f.id, depth + 1)}
+                    ${hasChildren && isExpanded ? `
+                    <div class="border-l border-slate-200/80 ml-4 my-0.5 space-y-0.5">
+                        ${getFolderTreeHtml(f.id, depth + 1)}
+                    </div>
+                    ` : ''}
                 </div>
                 `;
             });
@@ -1633,92 +2233,169 @@
         }
 
         function renderDatabase() {
-            const activeTerms = state.terms.filter(t => t.folderId === state.activeFolderId);
-            const fullPath = getFolderFullPath(state.activeFolderId, state.folders);
+            const parkedAll = state.terms.filter(t => t.parkingLot);
+            const activeTerms = state.parkingLotFilter
+                ? parkedAll
+                : state.terms.filter(t => t.folderId === state.activeFolderId);
+            const fullPath = state.parkingLotFilter
+                ? '🚩 Parking Lot (Tagged Cards for Review)'
+                : getFolderFullPath(state.activeFolderId, state.folders);
             
             // Checkbox logic variables
             const allSelected = activeTerms.length > 0 && activeTerms.every(t => state.selectedTerms.includes(t.id));
             
             let termsHtml = '';
-            activeTerms.forEach(t => {
-                const isNewBadge = t.isNew ? '<span class="px-2 py-1 rounded text-xs font-bold bg-blue-100 text-blue-700">NEW</span>' : `<span class="px-2 py-1 rounded text-xs font-bold bg-slate-200 text-slate-600">LVL ${t.level}</span>`;
-                let optionsHtml = '';
-                state.folders.forEach(f => {
-                    optionsHtml += `<option value="${f.id}" ${f.id === t.folderId ? 'selected' : ''}>${escapeHTML(getFolderFullPath(f.id, state.folders))}</option>`;
-                });
-                
-                const isChecked = state.selectedTerms.includes(t.id);
+            if (activeTerms.length === 0) {
+                termsHtml = `
+                <div class="p-12 text-center text-slate-400 space-y-2">
+                    <i class="ph-bold ${state.parkingLotFilter ? 'ph-flag-checkered text-emerald-400' : 'ph-cards'} text-4xl block mx-auto"></i>
+                    <p class="font-bold text-sm text-slate-600">${state.parkingLotFilter ? 'Parking Lot is clear! No flagged cards remaining.' : 'This folder has no direct cards.'}</p>
+                    <p class="text-xs text-slate-400">${state.parkingLotFilter ? 'Flag cards during your review sessions whenever you have lingering questions.' : 'Select a subfolder in the File Explorer or add/import cards above.'}</p>
+                </div>`;
+            } else {
+                activeTerms.forEach(t => {
+                    const isNewBadge = t.isNew
+                        ? '<span class="px-2 py-1 rounded text-xs font-bold bg-blue-100 text-blue-700">NEW</span>'
+                        : `<span class="px-2 py-1 rounded text-xs font-bold bg-slate-200 text-slate-600">LVL ${t.level}</span>`;
+                    let optionsHtml = '';
+                    state.folders.forEach(f => {
+                        optionsHtml += `<option value="${f.id}" ${f.id === t.folderId ? 'selected' : ''}>${escapeHTML(getFolderFullPath(f.id, state.folders))}</option>`;
+                    });
+                    
+                    const isChecked = state.selectedTerms.includes(t.id);
+                    const { stem, choicesRaw } = parseQuestionAndChoices(t.question);
 
-                termsHtml += `
-                <div class="p-4 flex flex-col sm:flex-row sm:items-center justify-between hover:bg-slate-50 transition-colors gap-4">
-                    <div class="flex-1 min-w-0">
-                        <p class="font-bold text-slate-800 truncate">${escapeHTML(t.question.split('\n')[0])}</p>
-                        <p class="text-sm text-slate-500 line-clamp-1">${escapeHTML(t.answer)}</p>
+                    termsHtml += `
+                    <div class="p-4 flex flex-col sm:flex-row sm:items-start justify-between hover:bg-slate-50 transition-colors gap-4">
+                        <div class="flex items-start gap-3 flex-1 min-w-0">
+                            <input type="checkbox" ${isChecked ? 'checked' : ''} onclick="window.toggleTermSelect('${t.id}')" class="mt-1 w-4 h-4 rounded text-blue-600 border-slate-300 cursor-pointer shrink-0">
+                            <div class="flex-1 min-w-0 space-y-1">
+                                <p class="font-bold text-slate-800 ${state.parkingLotFilter ? 'board-exam-font text-sm whitespace-pre-wrap' : 'line-clamp-2 text-sm'}">${escapeHTML(stem)}</p>
+                                ${state.parkingLotFilter && choicesRaw ? `<p class="board-exam-font text-xs text-slate-600 bg-slate-100 p-2 rounded-lg whitespace-pre-wrap">${escapeHTML(choicesRaw)}</p>` : ''}
+                                <p class="text-xs font-bold text-blue-700">Ans: ${escapeHTML(t.answer)}</p>
+                                ${t.explanation ? `<p class="text-xs text-purple-700 bg-purple-50 px-2.5 py-1.5 rounded-lg border border-purple-100 line-clamp-2"><i class="ph-fill ph-sparkle"></i> ${escapeHTML(t.explanation)}</p>` : ''}
+                            </div>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2 shrink-0 self-end sm:self-center">
+                            ${t.parkingLot ? `
+                                <button onclick="window.resolveParkingLot('${t.id}', event)" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 hover:bg-emerald-100 text-amber-800 hover:text-emerald-700 border border-amber-300 hover:border-emerald-300 flex items-center gap-1 transition-colors" title="Clear Parking Lot flag">
+                                    <i class="ph-bold ph-check-circle"></i> Resolve / Remove
+                                </button>
+                            ` : `
+                                <button onclick="window.toggleParkingLot('${t.id}', event)" class="p-1.5 text-slate-300 hover:text-amber-500 rounded-lg hover:bg-amber-50 transition-colors" title="Flag to Parking Lot">
+                                    <i class="ph-bold ph-flag text-base"></i>
+                                </button>
+                            `}
+                            ${isNewBadge}
+                            <select onchange="window.moveTerm('${t.id}', this.value)" class="text-xs border border-slate-200 rounded-md p-1 bg-white max-w-[110px] md:max-w-[140px] outline-none">
+                                ${optionsHtml}
+                            </select>
+                            <button onclick="window.startEditTerm('${t.id}', event)" class="text-blue-400 hover:text-blue-600 p-1" title="Edit Card"><i class="ph-fill ph-pencil-simple text-lg"></i></button>
+                            <button onclick="window.deleteTerm('${t.id}')" class="text-red-400 hover:text-red-600 p-1" title="Delete Card"><i class="ph-fill ph-trash text-lg"></i></button>
+                        </div>
                     </div>
-                    <div class="flex items-center gap-3 shrink-0">
-                        ${isNewBadge}
-                        <select onchange="window.moveTerm('${t.id}', this.value)" class="text-xs border border-slate-200 rounded-md p-1 bg-white max-w-[100px] md:max-w-[130px] outline-none">
-                            ${optionsHtml}
-                        </select>
-                        <button onclick="window.startEditTerm('${t.id}')" class="text-blue-400 hover:text-blue-600 p-1" title="Edit Card"><i class="ph-fill ph-pencil-simple text-lg"></i></button>
-                        <button onclick="window.deleteTerm('${t.id}')" class="text-red-400 hover:text-red-600 p-1" title="Delete Card"><i class="ph-fill ph-trash text-lg"></i></button>
-                    </div>
-                </div>
-                `;
-            });
+                    `;
+                });
+            }
 
             return `
-            <div class="max-w-6xl mx-auto p-4 md:p-6 space-y-6 fade-in">
-                <div class="flex flex-col md:flex-row gap-6">
-                    <!-- Folders Sidebar -->
-                    <div class="w-full md:w-80 lg:w-96 shrink-0 space-y-4">
-                        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-5 flex flex-col h-full min-h-[600px] max-h-[85vh]">
-                            <h3 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2"><i class="ph-fill ph-folders text-lg"></i> Your Decks (Offline)</h3>
-                            <div class="space-y-1 mb-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
+            <div class="max-w-7xl mx-auto p-4 md:p-6 space-y-6 fade-in">
+                <div class="flex flex-col lg:flex-row gap-6 items-start">
+                    <!-- Collapsible File Explorer Sidebar -->
+                    ${!state.hideFolderSidebar ? `
+                    <div class="w-full lg:w-[420px] xl:w-[460px] shrink-0 space-y-4">
+                        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-5 flex flex-col max-h-[85vh]">
+                            <div class="flex items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-100">
+                                <h3 class="text-xs font-extrabold text-slate-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="ph-fill ph-folders text-lg text-amber-500"></i> File Explorer (Your Decks)
+                                </h3>
+                                <div class="flex items-center gap-1">
+                                    <button onclick="window.expandAllFolders()" class="px-2 py-1 text-[11px] font-bold text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-colors" title="Expand All Folders">Expand All</button>
+                                    <button onclick="window.collapseAllFolders()" class="px-2 py-1 text-[11px] font-bold text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-colors" title="Collapse All Folders">Collapse All</button>
+                                    <button onclick="window.toggleFolderSidebar()" class="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors" title="Hide File Explorer">
+                                        <i class="ph-bold ph-sidebar-simple text-base"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Pinned Parking Lot Smart View -->
+                            <div class="mb-3">
+                                <button onclick="window.setParkingLotFilter(!state.parkingLotFilter)" class="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-sm transition-all border ${state.parkingLotFilter ? 'bg-amber-50 border-amber-300 text-amber-900 shadow-sm' : 'bg-slate-50/80 border-slate-200/80 text-slate-700 hover:bg-amber-50/50'}">
+                                    <span class="flex items-center gap-2">
+                                        <i class="ph-fill ph-flag text-amber-500 text-lg"></i>
+                                        <span>Parking Lot (Flagged Cards)</span>
+                                    </span>
+                                    <span class="px-2 py-0.5 text-xs font-black rounded-full ${parkedAll.length > 0 ? 'bg-amber-500 text-white' : 'bg-slate-200 text-slate-600'}">${parkedAll.length}</span>
+                                </button>
+                            </div>
+
+                            <div class="space-y-1 mb-5 flex-1 overflow-y-auto pr-1 custom-scrollbar min-h-[260px]">
                                 ${getFolderTreeHtml()}
                             </div>
-                            <form onsubmit="window.createFolder(event)" class="border-t border-slate-100 pt-5 mb-6">
+
+                            <form onsubmit="window.createFolder(event)" class="border-t border-slate-100 pt-4 mb-4">
                                 <div class="flex gap-2">
-                                    <input id="new-folder-input" type="text" placeholder="New Deck Name" class="w-full text-base font-bold p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
-                                    <button type="submit" class="bg-slate-800 text-white p-3 rounded-xl hover:bg-slate-900 transition-colors"><i class="ph-bold ph-folder-plus text-2xl"></i></button>
+                                    <input id="new-folder-input" type="text" placeholder="New Root Folder Name..." class="w-full text-sm font-bold p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none">
+                                    <button type="submit" class="bg-slate-800 text-white px-3.5 rounded-xl hover:bg-slate-900 transition-colors shrink-0" title="Create Root Folder"><i class="ph-bold ph-folder-plus text-xl"></i></button>
                                 </div>
                             </form>
                             
                             <!-- Backup Section -->
-                            <div class="border-t border-slate-100 pt-4 space-y-2">
-                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Data Security</h3>
-                                <button onclick="window.exportBackup()" class="w-full bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 py-2 px-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors">
+                            <div class="border-t border-slate-100 pt-3 grid grid-cols-2 gap-2">
+                                <button onclick="window.exportBackup()" class="bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors">
                                     <i class="ph-bold ph-download-simple"></i> Export Backup
                                 </button>
-                                <label class="w-full bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 py-2 px-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer">
+                                <label class="bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
                                     <i class="ph-bold ph-upload-simple"></i> Restore Backup
                                     <input type="file" accept=".json" class="hidden" onchange="window.handleImportBackup(event)" />
                                 </label>
                             </div>
                         </div>
                     </div>
+                    ` : ''}
 
                     <!-- Content Area -->
-                    <div class="flex-1 space-y-6">
+                    <div class="flex-1 w-full min-w-0 space-y-6">
                         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-                            <div>
-                                <h2 class="text-xl font-bold text-slate-800 flex items-center gap-2">${escapeHTML(fullPath)}</h2>
-                                <p class="text-sm text-slate-500">${activeTerms.length} cards in this deck</p>
+                            <div class="flex items-start gap-3 min-w-0">
+                                ${state.hideFolderSidebar ? `
+                                <button onclick="window.toggleFolderSidebar()" class="px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl font-bold text-xs flex items-center gap-1.5 shrink-0 transition-colors" title="Show File Explorer">
+                                    <i class="ph-fill ph-folders text-base"></i> Show Folders
+                                </button>
+                                ` : ''}
+                                <div class="min-w-0">
+                                    <h2 class="text-lg md:text-xl font-bold text-slate-800 break-words leading-snug">${escapeHTML(fullPath)}</h2>
+                                    <p class="text-xs md:text-sm text-slate-500">${activeTerms.length} cards shown</p>
+                                </div>
                             </div>
-                            <div class="flex flex-wrap items-center gap-2">
-                                <button onclick="window.removeDuplicates()" class="flex items-center justify-center gap-2 bg-rose-100 hover:bg-rose-200 text-rose-700 px-4 py-2 rounded-xl font-bold transition-colors text-sm">
-                                    <i class="ph-bold ph-broom"></i> Clean Duplicates
-                                </button>
-                                <button onclick="window.toggleBulk()" class="flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-bold transition-colors text-sm">
-                                    ${state.showBulk ? 'Manual Add' : '<i class="ph-bold ph-upload-simple"></i> Bulk Import'}
-                                </button>
+                            <div class="flex flex-wrap items-center gap-2 shrink-0">
+                                ${state.parkingLotFilter ? `
+                                    ${parkedAll.length > 0 ? `
+                                    <button onclick="window.startSession('parking_lot')" class="flex items-center justify-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm shadow-sm">
+                                        <i class="ph-fill ph-play"></i> Review Parked (${parkedAll.length})
+                                    </button>
+                                    <button onclick="window.exportParkingLotCSV()" class="flex items-center justify-center gap-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 px-4 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
+                                        <i class="ph-bold ph-file-csv"></i> Export Parking Lot
+                                    </button>
+                                    ` : ''}
+                                    <button onclick="window.setParkingLotFilter(false)" class="flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
+                                        Back to Deck
+                                    </button>
+                                ` : `
+                                    <button onclick="window.removeDuplicates()" class="flex items-center justify-center gap-2 bg-rose-100 hover:bg-rose-200 text-rose-700 px-3.5 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
+                                        <i class="ph-bold ph-broom"></i> Clean Duplicates
+                                    </button>
+                                    <button onclick="window.toggleBulk()" class="flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
+                                        ${state.showBulk ? 'Manual Add' : '<i class="ph-bold ph-upload-simple"></i> Bulk Import'}
+                                    </button>
+                                `}
                             </div>
                         </div>
 
-                        ${state.showBulk ? `
+                        ${!state.parkingLotFilter ? (state.showBulk ? `
                         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                             <h3 class="font-semibold text-slate-700 mb-2">Import to "${escapeHTML(fullPath)}"</h3>
-                            <p class="text-sm text-slate-500 mb-4">Paste directly from Excel/Sheets (Supports 2 or 3 columns).</p>
+                            <p class="text-sm text-slate-500 mb-4">Paste directly from Excel/Sheets (Supports Question | Choices | Correct Answer | Explanation).</p>
                             <textarea id="bulk-textarea" placeholder="Paste rows here..." class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none h-40 font-mono text-sm whitespace-pre-wrap mb-4"></textarea>
                             <div class="flex flex-col sm:flex-row items-center gap-4">
                                 <button onclick="window.processManualBulk()" class="w-full sm:w-auto bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors">Import Pasted Text</button>
@@ -1737,13 +2414,13 @@
                                 <button type="submit" class="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors flex items-center gap-2"><i class="ph-bold ph-plus text-lg"></i> Add to Deck</button>
                             </form>
                         </div>
-                        `}
+                        `) : ''}
 
-                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[500px]">
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col h-[560px]">
                             <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center flex-wrap gap-4">
                                 <div class="flex items-center gap-3">
                                     <input type="checkbox" ${allSelected ? 'checked' : ''} onclick="window.toggleSelectAll()" class="w-5 h-5 rounded text-blue-600 border-slate-300 cursor-pointer shadow-sm">
-                                    <span class="font-semibold text-slate-700">Cards (${activeTerms.length})</span>
+                                    <span class="font-semibold text-slate-700">${state.parkingLotFilter ? `Parked Cards (${activeTerms.length})` : `Cards (${activeTerms.length})`}</span>
                                 </div>
                                 ${activeTerms.length > 0 ? `
                                 <div class="flex flex-wrap items-center gap-2">
@@ -1756,6 +2433,7 @@
                                     <div class="flex items-center gap-1 border-r border-slate-200 pr-2 mr-1">
                                         <select id="export-level-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer">
                                             <option value="all">All Levels</option>
+                                            <option value="parking_lot" ${state.parkingLotFilter ? 'selected' : ''}>🚩 Parking Lot</option>
                                             <option value="new">New Cards</option>
                                             <option value="1">Level 1</option>
                                             <option value="2">Level 2</option>
@@ -1764,16 +2442,18 @@
                                             <option value="5">Level 5</option>
                                             <option value="6">Level 6</option>
                                         </select>
-                                        <button onclick="window.exportFilteredCSV()" class="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1" title="Export as CSV"><i class="ph-bold ph-download-simple"></i> CSV</button>
+                                        <button onclick="window.exportFilteredCSV()" class="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1" title="Export Question | Choices | Correct Answer | Explanation"><i class="ph-bold ph-download-simple"></i> Excel CSV</button>
                                     </div>
+                                    ${!state.parkingLotFilter ? `
                                     <div class="flex items-center gap-2">
-                                        <select id="bulk-move-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer">
+                                        <select id="bulk-move-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer max-w-[150px]">
                                             <option value="">Move all to...</option>
                                             ${state.folders.filter(f => f.id !== state.activeFolderId).map(f => `<option value="${f.id}">${escapeHTML(f.name)}</option>`).join('')}
                                         </select>
                                         <button onclick="window.bulkMoveTerms()" class="text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-2 rounded-md font-bold transition-colors">Move</button>
                                         <button onclick="window.bulkDeleteTerms()" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1"><i class="ph-bold ph-trash"></i> Empty</button>
                                     </div>
+                                    ` : ''}
                                 </div>
                                 ` : ''}
                             </div>
@@ -2209,59 +2889,156 @@
             `;
         }
 
+        function renderStemWithKeywordUnderlines(text, keywords, enableUnderlines) {
+            const raw = String(text || '');
+            if (!enableUnderlines || !Array.isArray(keywords) || keywords.length === 0) {
+                return escapeHTML(raw);
+            }
+            const validKeywords = keywords
+                .map(k => String(k || '').trim())
+                .filter(k => k.length >= 2)
+                .sort((a, b) => b.length - a.length);
+            if (validKeywords.length === 0) return escapeHTML(raw);
+
+            const escapedRegexParts = validKeywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            const kwRegex = new RegExp(`(${escapedRegexParts.join('|')})`, 'gi');
+
+            // Preserve LaTeX delimiters untouched so KaTeX renders equations cleanly
+            const mathSplitRegex = /(\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g;
+            const segments = raw.split(mathSplitRegex);
+
+            return segments.map(seg => {
+                if (!seg) return '';
+                if (seg.startsWith('$') || seg.startsWith('\\(') || seg.startsWith('\\[')) {
+                    return escapeHTML(seg);
+                }
+                const parts = seg.split(kwRegex);
+                return parts.map((part, idx) => {
+                    if (idx % 2 === 1) {
+                        return `<u class="underline decoration-2 decoration-blue-600 underline-offset-4 bg-amber-100/80 text-slate-900 font-bold px-0.5 rounded">${escapeHTML(part)}</u>`;
+                    }
+                    return escapeHTML(part);
+                }).join('');
+            }).join('');
+        }
+
         function renderSession() {
             if (!state.sessionData || state.sessionData.queue.length === 0) return '';
             const currentCard = state.sessionData.queue[state.currentCardIndex];
             const progressPercentage = state.timerEnabled ? (state.timeLeft / state.timePerCard) * 100 : 100;
             const timerColor = state.timeLeft <= 3 ? 'bg-red-500' : 'bg-blue-500';
 
-            function renderFormattedQuestion(rawQuestion, showAns, ansText) {
-                if (!rawQuestion.includes('[Choices]:')) {
+            if (!state.currentShuffledChoices ||
+                state.currentShuffledChoices.cardId !== currentCard.id ||
+                state.currentShuffledChoices.questionSnapshot !== currentCard.question ||
+                state.currentShuffledChoices.answerSnapshot !== currentCard.answer) {
+                state.currentShuffledChoices = {
+                    cardId: currentCard.id,
+                    questionSnapshot: currentCard.question,
+                    answerSnapshot: currentCard.answer,
+                    options: buildShuffledChoicesForCard(currentCard)
+                };
+            }
+
+            const { stem, choicesRaw, hasChoices } = parseQuestionAndChoices(currentCard.question);
+            const longStem = isLongQuestionStem(stem);
+            const shouldUnderline = state.showAnswer && state.showKeywordsExp && Array.isArray(currentCard.keywords) && currentCard.keywords.length > 0;
+
+            function renderStemHtml() {
+                if (longStem) {
+                    const chunks = (Array.isArray(currentCard.stemChunks) && currentCard.stemChunks.length === 2)
+                        ? currentCard.stemChunks
+                        : fallbackLogicalStemSplit(stem);
+
+                    if (chunks.length === 2) {
+                        const chunk1Html = renderStemWithKeywordUnderlines(chunks[0], currentCard.keywords, shouldUnderline);
+                        const chunk2Html = renderStemWithKeywordUnderlines(chunks[1], currentCard.keywords, shouldUnderline);
+                        const isChunk2Blurred = !state.showAnswer && state.revealStep === 0;
+                        return `
+                            <div class="board-exam-font text-base md:text-lg font-bold text-slate-900 mb-5 leading-relaxed whitespace-pre-wrap text-left tracking-tight">
+                                <span>${chunk1Html} </span>
+                                <span class="transition-all duration-300 ${isChunk2Blurred ? 'blur-[6px] opacity-55 select-none bg-slate-100/70 rounded px-1' : 'blur-0 opacity-100'}">${chunk2Html}</span>
+                            </div>
+                        `;
+                    }
+                }
+                const fullStemHtml = renderStemWithKeywordUnderlines(stem, currentCard.keywords, shouldUnderline);
+                return `
+                    <div class="board-exam-font text-base md:text-lg font-bold text-slate-900 mb-5 leading-relaxed whitespace-pre-wrap text-left tracking-tight">${fullStemHtml}</div>
+                `;
+            }
+
+            function renderChoicesAndStem(showAns) {
+                if (!hasChoices) {
                     return `
-                    <div class="w-full py-10 px-6 bg-slate-50 rounded-3xl border-2 border-slate-100 mb-4 flex flex-col items-center justify-center min-h-[160px] relative transition-all">
-                        <span class="absolute top-4 left-6 text-[10px] font-black text-slate-400 uppercase tracking-widest"><i class="ph-fill ph-cards"></i> Term / Question</span>
-                        <h3 class="text-xl md:text-2xl font-black text-slate-800 leading-relaxed whitespace-pre-wrap text-center mt-4">${escapeHTML(rawQuestion)}</h3>
+                    <div class="w-full py-8 px-5 bg-slate-50 rounded-2xl border-2 border-slate-200 mb-4 flex flex-col justify-center min-h-[150px] relative transition-all">
+                        <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block text-left"><i class="ph-fill ph-cards"></i> Board Exam Item</span>
+                        ${renderStemHtml()}
                     </div>`;
                 }
 
-                const parts = rawQuestion.split('[Choices]:');
-                const qText = escapeHTML(parts[0].trim());
-                const cText = parts[1] || '';
+                const shuffledOpts = state.currentShuffledChoices ? state.currentShuffledChoices.options : null;
+                const totalChoicesCount = shuffledOpts ? shuffledOpts.length : (hasChoices ? 1 : 0);
+                const allChoicesUnblurred = showAns || (state.revealStep >= 1 && state.revealedChoicesCount >= totalChoicesCount);
 
-                const regex = /A\.\s*(.*?)\s*B\.\s*(.*?)\s*C\.\s*(.*?)\s*D\.\s*(.*)/is;
-                const match = cText.match(regex);
-                const cleanAns = String(ansText).trim().toUpperCase();
-                const isLetterAns = ['A', 'B', 'C', 'D'].includes(cleanAns);
-
-                if (match) {
-                    const [, a, b, c, d] = match;
-                    
-                    const getOptionStyle = (letter) => {
-                        if (!showAns || !isLetterAns) return 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'; 
-                        if (cleanAns === letter) return 'bg-green-50 border-green-400 text-green-900 ring-2 ring-green-400 shadow-md transform scale-[1.02] transition-all z-10'; 
-                        return 'bg-slate-50 border-slate-100 text-slate-400 opacity-50'; 
+                if (shuffledOpts && shuffledOpts.length > 0) {
+                    const getOptionStyle = (opt) => {
+                        if (!showAns) return 'bg-slate-50/90 border-slate-300 text-slate-800 hover:bg-blue-50/60 hover:border-blue-300 active:scale-[0.99]';
+                        if (opt.isCorrect) return 'bg-green-50 border-green-500 text-green-950 ring-2 ring-green-400 shadow-md z-10';
+                        if (state.selectedChoice === opt.displayLetter && !opt.isCorrect) {
+                            return 'bg-rose-50 border-rose-400 text-rose-900 ring-2 ring-rose-300';
+                        }
+                        return 'bg-slate-50 border-slate-200 text-slate-400 opacity-55';
                     };
-                    
-                    const getBadgeStyle = (letter) => {
-                        if (!showAns || !isLetterAns) return 'bg-slate-200 text-slate-500';
-                        if (cleanAns === letter) return 'bg-green-500 text-white shadow-sm';
+
+                    const getBadgeStyle = (opt) => {
+                        if (!showAns) return 'bg-slate-200 text-slate-700';
+                        if (opt.isCorrect) return 'bg-green-600 text-white shadow-sm';
+                        if (state.selectedChoice === opt.displayLetter && !opt.isCorrect) return 'bg-rose-500 text-white';
                         return 'bg-slate-200 text-slate-400';
                     };
 
+                    const optionsHtml = shuffledOpts.map((opt, idx) => {
+                        const isChoiceBlurred = !showAns && (state.revealStep === 0 || idx >= state.revealedChoicesCount);
+                        return `
+                        <button type="button" onclick="window.selectChoiceOption(event, '${opt.displayLetter}')" class="board-exam-font w-full p-3.5 md:p-4 min-h-[52px] rounded-xl border text-left flex items-start gap-3 transition-all duration-300 ${getOptionStyle(opt)}">
+                            <span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle(opt)}">${opt.displayLetter}.</span>
+                            <span class="font-semibold text-sm md:text-base leading-snug mt-0.5 break-words flex-1 transition-all duration-300 ${isChoiceBlurred ? 'blur-[8px] opacity-30 select-none' : 'blur-0 opacity-100'}">${escapeHTML(opt.text)}</span>
+                        </button>
+                        `;
+                    }).join('');
+
+                    const nextChoiceLetter = ['A', 'B', 'C', 'D'][state.revealedChoicesCount] || '';
+
                     return `
-                        <h3 class="text-lg md:text-xl font-black text-slate-800 mb-4 leading-relaxed whitespace-pre-wrap text-left">${qText}</h3>
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-left w-full mt-2 mb-6">
-                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('A')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('A')}">A</span> <span class="font-medium mt-0.5">${escapeHTML(a)}</span></div>
-                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('B')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('B')}">B</span> <span class="font-medium mt-0.5">${escapeHTML(b)}</span></div>
-                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('C')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('C')}">C</span> <span class="font-medium mt-0.5">${escapeHTML(c)}</span></div>
-                            <div class="p-3 md:p-4 rounded-xl border shadow-sm flex items-start gap-3 transition-all duration-300 ${getOptionStyle('D')}"><span class="font-bold px-2.5 py-0.5 rounded text-sm shrink-0 ${getBadgeStyle('D')}">D</span> <span class="font-medium mt-0.5">${escapeHTML(d)}</span></div>
+                        ${renderStemHtml()}
+                        <div class="relative w-full mt-2 mb-4">
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-left w-full">
+                                ${optionsHtml}
+                            </div>
+                            ${!allChoicesUnblurred ? `
+                            <div class="flex items-center justify-center pointer-events-none mt-3">
+                                <span class="text-xs font-bold text-slate-500 bg-slate-100/90 border border-slate-200 px-3 py-1.5 rounded-full shadow-sm">
+                                    <i class="ph-bold ph-hand-tap"></i> ${state.revealStep === 0 ? 'Tap card to unblur rest of stem' : `Tap card to reveal Choice ${nextChoiceLetter} (${state.revealedChoicesCount}/${totalChoicesCount})`}
+                                </span>
+                            </div>
+                            ` : ''}
                         </div>
                     `;
                 } else {
+                    const isRawBlurred = !showAns && (state.revealStep === 0 || state.revealedChoicesCount < 1);
                     return `
-                        <h3 class="text-lg md:text-xl font-black text-slate-800 mb-4 leading-relaxed whitespace-pre-wrap text-left">${qText}</h3>
-                        <div class="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200 text-left whitespace-pre-wrap text-sm md:text-base font-medium text-slate-700 mb-6">${escapeHTML(cText.trim())}</div>
+                        ${renderStemHtml()}
+                        <div class="mt-3 p-4 bg-slate-50 rounded-xl border border-slate-200 text-left whitespace-pre-wrap text-sm md:text-base font-medium text-slate-800 mb-4 board-exam-font transition-all duration-300 ${isRawBlurred ? 'blur-[8px] opacity-30 select-none' : 'blur-0 opacity-100'}">${escapeHTML(choicesRaw)}</div>
                     `;
+                }
+            }
+
+            let displayCorrectAnswerText = currentCard.answer;
+            if (state.currentShuffledChoices && state.currentShuffledChoices.options) {
+                const correctOpt = state.currentShuffledChoices.options.find(o => o.isCorrect);
+                if (correctOpt) {
+                    displayCorrectAnswerText = `${correctOpt.displayLetter}. ${correctOpt.text}`;
                 }
             }
 
@@ -2286,15 +3063,15 @@
                 let greenPct = (greenCount / totalCards) * 100;
 
                 sessionProgressHtml = `
-                <div class="w-full max-w-2xl mx-auto mb-6 fade-in">
-                    <div class="flex justify-between items-end mb-2">
+                <div class="w-full max-w-2xl mx-auto mb-4 fade-in">
+                    <div class="flex justify-between items-end mb-1.5">
                         <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Daily Review Load Queue</span>
                         <div class="flex gap-3 text-xs font-bold">
                             <span class="text-rose-500"><i class="ph-fill ph-warning-circle"></i> Weak (L1-L2): ${redCount}</span>
                             <span class="text-emerald-500"><i class="ph-fill ph-check-circle"></i> Strong (L3+): ${greenCount}</span>
                         </div>
                     </div>
-                    <div class="w-full h-3 bg-slate-100 rounded-full flex overflow-hidden border border-slate-200 shadow-inner">
+                    <div class="w-full h-2.5 bg-slate-100 rounded-full flex overflow-hidden border border-slate-200 shadow-inner">
                         <div class="h-full bg-slate-300 transition-all duration-300" style="width: ${completedPct}%" title="Completed"></div>
                         <div class="h-full bg-rose-500 transition-all duration-300" style="width: ${redPct}%" title="Weak Cards Remaining"></div>
                         <div class="h-full bg-emerald-400 transition-all duration-300" style="width: ${greenPct}%" title="Strong Cards Remaining"></div>
@@ -2303,21 +3080,29 @@
                 `;
             }
 
+            const sessionLabel = state.sessionData.type === 'intake'
+                ? 'Intake'
+                : state.sessionData.type === 'review_ahead'
+                    ? 'Ahead'
+                    : state.sessionData.type === 'parking_lot'
+                        ? 'Parking Lot'
+                        : 'Review';
+
             return `
-            <div class="max-w-2xl mx-auto p-4 flex flex-col h-[90vh]">
-                <div class="flex flex-wrap items-center justify-between mb-8 gap-4">
-                    <button onclick="window.endSession()" class="text-slate-400 hover:text-slate-700 font-medium transition-colors">Exit Session</button>
+            <div class="max-w-2xl mx-auto p-3 md:p-4 flex flex-col min-h-[90vh]">
+                <div class="flex flex-wrap items-center justify-between mb-4 gap-3">
+                    <button onclick="window.endSession()" class="text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center gap-1 transition-colors"><i class="ph-bold ph-arrow-left"></i> Exit Session</button>
                     <div class="flex items-center gap-2">
                         <select onchange="window.setTimePerCard(this.value)" class="bg-slate-100 border-none text-xs font-bold text-slate-600 rounded-lg px-2 py-1.5 outline-none cursor-pointer" title="Time per card">
                             ${[5, 10, 15, 20, 30, 45, 60].map(s => `<option value="${s}" ${state.timePerCard === s ? 'selected' : ''}>${s}s Timer</option>`).join('')}
                         </select>
-                        <button onclick="window.toggleTimer()" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-bold transition-colors ${state.timerEnabled ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-500'}">
+                        <button onclick="window.toggleTimer()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs md:text-sm font-bold transition-colors ${state.timerEnabled ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-500'}">
                             <i class="ph-fill ${state.timerEnabled ? 'ph-toggle-right' : 'ph-toggle-left'} text-lg"></i> ${state.timerEnabled ? 'Timer ON' : 'Timer OFF'}
                         </button>
                     </div>
                     <div class="flex gap-2">
-                        <span class="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-sm font-bold uppercase tracking-wider">${state.sessionData.type === 'intake' ? 'Intake' : state.sessionData.type === 'review_ahead' ? 'Ahead' : 'Review'}</span>
-                        <span class="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-bold">${state.sessionData.type === 'intake' ? `${state.sessionData.queue.length} Left` : `${state.currentCardIndex + 1} / ${state.sessionData.queue.length}`}</span>
+                        <span class="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-xs md:text-sm font-bold uppercase tracking-wider">${sessionLabel}</span>
+                        <span class="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs md:text-sm font-bold">${state.sessionData.type === 'intake' ? `${state.sessionData.queue.length} Left` : `${state.currentCardIndex + 1} / ${state.sessionData.queue.length}`}</span>
                     </div>
                 </div>
 
@@ -2325,95 +3110,116 @@
 
                 <div class="flex-1 flex flex-col items-center justify-center relative w-full">
                     ${!state.showAnswer && state.timerEnabled ? `
-                    <div class="w-full max-w-md h-2 bg-slate-200 rounded-full mb-6 overflow-hidden">
+                    <div class="w-full max-w-xl h-2 bg-slate-200 rounded-full mb-4 overflow-hidden">
                         <div id="timer-bar-fill" class="h-full ${timerColor} transition-all duration-1000 ease-linear" style="width: ${progressPercentage}%"></div>
                     </div>
                     ` : ''}
                     
-                    <div class="w-full max-w-md bg-white rounded-3xl shadow-xl p-8 md:p-10 text-center border border-slate-100 flex flex-col min-h-[350px] justify-center relative transition-all duration-300">
-                        ${state.sessionData.type === 'review' ? `
-                        <div class="absolute top-4 right-4 flex gap-1">${lvlDots}</div>
-                        ` : ''}
-                        <div class="text-left w-full mb-6">
-                            <span class="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-100 px-2 py-1 rounded">
+                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 border-slate-200 flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
+                        <!-- Card Top Bar: Deck Path + Parking Lot Flag + Live OCR Edit -->
+                        <div class="flex items-center justify-between gap-2 w-full mb-4 pb-3 border-b border-slate-100 flex-wrap">
+                            <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[200px] sm:max-w-[260px]" title="${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}">
                                 ${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}
                             </span>
+                            <div class="flex items-center gap-1.5 ml-auto" onclick="event.stopPropagation()">
+                                ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1.5">${lvlDots}</div>` : ''}
+                                <button type="button" onclick="window.toggleParkingLot('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${currentCard.parkingLot ? 'bg-amber-100 text-amber-800 border border-amber-300 shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-700 border border-transparent'}" title="Toggle Parking Lot Flag">
+                                    <i class="${currentCard.parkingLot ? 'ph-fill' : 'ph-bold'} ph-flag text-sm"></i>
+                                    <span>${currentCard.parkingLot ? 'Parked' : 'Parking Lot'}</span>
+                                </button>
+                                ${state.sessionData.type === 'parking_lot' && currentCard.parkingLot ? `
+                                <button type="button" onclick="window.resolveParkingLot('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 flex items-center gap-1 transition-all active:scale-95" title="Resolve & Remove from Parking Lot">
+                                    <i class="ph-bold ph-check-circle text-sm"></i> Resolve
+                                </button>
+                                ` : ''}
+                                <button type="button" onclick="window.startEditTerm('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-blue-50 text-slate-500 hover:text-blue-600 flex items-center gap-1 transition-all active:scale-95" title="Edit Card (Fix OCR / Typos)">
+                                    <i class="ph-fill ph-pencil-simple text-sm"></i> Edit
+                                </button>
+                                <button type="button" onclick="window.openApiKeyModal(event)" class="p-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${state.geminiApiKey ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' : 'bg-amber-50 text-amber-600 hover:bg-amber-100'}" title="${state.geminiApiKey ? 'Gemini API Key Configured' : 'Set Gemini API Key'}">
+                                    <i class="ph-fill ph-key text-sm"></i>
+                                </button>
+                            </div>
                         </div>
                         
-                        ${renderFormattedQuestion(currentCard.question, state.showAnswer, currentCard.answer)}
-                        
-                        ${currentCard.simplifiedQuestion ? `
-                        <div class="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl text-left relative overflow-hidden fade-in shadow-sm">
-                            <span class="text-[10px] font-black text-amber-600 uppercase tracking-widest block mb-1.5"><i class="ph-fill ph-lightbulb"></i> Simplified Question & Choices (Taglish)</span>
-                            <p class="text-sm font-medium text-amber-900 whitespace-pre-wrap">${escapeHTML(currentCard.simplifiedQuestion)}</p>
+                        <div class="my-auto w-full">
+                            ${renderChoicesAndStem(state.showAnswer)}
                         </div>
-                        ` : currentCard.isGeneratingSimplify ? `
-                        <div class="mb-6 p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-center gap-2 animate-pulse text-slate-500 font-bold text-xs w-full max-w-[200px] mx-auto">
-                            <i class="ph-bold ph-spinner-gap animate-spin text-lg"></i> Sini-simplify...
-                        </div>
-                        ` : `
-                        <div class="mb-6 text-center">
-                             <button onclick="window.generateAISimplification('${currentCard.id}')" class="text-xs font-bold text-slate-400 hover:text-amber-500 transition-colors flex items-center justify-center gap-1 mx-auto bg-slate-50 hover:bg-amber-50 px-3 py-1.5 rounded-full border border-slate-200 hover:border-amber-200">
-                                <i class="ph-fill ph-magic-wand"></i> Simplify Question & Choices (AI)
-                             </button>
-                        </div>
-                        `}
 
                         ${state.showAnswer ? `
-                        <div class="fade-in slide-up duration-300 w-full mt-2">
-                            <div class="p-6 bg-blue-50 border-2 border-blue-100 rounded-3xl text-center relative overflow-hidden">
+                        <div class="fade-in slide-up duration-300 w-full mt-2 space-y-3" onclick="event.stopPropagation()">
+                            <div class="p-4 md:p-5 bg-blue-50 border-2 border-blue-200 rounded-2xl text-center relative overflow-hidden">
                                 <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
-                                <span class="text-[10px] font-black text-blue-500 uppercase tracking-widest block mb-2"><i class="ph-fill ph-check-circle"></i> Answer / Definition</span>
-                                <p class="text-xl md:text-2xl text-blue-900 font-black whitespace-pre-wrap">${escapeHTML(currentCard.answer)}</p>
+                                <span class="text-[10px] font-black text-blue-600 uppercase tracking-widest block mb-1"><i class="ph-fill ph-check-circle"></i> Correct Answer</span>
+                                <p class="board-exam-font text-lg md:text-xl text-blue-950 font-black whitespace-pre-wrap">${escapeHTML(displayCorrectAnswerText)}</p>
                             </div>
                             
-                            ${currentCard.explanation ? `
-                            <div class="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-2xl text-left relative overflow-hidden fade-in shadow-sm">
-                                <span class="text-[10px] font-black text-purple-600 uppercase tracking-widest block mb-1.5"><i class="ph-fill ph-magic-wand"></i> AI Tutor Explanation (Saved Offline)</span>
-                                <p class="text-sm font-medium text-purple-900 whitespace-pre-wrap">${escapeHTML(currentCard.explanation)}</p>
-                            </div>
+                            ${!state.showKeywordsExp ? `
+                            <button type="button" onclick="window.triggerKeywordsAndExplanation('${currentCard.id}')" class="w-full py-3 px-4 bg-purple-100 hover:bg-purple-200 text-purple-800 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 border border-purple-200 shadow-sm">
+                                <i class="ph-fill ph-highlighter-circle text-lg"></i> Show Keywords & Explanation
+                            </button>
                             ` : currentCard.isGeneratingAI ? `
-                            <div class="mt-4 p-4 bg-slate-100 rounded-2xl flex items-center justify-center gap-2 animate-pulse text-slate-500 font-bold text-sm border border-slate-200">
-                                <i class="ph-bold ph-spinner-gap animate-spin text-xl"></i> Nag-iisip si AI...
+                            <div class="p-4 bg-slate-100 rounded-2xl flex items-center justify-center gap-2 animate-pulse text-slate-600 font-bold text-sm border border-slate-200">
+                                <i class="ph-bold ph-spinner-gap animate-spin text-xl text-purple-600"></i> Identifying keywords & generating explanation...
                             </div>
                             ` : `
-                            <button onclick="window.generateAIExplanation('${currentCard.id}')" class="mt-4 w-full py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-colors active:scale-95 border border-purple-200">
-                                <i class="ph-fill ph-sparkle text-lg"></i> Explain with AI (Taglish)
-                            </button>
-                            `}
+                            <div class="p-4 bg-purple-50/90 border border-purple-200 rounded-2xl text-left space-y-3 fade-in shadow-sm">
+                                <div class="flex items-center justify-between gap-2">
+                                    <span class="text-[10px] font-black text-purple-700 uppercase tracking-widest flex items-center gap-1">
+                                        <i class="ph-fill ph-sparkle"></i> Keywords & Explanation (Editable)
+                                    </span>
+                                    <span id="exp-autosave-${currentCard.id}" class="text-[10px] font-bold text-emerald-600 transition-opacity">✓ Cached</span>
+                                </div>
 
-                            ${currentCard.derivation ? `
-                            <div class="mt-3 p-4 bg-indigo-50 border border-indigo-200 rounded-2xl text-left relative overflow-hidden fade-in shadow-sm">
-                                <span class="text-[10px] font-black text-indigo-600 uppercase tracking-widest block mb-1.5"><i class="ph-fill ph-math-operations"></i> Formula Breakdown / Derivation</span>
-                                <p class="text-sm font-medium text-indigo-900 whitespace-pre-wrap leading-relaxed">${escapeHTML(currentCard.derivation)}</p>
+                                <textarea
+                                    rows="3"
+                                    placeholder="Add your own explanation, notes, or mnemonics here (auto-saves)..."
+                                    oninput="window.handleExplanationAutoSave('${currentCard.id}', this.value)"
+                                    class="w-full p-2.5 text-sm font-medium text-purple-950 bg-white/90 border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-400 outline-none resize-y leading-relaxed"
+                                >${escapeHTML(currentCard.explanation || '')}</textarea>
+
+                                <div class="flex items-center gap-2 pt-1">
+                                    <input
+                                        id="custom-regen-input-${currentCard.id}"
+                                        type="text"
+                                        placeholder="e.g., explain why B is wrong, connect to cycle..."
+                                        onkeydown="if(event.key==='Enter'){event.preventDefault(); window.regenerateCustomExplanation('${currentCard.id}');}"
+                                        class="flex-1 text-xs p-2.5 bg-white border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-400 outline-none font-medium text-slate-700"
+                                    />
+                                    <button
+                                        type="button"
+                                        onclick="window.regenerateCustomExplanation('${currentCard.id}')"
+                                        class="px-3.5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs flex items-center gap-1 shrink-0 transition-colors active:scale-95 shadow-sm"
+                                    >
+                                        <i class="ph-bold ph-arrows-clockwise"></i> Regenerate
+                                    </button>
+                                </div>
                             </div>
-                            ` : currentCard.isGeneratingDerivation ? `
-                            <div class="mt-3 p-4 bg-slate-100 rounded-2xl flex items-center justify-center gap-2 animate-pulse text-slate-500 font-bold text-sm border border-slate-200">
-                                <i class="ph-bold ph-spinner-gap animate-spin text-xl"></i> Hinuhimay ang formula...
-                            </div>
-                            ` : `
-                            <button onclick="window.generateAIDerivation('${currentCard.id}')" class="mt-3 w-full py-3 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-colors active:scale-95 border border-indigo-200">
-                                <i class="ph-fill ph-math-operations text-lg"></i> Derive Formula (AI)
-                            </button>
                             `}
                         </div>
                         ` : `
-                        <div class="mt-auto">
-                            <button onclick="window.revealAnswer()" class="mt-6 text-slate-400 hover:text-blue-600 font-semibold flex items-center justify-center gap-2 w-full transition-colors"><i class="ph-fill ph-keyboard text-xl"></i> Tap or press [SPACE] to reveal</button>
+                        <div class="mt-4 pt-2 border-t border-slate-100">
+                            <button type="button" onclick="event.stopPropagation(); window.handleCardBodyTap(event)" class="text-slate-400 hover:text-blue-600 font-semibold text-xs md:text-sm flex items-center justify-center gap-2 w-full py-1 transition-colors">
+                                <i class="ph-fill ph-hand-tap text-lg"></i>
+                                ${state.revealStep === 0
+                                    ? 'Tap card or press [SPACE] to unblur question'
+                                    : (hasChoices && state.revealedChoicesCount < (state.currentShuffledChoices && state.currentShuffledChoices.options ? state.currentShuffledChoices.options.length : 1))
+                                        ? `Tap card or press [SPACE] to unblur next choice (${state.revealedChoicesCount}/${state.currentShuffledChoices && state.currentShuffledChoices.options ? state.currentShuffledChoices.options.length : 1})`
+                                        : 'Tap a choice, tap card, or press [SPACE] to reveal answer'}
+                            </button>
                         </div>
                         `}
                     </div>
                 </div>
 
-                <div class="h-32 flex items-center justify-center gap-3 mt-4 w-full max-w-md mx-auto">
+                <div class="h-28 flex items-center justify-center gap-3 mt-4 w-full max-w-xl mx-auto">
                     ${state.showAnswer ? `
-                    <button onclick="window.handleAnswer('wrong')" class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 py-4 md:py-5 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm">
+                    <button onclick="window.handleAnswer('wrong')" class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm">
                         <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MALI</span><span class="text-[10px] opacity-60">[1] Reset</span>
                     </button>
-                    <button onclick="window.handleAnswer('correct')" class="flex-1 bg-green-500 hover:bg-green-600 text-white py-4 md:py-5 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-green-200">
+                    <button onclick="window.handleAnswer('correct')" class="flex-1 bg-green-500 hover:bg-green-600 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-green-200">
                         <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> TAMA</span><span class="text-[10px] opacity-80">[2] +1 Lvl</span>
                     </button>
-                    <button onclick="window.handleAnswer('perfect')" class="flex-1 bg-amber-400 hover:bg-amber-500 text-white py-4 md:py-5 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-amber-200">
+                    <button onclick="window.handleAnswer('perfect')" class="flex-1 bg-amber-400 hover:bg-amber-500 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-amber-200">
                         <span class="flex items-center gap-1"><i class="ph-fill ph-shooting-star text-xl"></i> PERFECT</span><span class="text-[10px] opacity-80">[3] +3 Lvl</span>
                     </button>
                     ` : ''}
@@ -2480,26 +3286,75 @@
             else if (state.currentView === 'session') content += renderSession();
             content += `</main>`;
             
-            // --- STREAMING_CHUNK:Edit Term Modal Overlay ---
+            // --- STREAMING_CHUNK:Edit Term Modal Overlay (Live OCR Card Editor) ---
             if (state.editingTermId) {
                 const termToEdit = state.terms.find(t => t.id === state.editingTermId);
-                content += `
-                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
-                    <div class="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl zoom-in flex flex-col max-h-[90vh]">
-                        <h3 class="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2"><i class="ph-bold ph-pencil-simple text-blue-600"></i> Edit Card</h3>
-                        <div class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
-                            <div>
-                                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">Question / Term</label>
-                                <textarea id="edit-term-q" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none min-h-[120px] font-medium text-slate-800">${escapeHTML(termToEdit.question)}</textarea>
+                if (termToEdit) {
+                    const { stem, choicesRaw } = parseQuestionAndChoices(termToEdit.question);
+                    content += `
+                    <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in">
+                        <div class="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl zoom-in flex flex-col max-h-[90vh]">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-xl font-bold text-slate-800 flex items-center gap-2"><i class="ph-bold ph-pencil-simple text-blue-600"></i> Live OCR Card Editor</h3>
+                                <span class="text-[11px] font-bold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">Resets AI Blur & Keyword Cache on Save</span>
                             </div>
-                            <div>
-                                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">Answer / Definition</label>
-                                <textarea id="edit-term-a" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-none min-h-[100px] font-medium text-slate-800">${escapeHTML(termToEdit.answer)}</textarea>
+                            <div class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
+                                <div>
+                                    <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">Question Stem</label>
+                                    <textarea id="edit-term-q" class="board-exam-font w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-y min-h-[110px] font-bold text-sm text-slate-800">${escapeHTML(stem)}</textarea>
+                                </div>
+                                <div>
+                                    <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">Choices (Format: A. ... B. ... C. ... D. ...)</label>
+                                    <textarea id="edit-term-choices" placeholder="A. Choice 1 B. Choice 2 C. Choice 3 D. Choice 4" class="board-exam-font w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none resize-y min-h-[90px] font-bold text-sm text-slate-800">${escapeHTML(choicesRaw)}</textarea>
+                                </div>
+                                <div>
+                                    <label class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">Correct Answer (e.g. A, B, C, or D)</label>
+                                    <input id="edit-term-a" type="text" value="${escapeHTML(termToEdit.answer)}" class="board-exam-font w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-bold text-base text-slate-800" />
+                                </div>
+                            </div>
+                            <div class="flex gap-3 mt-6 pt-4 border-t border-slate-100">
+                                <button onclick="window.cancelEditTerm()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-colors">Cancel</button>
+                                <button onclick="window.saveEditTerm()" class="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-colors shadow-lg shadow-blue-200">Save Changes</button>
                             </div>
                         </div>
+                    </div>
+                    `;
+                }
+            }
+
+            // --- STREAMING_CHUNK:Gemini API Key Modal (Account-Synced) ---
+            if (state.showApiKeyModal) {
+                content += `
+                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeApiKeyModal()">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl zoom-in flex flex-col" onclick="event.stopPropagation()">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                <i class="ph-fill ph-key text-amber-500 text-xl"></i> Gemini AI Key (Account Synced)
+                            </h3>
+                            <button onclick="window.closeApiKeyModal()" class="p-1 text-slate-400 hover:text-slate-600 rounded-lg"><i class="ph-bold ph-x text-lg"></i></button>
+                        </div>
+                        <p class="text-xs text-slate-500 leading-relaxed mb-4">
+                            I-paste dito ang iyong Google AI Studio API Key. Automatic itong masi-save sa iyong <b>Firebase Account Vault</b> kaya kahit lumipat ka sa CP o Laptop, naka-sync na agad at ligtas (hindi nakalantad sa GitHub repo mo).
+                        </p>
+                        <div class="space-y-3">
+                            <div>
+                                <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">Google Gemini API Key</label>
+                                <input
+                                    id="gemini-api-key-input"
+                                    type="password"
+                                    placeholder="AIzaSy..."
+                                    value="${escapeHTML(state.geminiApiKey || '')}"
+                                    onkeydown="if(event.key==='Enter'){event.preventDefault(); window.saveGeminiApiKey();}"
+                                    class="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm font-bold text-slate-800"
+                                />
+                            </div>
+                            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 hover:text-blue-800">
+                                <i class="ph-bold ph-arrow-square-out"></i> Kumuha ng libreng Gemini API Key sa Google AI Studio
+                            </a>
+                        </div>
                         <div class="flex gap-3 mt-6 pt-4 border-t border-slate-100">
-                            <button onclick="window.cancelEditTerm()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-colors">Cancel</button>
-                            <button onclick="window.saveEditTerm()" class="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-colors shadow-lg shadow-blue-200">Save Changes</button>
+                            <button onclick="window.closeApiKeyModal()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition-colors">Cancel</button>
+                            <button onclick="window.saveGeminiApiKey()" class="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm transition-colors shadow-lg shadow-blue-200">Save & Sync Key</button>
                         </div>
                     </div>
                 </div>
