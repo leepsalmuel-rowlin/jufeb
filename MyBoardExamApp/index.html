@@ -112,7 +112,7 @@
             parkingLotFilter: false, // View/filter Parking Lot cards
             erroneousFilter: false, // View/filter Erroneous Tracker cards
             geminiApiKey: '', // Synced per-account via Firebase Vault & localStorage (never hardcoded in GitHub)
-            geminiModel: 'gemini-2.5-flash-lite', // Active AI model (synced per-account)
+            geminiModel: 'gemini-3.5-flash-lite', // Active AI model (500 RPD Flash-Lite default, synced per-account)
             showApiKeyModal: false,
             forecastMode: 'actual', 
             forecastQuota: 50,
@@ -387,7 +387,7 @@
                         terms: cleanTermsForStorage(state.terms),
                         history: state.history,
                         geminiApiKey: state.geminiApiKey || '',
-                        geminiModel: state.geminiModel || 'gemini-2.5-flash-lite'
+                        geminiModel: state.geminiModel || 'gemini-3.5-flash-lite'
                     });
                 } catch (e) {
                     console.error("Error saving to cloud:", e);
@@ -396,14 +396,78 @@
         };
 
         const AVAILABLE_GEMINI_MODELS = [
-            { id: 'auto', label: 'Auto-Rotate (Iwas Quota Limit - Recommended)' },
-            { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite (Fastest & Highest Free Quota)' },
-            { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Balanced Standard)' },
-            { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
-            { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
-            { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash-Lite (High Quota)' },
-            { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Deep Reasoning - Low Quota)' }
+            { id: 'gemini-3.5-flash-lite', label: '🔥 Gemini 3.5 Flash Lite (500 RPD / 15 RPM - Best Free Quota!)' },
+            { id: 'auto', label: '⚡ Auto Flash-Lite (Kusang hahanapin ang 500 RPD Flash-Lite model)' },
+            { id: 'gemini-3.5-flash-lite-preview', label: 'Gemini 3.5 Flash Lite Preview (500 RPD)' },
+            { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (High Free Quota)' },
+            { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Standard)' },
+            { id: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite' },
+            { id: 'gemini-3-flash-preview', label: '⚠️ Gemini 3 Flash (20 RPD limit lang sa Free Tier!)' },
+            { id: 'llama-3.3-70b-versatile', label: 'Groq: Llama 3.3 70B (14,400 RPD Free w/ gsk_ key)' },
+            { id: 'llama-3.1-8b-instant', label: 'Groq: Llama 3.1 8B Instant (Ultra Fast w/ gsk_ key)' }
         ];
+
+        const discoveredModelsByKey = {};
+
+        async function discoverKeyModels(activeKey) {
+            if (!activeKey || activeKey.startsWith('gsk_')) return null;
+            if (discoveredModelsByKey[activeKey]) return discoveredModelsByKey[activeKey];
+            try {
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${activeKey}`);
+                if (!res.ok) return null;
+                const data = await res.json();
+                const list = (data.models || []).filter(m =>
+                    Array.isArray(m.supportedGenerationMethods) &&
+                    m.supportedGenerationMethods.includes('generateContent')
+                ).map(m => ({
+                    id: String(m.name || '').replace(/^models\//, ''),
+                    displayName: String(m.displayName || m.name || '')
+                })).filter(m => m.id);
+
+                if (list.length > 0) {
+                    discoveredModelsByKey[activeKey] = list;
+                    // Also add any newly discovered Flash-Lite / Flash models into AVAILABLE_GEMINI_MODELS dropdown
+                    list.forEach(dm => {
+                        if (/flash/i.test(dm.id) && !AVAILABLE_GEMINI_MODELS.some(existing => existing.id === dm.id)) {
+                            const isLite = /lite/i.test(dm.id) || /lite/i.test(dm.displayName);
+                            AVAILABLE_GEMINI_MODELS.splice(isLite ? 1 : AVAILABLE_GEMINI_MODELS.length - 2, 0, {
+                                id: dm.id,
+                                label: `${ isLite ? '🔥 ' : '' }${dm.displayName} (${dm.id})`
+                            });
+                        }
+                    });
+                }
+                return list;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        window.syncAvailableGeminiModels = async (event) => {
+            if (event) event.stopPropagation();
+            const input = document.getElementById('gemini-api-key-input');
+            const rawKeys = (input ? input.value : state.geminiApiKey || '').trim();
+            const firstGeminiKey = rawKeys.split(/[\n,]+/).map(k => k.trim()).find(k => k && !k.startsWith('gsk_'));
+            if (!firstGeminiKey) {
+                showToast("Maglagay muna ng Gemini API Key (AIza...).", "error");
+                return;
+            }
+            showToast("Checking available models on your API key...");
+            delete discoveredModelsByKey[firstGeminiKey];
+            const list = await discoverKeyModels(firstGeminiKey);
+            if (list && list.length > 0) {
+                const liteModel = list.find(m => /3\.5.*lite/i.test(m.id) || /3\.5.*lite/i.test(m.displayName))
+                    || list.find(m => /lite/i.test(m.id) || /lite/i.test(m.displayName));
+                if (liteModel) {
+                    state.geminiModel = liteModel.id;
+                    localStorage.setItem('elementVaultGeminiModel', liteModel.id);
+                }
+                renderApp();
+                showToast(`Found ${list.length} models! Selected: ${state.geminiModel}`);
+            } else {
+                showToast("Could not fetch model list. Check your API key.", "error");
+            }
+        };
 
         window.openApiKeyModal = (event) => {
             if (event) event.stopPropagation();
@@ -432,7 +496,7 @@
             const input = document.getElementById('gemini-api-key-input');
             const modelSelect = document.getElementById('gemini-model-select');
             const val = input ? input.value.trim() : '';
-            const modelVal = modelSelect ? modelSelect.value : (state.geminiModel || 'gemini-2.5-flash-lite');
+            const modelVal = modelSelect ? modelSelect.value : (state.geminiModel || 'gemini-3.5-flash-lite');
             state.geminiApiKey = val;
             state.geminiModel = modelVal;
             localStorage.setItem('elementVaultGeminiKey', val);
@@ -441,59 +505,139 @@
             state.showApiKeyModal = false;
             if (state.currentView === 'session') manageTimer();
             renderApp();
-            showToast(val ? `AI Key & Model (${modelVal}) saved & synced! 🔑` : "Gemini API Key cleared.");
+            const keyCount = val.split(/[\n,]+/).map(k => k.trim()).filter(Boolean).length;
+            showToast(val ? `Saved ${keyCount} AI Key(s) & Model (${modelVal})! 🔑` : "AI Key cleared.");
         };
 
+        let currentKeyIndex = 0;
+
         async function callGeminiAPI(systemPrompt, userQuery, silent = false) {
-            const apiKey = (state.geminiApiKey || '').trim();
-            if (!apiKey) return null;
+            const rawKeys = (state.geminiApiKey || '').trim();
+            if (!rawKeys) return null;
 
-            const fallbackOrder = [
-                'gemini-2.5-flash-lite',
-                'gemini-2.5-flash',
-                'gemini-2.0-flash-lite',
-                'gemini-2.0-flash',
-                'gemini-3-flash-preview'
-            ];
+            // Support multiple API keys (separated by newline or comma) for automatic quota rotation
+            const keyList = rawKeys.split(/[\n,]+/).map(k => k.trim()).filter(Boolean);
+            if (keyList.length === 0) return null;
 
-            let modelsToTry = [];
-            if (!state.geminiModel || state.geminiModel === 'auto') {
-                modelsToTry = fallbackOrder;
-            } else {
-                // Try the user's selected model first, then fallback if it fails/quotas out
-                modelsToTry = [state.geminiModel, ...fallbackOrder.filter(m => m !== state.geminiModel)];
-            }
+            const combinedPrompt = `${systemPrompt}\n\n${userQuery}`;
+            let lastErrorMsg = '';
 
-            let lastStatus = 0;
-            for (let i = 0; i < modelsToTry.length; i++) {
-                const modelName = modelsToTry[i];
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-                try {
-                    const response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            contents: [{ parts: [{ text: userQuery }] }],
-                            systemInstruction: { parts: [{ text: systemPrompt }] },
-                            generationConfig: { responseMimeType: "application/json" }
-                        })
-                    });
-                    lastStatus = response.status;
-                    if (response.ok) {
-                        const result = await response.json();
-                        const text = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                        if (text) return text;
+            for (let kOffset = 0; kOffset < keyList.length; kOffset++) {
+                const idx = (currentKeyIndex + kOffset) % keyList.length;
+                const activeKey = keyList[idx];
+
+                // 1. If it's a Groq API Key (starts with gsk_) -> 14,400 requests/day free tier!
+                if (activeKey.startsWith('gsk_')) {
+                    const groqModels = (state.geminiModel && state.geminiModel.startsWith('llama-'))
+                        ? [state.geminiModel, 'llama-3.1-8b-instant']
+                        : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+                    for (const gModel of groqModels) {
+                        try {
+                            const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${activeKey}`
+                                },
+                                body: JSON.stringify({
+                                    model: gModel,
+                                    messages: [
+                                        { role: 'system', content: systemPrompt },
+                                        { role: 'user', content: userQuery }
+                                    ],
+                                    temperature: 0.2
+                                })
+                            });
+                            if (res.ok) {
+                                const data = await res.json();
+                                const text = data.choices?.[0]?.message?.content || '';
+                                if (text) {
+                                    currentKeyIndex = idx;
+                                    return text;
+                                }
+                            } else {
+                                const errData = await res.json().catch(() => ({}));
+                                lastErrorMsg = errData.error?.message || `HTTP ${res.status}`;
+                            }
+                        } catch (e) {
+                            lastErrorMsg = e.message;
+                        }
                     }
-                    // If user picked a specific model (not auto) and it failed on first try, notify if quota (429)
-                    if (i === 0 && state.geminiModel !== 'auto' && response.status === 429 && !silent) {
-                        showToast(`Quota reached sa ${modelName}! Auto-trying backup model...`, "error");
+                    continue;
+                }
+
+                // 2. Standard Google Gemini API Key (AIza...)
+                // Discover exact model IDs supported by this API key (0 quota cost, cached per key)
+                const discovered = await discoverKeyModels(activeKey);
+                let exact35LiteId = null;
+                let allDiscoveredLiteIds = [];
+                if (discovered && discovered.length > 0) {
+                    const m35 = discovered.find(m => /3\.5.*lite/i.test(m.id) || /3\.5.*lite/i.test(m.displayName));
+                    if (m35) exact35LiteId = m35.id;
+                    allDiscoveredLiteIds = discovered
+                        .filter(m => /lite/i.test(m.id) || /lite/i.test(m.displayName))
+                        .map(m => m.id);
+                }
+
+                const geminiFallbackOrder = [
+                    ...(exact35LiteId ? [exact35LiteId] : []),
+                    ...allDiscoveredLiteIds,
+                    'gemini-3.5-flash-lite',
+                    'gemini-3.5-flash-lite-preview',
+                    'gemini-2.5-flash-lite',
+                    'gemini-2.0-flash-lite',
+                    'gemini-2.5-flash'
+                ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+                let modelsToTry = [];
+                const chosen = state.geminiModel || 'gemini-3.5-flash-lite';
+                if (chosen === 'auto' || chosen.startsWith('llama-')) {
+                    modelsToTry = geminiFallbackOrder;
+                } else if (chosen === 'gemini-3.5-flash-lite' && exact35LiteId) {
+                    modelsToTry = [exact35LiteId, ...geminiFallbackOrder.filter(m => m !== exact35LiteId).slice(0, 2)];
+                } else {
+                    modelsToTry = [
+                        chosen,
+                        ...geminiFallbackOrder.filter(m => m !== chosen).slice(0, 2)
+                    ];
+                }
+
+                for (let mIdx = 0; mIdx < modelsToTry.length; mIdx++) {
+                    const modelName = modelsToTry[mIdx];
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${activeKey}`;
+                    try {
+                        const response = await fetch(apiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: combinedPrompt }] }]
+                            })
+                        });
+                        if (response.ok) {
+                            const result = await response.json();
+                            const text = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                            if (text) {
+                                currentKeyIndex = idx;
+                                return text;
+                            }
+                        } else {
+                            const errBody = await response.json().catch(() => ({}));
+                            const errText = errBody.error?.message || `HTTP ${response.status}`;
+                            lastErrorMsg = `${modelName}: ${errText}`;
+                            // If API key itself is invalid (400 API_KEY_INVALID or 403), break model loop and try next key
+                            if (response.status === 403 || (response.status === 400 && /key/i.test(errText))) {
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        lastErrorMsg = e.message;
                     }
-                } catch (e) {
-                    // Try next model
                 }
             }
-            if (!silent && lastStatus === 429) {
-                showToast("Quota / Rate Limit (429) sa lahat ng models. Magpahinga ng 1 minute o gumamit ng bagong API key.", "error");
+
+            if (!silent && lastErrorMsg) {
+                const shortErr = lastErrorMsg.length > 90 ? lastErrorMsg.slice(0, 90) + '…' : lastErrorMsg;
+                showToast(`AI Quota/Error: ${shortErr}`, "error");
             }
             return null;
         }
@@ -683,6 +827,7 @@
             }
         }
 
+        // Instant Zero-Quota Stem Split (Caches 2 logical chunks immediately without burning API quota on every card load!)
         window.ensureAIStemSplit = async (termId) => {
             const term = state.terms.find(t => t.id === termId);
             if (!term || term.isSplittingStem) return;
@@ -690,41 +835,11 @@
             if (!isLongQuestionStem(stem)) return;
             if (Array.isArray(term.stemChunks) && term.stemChunks.length === 2) return;
 
-            // Set immediate fallback split so UI has zero delay, then refine/cache with AI
-            const initialChunks = fallbackLogicalStemSplit(stem);
-            if (initialChunks.length === 2) {
-                term.stemChunks = initialChunks;
-            }
-            term.isSplittingStem = true;
-
-            const systemPrompt = `You are a Philippine Mechanical Engineering Board Exam assistant. Split the provided long question stem into a MAXIMUM of 2 logical chunks:
-- chunk1: The setup, background, or given context.
-- chunk2: The actual question being asked, the concluding phrase, or trap words like "EXCEPT", "NOT", "FALSE".
-CRITICAL: chunk1 + " " + chunk2 must preserve the exact original words of the question stem in order. Respond ONLY with valid JSON: {"chunk1": "...", "chunk2": "..."}`;
-            const userQuery = `Question Stem:\n${stem}`;
-
-            try {
-                const rawText = await callGeminiAPI(systemPrompt, userQuery, true);
-                if (rawText) {
-                    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-                    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
-                    if (parsed && parsed.chunk1 && parsed.chunk2) {
-                        updateTerm(termId, {
-                            stemChunks: [String(parsed.chunk1).trim(), String(parsed.chunk2).trim()],
-                            isSplittingStem: false
-                        });
-                        renderApp();
-                        return;
-                    }
-                }
-            } catch (e) {
-                // Offline or API unavailable: cache the logical fallback split
-            }
+            const chunks = fallbackLogicalStemSplit(stem);
             updateTerm(termId, {
-                stemChunks: initialChunks,
+                stemChunks: chunks,
                 isSplittingStem: false
             });
-            renderApp();
         };
 
         // --- SESSION LOGIC ---
@@ -3634,7 +3749,12 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                         </p>
                         <div class="space-y-4">
                             <div>
-                                <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">Active AI Model</label>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Active AI Model</label>
+                                    <button onclick="window.syncAvailableGeminiModels(event)" class="text-[11px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200">
+                                        <i class="ph-bold ph-arrows-clockwise"></i> Detect Models from Key
+                                    </button>
+                                </div>
                                 <select
                                     id="gemini-model-select"
                                     class="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs md:text-sm font-bold text-slate-800 cursor-pointer"
@@ -3643,19 +3763,22 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                 </select>
                             </div>
                             <div>
-                                <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">Google Gemini API Key</label>
-                                <input
+                                <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">API Key(s) — Pwede Multiple Keys (1 per line) o Groq Key (<code class="text-purple-600">gsk_...</code>)</label>
+                                <textarea
                                     id="gemini-api-key-input"
-                                    type="password"
-                                    placeholder="AIzaSy..."
-                                    value="${escapeHTML(state.geminiApiKey || '')}"
-                                    onkeydown="if(event.key==='Enter'){event.preventDefault(); window.saveGeminiApiKey();}"
-                                    class="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm font-bold text-slate-800"
-                                />
+                                    rows="3"
+                                    placeholder="AIzaSy... (Gemini Key 1)&#10;AIzaSy... (Gemini Key 2 - optional backup)&#10;gsk_... (Groq Key - 14,400/day free!)"
+                                    class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-mono text-xs font-bold text-slate-800 resize-y"
+                                >${escapeHTML(state.geminiApiKey || '')}</textarea>
                             </div>
-                            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 hover:text-blue-800">
-                                <i class="ph-bold ph-arrow-square-out"></i> Kumuha ng libreng Gemini API Key sa Google AI Studio
-                            </a>
+                            <div class="flex flex-col gap-1 pt-1">
+                                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 hover:text-blue-800">
+                                    <i class="ph-bold ph-arrow-square-out"></i> Kunin ang Google Gemini API Key (AIza...)
+                                </a>
+                                <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs font-bold text-purple-600 hover:text-purple-800">
+                                    <i class="ph-bold ph-lightning"></i> O kumuha ng libreng Groq API Key (gsk_... — 14,400 requests/day!)
+                                </a>
+                            </div>
                         </div>
                         <div class="flex gap-3 mt-6 pt-4 border-t border-slate-100">
                             <button onclick="window.closeApiKeyModal()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition-colors">Cancel</button>
