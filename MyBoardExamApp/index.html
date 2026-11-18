@@ -110,6 +110,7 @@
             expandedFolders: [], // File Explorer open folder IDs (collapsed by default)
             hideFolderSidebar: false, // Toggleable File Explorer panel visibility
             parkingLotFilter: false, // View/filter Parking Lot cards
+            erroneousFilter: false, // View/filter Erroneous Tracker cards
             geminiApiKey: '', // Synced per-account via Firebase Vault & localStorage (never hardcoded in GitHub)
             showApiKeyModal: false,
             forecastMode: 'actual', 
@@ -696,6 +697,10 @@ CRITICAL: chunk1 + " " + chunk2 must preserve the exact original words of the qu
                 let parkedCards = state.terms.filter(t => t.parkingLot);
                 shuffleArray(parkedCards);
                 queue = parkedCards;
+            } else if (type === 'erroneous') {
+                let errCards = state.terms.filter(t => t.isErroneous);
+                shuffleArray(errCards);
+                queue = errCards;
             }
 
             if (queue.length === 0) {
@@ -1032,8 +1037,65 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
 
         window.setParkingLotFilter = (enabled) => {
             state.parkingLotFilter = enabled;
+            if (enabled) state.erroneousFilter = false;
             state.selectedTerms = [];
             renderApp();
+        };
+
+        // --- ERRONEOUS QUESTION TRACKER ---
+        window.toggleErroneous = (termId, event) => {
+            if (event) event.stopPropagation();
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+            const nextState = !term.isErroneous;
+            updateTerm(termId, { isErroneous: nextState });
+            showToast(nextState ? "Marked as Erroneous Question ⚠️" : "Removed from Erroneous Tracker");
+            renderApp();
+        };
+
+        window.resolveErroneous = (termId, event) => {
+            if (event) event.stopPropagation();
+            updateTerm(termId, { isErroneous: false });
+            showToast("Removed from Erroneous Tracker!");
+            renderApp();
+        };
+
+        window.setErroneousFilter = (enabled) => {
+            state.erroneousFilter = enabled;
+            if (enabled) state.parkingLotFilter = false;
+            state.selectedTerms = [];
+            renderApp();
+        };
+
+        window.handleErroneousTrueAnsInput = (termId, newVal) => {
+            updateTerm(termId, { isErroneous: true, trueAnswer: newVal });
+            const badge = document.getElementById(`err-autosave-${termId}`);
+            if (badge) {
+                badge.textContent = '✓ Auto-saved';
+                badge.classList.remove('opacity-0');
+            }
+        };
+
+        window.setErroneousQuickAns = (termId, quickVal, event) => {
+            if (event) event.stopPropagation();
+            updateTerm(termId, { isErroneous: true, trueAnswer: quickVal });
+            const inputEl = document.getElementById(`err-true-ans-${termId}`);
+            if (inputEl) inputEl.value = quickVal;
+            const badge = document.getElementById(`err-autosave-${termId}`);
+            if (badge) {
+                badge.textContent = '✓ Auto-saved';
+                badge.classList.remove('opacity-0');
+            }
+            renderApp();
+        };
+
+        window.handleErroneousNoteInput = (termId, newNote) => {
+            updateTerm(termId, { isErroneous: true, erroneousNote: newNote });
+            const badge = document.getElementById(`err-autosave-${termId}`);
+            if (badge) {
+                badge.textContent = '✓ Auto-saved';
+                badge.classList.remove('opacity-0');
+            }
         };
 
         function updateTimerUI() {
@@ -1054,6 +1116,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
         window.setActiveFolder = (id) => {
             state.activeFolderId = id;
             state.parkingLotFilter = false;
+            state.erroneousFilter = false;
             state.selectedTerms = [];
             renderApp();
         };
@@ -1069,6 +1132,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
         window.handleFolderExplorerClick = (folderId, hasChildren) => {
             state.activeFolderId = folderId;
             state.parkingLotFilter = false;
+            state.erroneousFilter = false;
             state.selectedTerms = [];
             if (hasChildren) {
                 if (state.expandedFolders.includes(folderId)) {
@@ -1113,7 +1177,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
         window.toggleSelectAll = () => {
             const activeTerms = state.parkingLotFilter
                 ? state.terms.filter(t => t.parkingLot)
-                : state.terms.filter(t => t.folderId === state.activeFolderId);
+                : state.erroneousFilter
+                    ? state.terms.filter(t => t.isErroneous)
+                    : state.terms.filter(t => t.folderId === state.activeFolderId);
             const allSelected = activeTerms.length > 0 && activeTerms.every(t => state.selectedTerms.includes(t.id));
             if (allSelected) {
                 state.selectedTerms = state.selectedTerms.filter(id => !activeTerms.find(t => t.id === id));
@@ -1401,7 +1467,13 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 const qEsc = String(stem || '').replace(/"/g, '""');
                 const cEsc = String(cleanChoices || '').replace(/"/g, '""');
                 const aEsc = String(t.answer || '').trim().replace(/"/g, '""');
-                const eEsc = String(t.explanation || '').trim().replace(/"/g, '""');
+                let expCombined = String(t.explanation || '').trim();
+                if (t.isErroneous) {
+                    const errHeader = `[ERRONEOUS | True Answer: ${t.trueAnswer && t.trueAnswer.trim() ? t.trueAnswer.trim() : 'None/Unspecified'}]`;
+                    const errBody = t.erroneousNote ? ` ${t.erroneousNote.trim()}` : '';
+                    expCombined = `${errHeader}${errBody}${expCombined ? ' | ' + expCombined : ''}`;
+                }
+                const eEsc = expCombined.replace(/"/g, '""');
                 csvContent += `"${qEsc}","${cEsc}","${aEsc}","${eEsc}"\n`;
             });
 
@@ -1424,6 +1496,11 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             downloadExcelCSV(parkedTerms, `ME_Parking_Lot_Export.csv`);
         };
 
+        window.exportErroneousCSV = () => {
+            const errTerms = state.terms.filter(t => t.isErroneous);
+            downloadExcelCSV(errTerms, `ME_Erroneous_Questions_Export.csv`);
+        };
+
         window.exportFilteredCSV = () => {
             const levelSelect = document.getElementById('export-level-select');
             if (!levelSelect) return;
@@ -1437,10 +1514,21 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 downloadExcelCSV(targetTerms, `ME_Parking_Lot_Export.csv`);
                 return;
             }
+
+            if (selectedVal === 'erroneous') {
+                const errTerms = state.erroneousFilter
+                    ? state.terms.filter(t => t.isErroneous)
+                    : state.terms.filter(t => t.folderId === state.activeFolderId && t.isErroneous);
+                const targetTerms = errTerms.length > 0 ? errTerms : state.terms.filter(t => t.isErroneous);
+                downloadExcelCSV(targetTerms, `ME_Erroneous_Questions_Export.csv`);
+                return;
+            }
             
             let filteredTerms = state.parkingLotFilter
                 ? state.terms.filter(t => t.parkingLot)
-                : state.terms.filter(t => t.folderId === state.activeFolderId);
+                : state.erroneousFilter
+                    ? state.terms.filter(t => t.isErroneous)
+                    : state.terms.filter(t => t.folderId === state.activeFolderId);
             
             if (selectedVal === 'new') {
                 filteredTerms = filteredTerms.filter(t => t.isNew);
@@ -1451,7 +1539,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             
             const folderName = state.parkingLotFilter
                 ? 'Parking_Lot'
-                : (state.folders.find(f => f.id === state.activeFolderId)?.name || 'Deck');
+                : state.erroneousFilter
+                    ? 'Erroneous_Tracker'
+                    : (state.folders.find(f => f.id === state.activeFolderId)?.name || 'Deck');
             const cleanFolderName = folderName.replace(/[^a-z0-9]/gi, '_');
             downloadExcelCSV(filteredTerms, `ME_${cleanFolderName}_Lvl_${selectedVal.toUpperCase()}.csv`);
         };
@@ -1631,6 +1721,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             if (levelId === 'parking_lot') {
                 filteredTerms = activeStudyTerms.filter(t => t.parkingLot);
                 if (filteredTerms.length === 0) filteredTerms = state.terms.filter(t => t.parkingLot);
+            } else if (levelId === 'erroneous') {
+                filteredTerms = activeStudyTerms.filter(t => t.isErroneous);
+                if (filteredTerms.length === 0) filteredTerms = state.terms.filter(t => t.isErroneous);
             } else if (levelId === 'new') {
                 filteredTerms = filteredTerms.filter(t => t.isNew);
             } else {
@@ -1670,6 +1763,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             if (levelId === 'parking_lot') {
                 filteredTerms = activeStudyTerms.filter(t => t.parkingLot);
                 if (filteredTerms.length === 0) filteredTerms = state.terms.filter(t => t.parkingLot);
+            } else if (levelId === 'erroneous') {
+                filteredTerms = activeStudyTerms.filter(t => t.isErroneous);
+                if (filteredTerms.length === 0) filteredTerms = state.terms.filter(t => t.isErroneous);
             } else if (levelId === 'new') {
                 filteredTerms = filteredTerms.filter(t => t.isNew);
             } else {
@@ -1911,6 +2007,8 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             const futureTerms = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate > todayStart && t.nextReviewDate <= todayStart + (state.lookAheadDays * MS_PER_DAY));
             const parkedTerms = activeStudyTerms.filter(t => t.parkingLot);
             const allParkedTerms = state.terms.filter(t => t.parkingLot);
+            const erroneousTerms = activeStudyTerms.filter(t => t.isErroneous);
+            const allErroneousTerms = state.terms.filter(t => t.isErroneous);
 
             // Generate Folder Drill-Down Breadcrumbs
             let breadcrumbsHtml = `<button onclick="window.setStudyFolder('all')" class="flex items-center gap-1.5 transition-colors ${state.studyFolderId === 'all' ? 'text-blue-700 font-black' : 'text-slate-500 font-bold hover:text-blue-600'}"><i class="ph-fill ph-books text-xl"></i> All Sets</button>`;
@@ -1969,7 +2067,8 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 { id: '4', label: 'Lvl 4', count: levelCounts[4], color: 'bg-emerald-300' },
                 { id: '5', label: 'Lvl 5', count: levelCounts[5], color: 'bg-emerald-500' },
                 { id: '6', label: 'Lvl 6', count: levelCounts[6], color: 'bg-emerald-700' },
-                { id: 'parking_lot', label: 'Parked', count: parkedTerms.length, color: 'bg-rose-400' }
+                { id: 'parking_lot', label: 'Parked', count: parkedTerms.length, color: 'bg-amber-400' },
+                { id: 'erroneous', label: 'Erroneous', count: erroneousTerms.length, color: 'bg-rose-500' }
             ];
             cols.forEach(col => {
                 const h = activeStudyTerms.length > 0 ? Math.max((col.count / activeStudyTerms.length) * 100, 5) : 5;
@@ -1992,16 +2091,18 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
                     <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
                         <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><i class="ph-bold ph-folder-open text-base"></i> Select Deck / Folder</h2>
-                        ${allParkedTerms.length > 0 ? `
-                        <div class="flex items-center gap-2">
+                        <div class="flex items-center flex-wrap gap-2">
+                            ${allParkedTerms.length > 0 ? `
                             <button onclick="window.setParkingLotFilter(true); window.setView('add')" class="px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 text-xs font-bold flex items-center gap-1.5 transition-colors">
-                                <i class="ph-fill ph-flag text-amber-500"></i> View Parking Lot (${allParkedTerms.length})
+                                <i class="ph-fill ph-flag text-amber-500"></i> Parking Lot (${allParkedTerms.length})
                             </button>
-                            <button onclick="window.exportParkingLotCSV()" class="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1.5 transition-colors" title="Export Parking Lot to Excel CSV">
-                                <i class="ph-bold ph-file-csv"></i> Export Parked
+                            ` : ''}
+                            ${allErroneousTerms.length > 0 ? `
+                            <button onclick="window.setErroneousFilter(true); window.setView('add')" class="px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold flex items-center gap-1.5 transition-colors">
+                                <i class="ph-fill ph-warning-octagon text-rose-500"></i> Erroneous (${allErroneousTerms.length})
                             </button>
+                            ` : ''}
                         </div>
-                        ` : ''}
                     </div>
                     
                     <div class="flex items-center flex-wrap gap-2 mb-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
@@ -2154,7 +2255,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 const subChildren = state.folders.filter(sub => sub.parentId === f.id);
                 const hasChildren = subChildren.length > 0;
                 const isExpanded = state.expandedFolders.includes(f.id);
-                const isActive = !state.parkingLotFilter && state.activeFolderId === f.id;
+                const isActive = !state.parkingLotFilter && !state.erroneousFilter && state.activeFolderId === f.id;
                 const isEditing = state.editingFolderId === f.id;
                 const isAddingSub = state.addingSubfolderTo === f.id;
                 const isMoving = state.movingFolderId === f.id;
@@ -2234,12 +2335,18 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
 
         function renderDatabase() {
             const parkedAll = state.terms.filter(t => t.parkingLot);
+            const erroneousAll = state.terms.filter(t => t.isErroneous);
+            const isSpecialFilter = state.parkingLotFilter || state.erroneousFilter;
             const activeTerms = state.parkingLotFilter
                 ? parkedAll
-                : state.terms.filter(t => t.folderId === state.activeFolderId);
+                : state.erroneousFilter
+                    ? erroneousAll
+                    : state.terms.filter(t => t.folderId === state.activeFolderId);
             const fullPath = state.parkingLotFilter
-                ? '🚩 Parking Lot (Tagged Cards for Review)'
-                : getFolderFullPath(state.activeFolderId, state.folders);
+                ? '🚩 Parking Lot (Flagged Cards for Review)'
+                : state.erroneousFilter
+                    ? '⚠️ Erroneous Questions Tracker'
+                    : getFolderFullPath(state.activeFolderId, state.folders);
             
             // Checkbox logic variables
             const allSelected = activeTerms.length > 0 && activeTerms.every(t => state.selectedTerms.includes(t.id));
@@ -2248,9 +2355,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             if (activeTerms.length === 0) {
                 termsHtml = `
                 <div class="p-12 text-center text-slate-400 space-y-2">
-                    <i class="ph-bold ${state.parkingLotFilter ? 'ph-flag-checkered text-emerald-400' : 'ph-cards'} text-4xl block mx-auto"></i>
-                    <p class="font-bold text-sm text-slate-600">${state.parkingLotFilter ? 'Parking Lot is clear! No flagged cards remaining.' : 'This folder has no direct cards.'}</p>
-                    <p class="text-xs text-slate-400">${state.parkingLotFilter ? 'Flag cards during your review sessions whenever you have lingering questions.' : 'Select a subfolder in the File Explorer or add/import cards above.'}</p>
+                    <i class="ph-bold ${state.parkingLotFilter ? 'ph-flag-checkered text-emerald-400' : state.erroneousFilter ? 'ph-warning-octagon text-rose-400' : 'ph-cards'} text-4xl block mx-auto"></i>
+                    <p class="font-bold text-sm text-slate-600">${state.parkingLotFilter ? 'Parking Lot is clear! No flagged cards remaining.' : state.erroneousFilter ? 'No cards marked as Erroneous yet.' : 'This folder has no direct cards.'}</p>
+                    <p class="text-xs text-slate-400">${state.parkingLotFilter ? 'Flag cards during your review sessions whenever you have lingering questions.' : state.erroneousFilter ? 'Click the "Erroneous" button on any card during review to track defective questions, true answers, and notes.' : 'Select a subfolder in the File Explorer or add/import cards above.'}</p>
                 </div>`;
             } else {
                 activeTerms.forEach(t => {
@@ -2266,24 +2373,61 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     const { stem, choicesRaw } = parseQuestionAndChoices(t.question);
 
                     termsHtml += `
-                    <div class="p-4 flex flex-col sm:flex-row sm:items-start justify-between hover:bg-slate-50 transition-colors gap-4">
+                    <div class="p-4 flex flex-col sm:flex-row sm:items-start justify-between hover:bg-slate-50 transition-colors gap-4 ${t.isErroneous ? 'bg-rose-50/30' : ''}">
                         <div class="flex items-start gap-3 flex-1 min-w-0">
                             <input type="checkbox" ${isChecked ? 'checked' : ''} onclick="window.toggleTermSelect('${t.id}')" class="mt-1 w-4 h-4 rounded text-blue-600 border-slate-300 cursor-pointer shrink-0">
-                            <div class="flex-1 min-w-0 space-y-1">
-                                <p class="font-bold text-slate-800 ${state.parkingLotFilter ? 'board-exam-font text-sm whitespace-pre-wrap' : 'line-clamp-2 text-sm'}">${escapeHTML(stem)}</p>
-                                ${state.parkingLotFilter && choicesRaw ? `<p class="board-exam-font text-xs text-slate-600 bg-slate-100 p-2 rounded-lg whitespace-pre-wrap">${escapeHTML(choicesRaw)}</p>` : ''}
-                                <p class="text-xs font-bold text-blue-700">Ans: ${escapeHTML(t.answer)}</p>
+                            <div class="flex-1 min-w-0 space-y-1.5">
+                                <p class="font-bold text-slate-800 ${isSpecialFilter ? 'board-exam-font text-sm whitespace-pre-wrap' : 'line-clamp-2 text-sm'}">${escapeHTML(stem)}</p>
+                                ${isSpecialFilter && choicesRaw ? `<p class="board-exam-font text-xs text-slate-600 bg-slate-100 p-2 rounded-lg whitespace-pre-wrap">${escapeHTML(choicesRaw)}</p>` : ''}
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">Book Key: ${escapeHTML(t.answer)}</span>
+                                    ${t.isErroneous ? `
+                                        <span class="text-xs font-bold text-rose-700 bg-rose-100 px-2 py-0.5 rounded border border-rose-200 flex items-center gap-1">
+                                            <i class="ph-fill ph-warning-octagon"></i> Dapat na Tamang Sagot: ${escapeHTML(t.trueAnswer && t.trueAnswer.trim() ? t.trueAnswer : 'Wala / None specified')}
+                                        </span>
+                                    ` : ''}
+                                </div>
+                                ${t.isErroneous ? `
+                                <div class="mt-1.5 p-2.5 bg-rose-50/90 border border-rose-200 rounded-xl space-y-1.5">
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-[10px] font-black text-rose-700 uppercase tracking-wider"><i class="ph-fill ph-warning-octagon"></i> Erroneous Tracker Details</span>
+                                        <span id="err-autosave-${t.id}" class="text-[10px] font-bold text-emerald-600 opacity-0 transition-opacity">✓ Auto-saved</span>
+                                    </div>
+                                    <input
+                                        type="text"
+                                        placeholder="Dapat na tamang sagot (o iwanang blangko kung wala)..."
+                                        value="${escapeHTML(t.trueAnswer || '')}"
+                                        oninput="window.handleErroneousTrueAnsInput('${t.id}', this.value)"
+                                        class="w-full text-xs p-2 bg-white border border-rose-200 rounded-lg focus:ring-1 focus:ring-rose-400 outline-none font-bold text-slate-800"
+                                    />
+                                    <textarea
+                                        rows="2"
+                                        placeholder="Note: Bakit erroneous at bakit yun ang tamang sagot talaga..."
+                                        oninput="window.handleErroneousNoteInput('${t.id}', this.value)"
+                                        class="w-full text-xs p-2 bg-white border border-rose-200 rounded-lg focus:ring-1 focus:ring-rose-400 outline-none font-medium text-slate-700 resize-y"
+                                    >${escapeHTML(t.erroneousNote || '')}</textarea>
+                                </div>
+                                ` : ''}
                                 ${t.explanation ? `<p class="text-xs text-purple-700 bg-purple-50 px-2.5 py-1.5 rounded-lg border border-purple-100 line-clamp-2"><i class="ph-fill ph-sparkle"></i> ${escapeHTML(t.explanation)}</p>` : ''}
                             </div>
                         </div>
                         <div class="flex flex-wrap items-center gap-2 shrink-0 self-end sm:self-center">
                             ${t.parkingLot ? `
                                 <button onclick="window.resolveParkingLot('${t.id}', event)" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 hover:bg-emerald-100 text-amber-800 hover:text-emerald-700 border border-amber-300 hover:border-emerald-300 flex items-center gap-1 transition-colors" title="Clear Parking Lot flag">
-                                    <i class="ph-bold ph-check-circle"></i> Resolve / Remove
+                                    <i class="ph-bold ph-check-circle"></i> Resolve
                                 </button>
                             ` : `
                                 <button onclick="window.toggleParkingLot('${t.id}', event)" class="p-1.5 text-slate-300 hover:text-amber-500 rounded-lg hover:bg-amber-50 transition-colors" title="Flag to Parking Lot">
                                     <i class="ph-bold ph-flag text-base"></i>
+                                </button>
+                            `}
+                            ${t.isErroneous ? `
+                                <button onclick="window.resolveErroneous('${t.id}', event)" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-100 hover:bg-slate-200 text-rose-800 border border-rose-300 flex items-center gap-1 transition-colors" title="Remove from Erroneous Tracker">
+                                    <i class="ph-fill ph-warning-octagon"></i> Unmark Erroneous
+                                </button>
+                            ` : `
+                                <button onclick="window.toggleErroneous('${t.id}', event)" class="p-1.5 text-slate-300 hover:text-rose-500 rounded-lg hover:bg-rose-50 transition-colors" title="Mark as Erroneous Question">
+                                    <i class="ph-bold ph-warning-octagon text-base"></i>
                                 </button>
                             `}
                             ${isNewBadge}
@@ -2318,14 +2462,21 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                 </div>
                             </div>
 
-                            <!-- Pinned Parking Lot Smart View -->
-                            <div class="mb-3">
+                            <!-- Pinned Smart Views: Parking Lot & Erroneous Tracker -->
+                            <div class="mb-3 space-y-2">
                                 <button onclick="window.setParkingLotFilter(!state.parkingLotFilter)" class="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-sm transition-all border ${state.parkingLotFilter ? 'bg-amber-50 border-amber-300 text-amber-900 shadow-sm' : 'bg-slate-50/80 border-slate-200/80 text-slate-700 hover:bg-amber-50/50'}">
                                     <span class="flex items-center gap-2">
                                         <i class="ph-fill ph-flag text-amber-500 text-lg"></i>
                                         <span>Parking Lot (Flagged Cards)</span>
                                     </span>
                                     <span class="px-2 py-0.5 text-xs font-black rounded-full ${parkedAll.length > 0 ? 'bg-amber-500 text-white' : 'bg-slate-200 text-slate-600'}">${parkedAll.length}</span>
+                                </button>
+                                <button onclick="window.setErroneousFilter(!state.erroneousFilter)" class="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-sm transition-all border ${state.erroneousFilter ? 'bg-rose-50 border-rose-300 text-rose-900 shadow-sm' : 'bg-slate-50/80 border-slate-200/80 text-slate-700 hover:bg-rose-50/50'}">
+                                    <span class="flex items-center gap-2">
+                                        <i class="ph-fill ph-warning-octagon text-rose-500 text-lg"></i>
+                                        <span>Erroneous Questions Tracker</span>
+                                    </span>
+                                    <span class="px-2 py-0.5 text-xs font-black rounded-full ${erroneousAll.length > 0 ? 'bg-rose-500 text-white' : 'bg-slate-200 text-slate-600'}">${erroneousAll.length}</span>
                                 </button>
                             </div>
 
@@ -2381,6 +2532,18 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                     <button onclick="window.setParkingLotFilter(false)" class="flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
                                         Back to Deck
                                     </button>
+                                ` : state.erroneousFilter ? `
+                                    ${erroneousAll.length > 0 ? `
+                                    <button onclick="window.startSession('erroneous')" class="flex items-center justify-center gap-1.5 bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm shadow-sm">
+                                        <i class="ph-fill ph-play"></i> Review Erroneous (${erroneousAll.length})
+                                    </button>
+                                    <button onclick="window.exportErroneousCSV()" class="flex items-center justify-center gap-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 px-4 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
+                                        <i class="ph-bold ph-file-csv"></i> Export Erroneous
+                                    </button>
+                                    ` : ''}
+                                    <button onclick="window.setErroneousFilter(false)" class="flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
+                                        Back to Deck
+                                    </button>
                                 ` : `
                                     <button onclick="window.removeDuplicates()" class="flex items-center justify-center gap-2 bg-rose-100 hover:bg-rose-200 text-rose-700 px-3.5 py-2 rounded-xl font-bold transition-colors text-xs md:text-sm">
                                         <i class="ph-bold ph-broom"></i> Clean Duplicates
@@ -2392,7 +2555,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             </div>
                         </div>
 
-                        ${!state.parkingLotFilter ? (state.showBulk ? `
+                        ${!isSpecialFilter ? (state.showBulk ? `
                         <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                             <h3 class="font-semibold text-slate-700 mb-2">Import to "${escapeHTML(fullPath)}"</h3>
                             <p class="text-sm text-slate-500 mb-4">Paste directly from Excel/Sheets (Supports Question | Choices | Correct Answer | Explanation).</p>
@@ -2420,7 +2583,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center flex-wrap gap-4">
                                 <div class="flex items-center gap-3">
                                     <input type="checkbox" ${allSelected ? 'checked' : ''} onclick="window.toggleSelectAll()" class="w-5 h-5 rounded text-blue-600 border-slate-300 cursor-pointer shadow-sm">
-                                    <span class="font-semibold text-slate-700">${state.parkingLotFilter ? `Parked Cards (${activeTerms.length})` : `Cards (${activeTerms.length})`}</span>
+                                    <span class="font-semibold text-slate-700">${state.parkingLotFilter ? `Parked Cards (${activeTerms.length})` : state.erroneousFilter ? `Erroneous Cards (${activeTerms.length})` : `Cards (${activeTerms.length})`}</span>
                                 </div>
                                 ${activeTerms.length > 0 ? `
                                 <div class="flex flex-wrap items-center gap-2">
@@ -2434,6 +2597,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                         <select id="export-level-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer">
                                             <option value="all">All Levels</option>
                                             <option value="parking_lot" ${state.parkingLotFilter ? 'selected' : ''}>🚩 Parking Lot</option>
+                                            <option value="erroneous" ${state.erroneousFilter ? 'selected' : ''}>⚠️ Erroneous</option>
                                             <option value="new">New Cards</option>
                                             <option value="1">Level 1</option>
                                             <option value="2">Level 2</option>
@@ -2444,7 +2608,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                         </select>
                                         <button onclick="window.exportFilteredCSV()" class="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-3 py-2 rounded-md font-bold transition-colors flex items-center gap-1" title="Export Question | Choices | Correct Answer | Explanation"><i class="ph-bold ph-download-simple"></i> Excel CSV</button>
                                     </div>
-                                    ${!state.parkingLotFilter ? `
+                                    ${!isSpecialFilter ? `
                                     <div class="flex items-center gap-2">
                                         <select id="bulk-move-select" class="text-xs border border-slate-200 rounded-md p-2 bg-white outline-none cursor-pointer max-w-[150px]">
                                             <option value="">Move all to...</option>
@@ -3086,7 +3250,17 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     ? 'Ahead'
                     : state.sessionData.type === 'parking_lot'
                         ? 'Parking Lot'
-                        : 'Review';
+                        : state.sessionData.type === 'erroneous'
+                            ? 'Erroneous'
+                            : 'Review';
+
+            const quickChoicePillsHtml = (state.currentShuffledChoices && state.currentShuffledChoices.options)
+                ? state.currentShuffledChoices.options.map(opt => `
+                    <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', '${escapeHTML(opt.text).replace(/'/g, "\\'")}', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors ${currentCard.trueAnswer === opt.text ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-rose-700 border-rose-200 hover:bg-rose-100'}" title="Set ${escapeHTML(opt.text)} as True Answer">
+                        ${opt.displayLetter}: ${escapeHTML(opt.text.length > 18 ? opt.text.slice(0, 18) + '…' : opt.text)}
+                    </button>
+                `).join('')
+                : '';
 
             return `
             <div class="max-w-2xl mx-auto p-3 md:p-4 flex flex-col min-h-[90vh]">
@@ -3115,17 +3289,21 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     </div>
                     ` : ''}
                     
-                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 border-slate-200 flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
-                        <!-- Card Top Bar: Deck Path + Parking Lot Flag + Live OCR Edit -->
+                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 ${currentCard.isErroneous ? 'border-rose-300' : 'border-slate-200'} flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
+                        <!-- Card Top Bar: Deck Path + Parking Lot + Erroneous Tracker + Live OCR Edit -->
                         <div class="flex items-center justify-between gap-2 w-full mb-4 pb-3 border-b border-slate-100 flex-wrap">
-                            <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[200px] sm:max-w-[260px]" title="${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}">
+                            <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[180px] sm:max-w-[240px]" title="${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}">
                                 ${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}
                             </span>
-                            <div class="flex items-center gap-1.5 ml-auto" onclick="event.stopPropagation()">
-                                ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1.5">${lvlDots}</div>` : ''}
+                            <div class="flex items-center gap-1.5 ml-auto flex-wrap" onclick="event.stopPropagation()">
+                                ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1">${lvlDots}</div>` : ''}
                                 <button type="button" onclick="window.toggleParkingLot('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${currentCard.parkingLot ? 'bg-amber-100 text-amber-800 border border-amber-300 shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-700 border border-transparent'}" title="Toggle Parking Lot Flag">
                                     <i class="${currentCard.parkingLot ? 'ph-fill' : 'ph-bold'} ph-flag text-sm"></i>
                                     <span>${currentCard.parkingLot ? 'Parked' : 'Parking Lot'}</span>
+                                </button>
+                                <button type="button" onclick="window.toggleErroneous('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${currentCard.isErroneous ? 'bg-rose-100 text-rose-800 border border-rose-300 shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-rose-50 hover:text-rose-700 border border-transparent'}" title="Mark as Erroneous Question">
+                                    <i class="${currentCard.isErroneous ? 'ph-fill' : 'ph-bold'} ph-warning-octagon text-sm"></i>
+                                    <span>Erroneous</span>
                                 </button>
                                 ${state.sessionData.type === 'parking_lot' && currentCard.parkingLot ? `
                                 <button type="button" onclick="window.resolveParkingLot('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 flex items-center gap-1 transition-all active:scale-95" title="Resolve & Remove from Parking Lot">
@@ -3145,12 +3323,61 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             ${renderChoicesAndStem(state.showAnswer)}
                         </div>
 
+                        ${currentCard.isErroneous ? `
+                        <div class="mt-3 p-4 bg-rose-50/90 border-2 border-rose-200 rounded-2xl text-left space-y-2.5 fade-in shadow-sm" onclick="event.stopPropagation()">
+                            <div class="flex items-center justify-between gap-2">
+                                <span class="text-[11px] font-black text-rose-700 uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="ph-fill ph-warning-octagon text-base"></i> Erroneous Question Tracker
+                                </span>
+                                <span id="err-autosave-${currentCard.id}" class="text-[10px] font-bold text-emerald-600 transition-opacity">✓ Saved</span>
+                            </div>
+
+                            <div class="space-y-1.5">
+                                <label class="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Dapat na Tamang Sagot (Optional / Pwede ring wala):</label>
+                                <div class="flex flex-wrap gap-1.5 mb-1">
+                                    ${quickChoicePillsHtml}
+                                    <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', 'Wala sa choices (None)', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors ${currentCard.trueAnswer === 'Wala sa choices (None)' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'}">
+                                        Wala sa choices
+                                    </button>
+                                    ${currentCard.trueAnswer ? `
+                                    <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', '', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500 hover:bg-slate-200">
+                                        Clear
+                                    </button>
+                                    ` : ''}
+                                </div>
+                                <input
+                                    id="err-true-ans-${currentCard.id}"
+                                    type="text"
+                                    placeholder="I-type o piliin ang totoong tamang sagot (o iwanang blangko kung wala)..."
+                                    value="${escapeHTML(currentCard.trueAnswer || '')}"
+                                    oninput="window.handleErroneousTrueAnsInput('${currentCard.id}', this.value)"
+                                    class="board-exam-font w-full text-xs p-2.5 bg-white border border-rose-200 rounded-xl focus:ring-2 focus:ring-rose-400 outline-none font-bold text-rose-950"
+                                />
+                            </div>
+
+                            <div class="space-y-1">
+                                <label class="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Note (Bakit Erroneous at Bakit Yun ang Tamang Sagot Talaga):</label>
+                                <textarea
+                                    rows="2"
+                                    placeholder="Isulat dito bakit erroneous yung tanong/sagot sa book at bakit yun ang dapat na tamang sagot..."
+                                    oninput="window.handleErroneousNoteInput('${currentCard.id}', this.value)"
+                                    class="w-full p-2.5 text-xs font-medium text-rose-950 bg-white border border-rose-200 rounded-xl focus:ring-2 focus:ring-rose-400 outline-none resize-y leading-relaxed"
+                                >${escapeHTML(currentCard.erroneousNote || '')}</textarea>
+                            </div>
+                        </div>
+                        ` : ''}
+
                         ${state.showAnswer ? `
                         <div class="fade-in slide-up duration-300 w-full mt-2 space-y-3" onclick="event.stopPropagation()">
                             <div class="p-4 md:p-5 bg-blue-50 border-2 border-blue-200 rounded-2xl text-center relative overflow-hidden">
                                 <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
-                                <span class="text-[10px] font-black text-blue-600 uppercase tracking-widest block mb-1"><i class="ph-fill ph-check-circle"></i> Correct Answer</span>
+                                <span class="text-[10px] font-black text-blue-600 uppercase tracking-widest block mb-1"><i class="ph-fill ph-check-circle"></i> ${currentCard.isErroneous ? 'Book Answer Key' : 'Correct Answer'}</span>
                                 <p class="board-exam-font text-lg md:text-xl text-blue-950 font-black whitespace-pre-wrap">${escapeHTML(displayCorrectAnswerText)}</p>
+                                ${currentCard.isErroneous && currentCard.trueAnswer ? `
+                                <div class="mt-2 pt-2 border-t border-blue-200/80 text-xs font-bold text-rose-700 flex items-center justify-center gap-1.5">
+                                    <i class="ph-fill ph-warning-octagon"></i> Dapat na Tamang Sagot: <span class="board-exam-font underline">${escapeHTML(currentCard.trueAnswer)}</span>
+                                </div>
+                                ` : ''}
                             </div>
                             
                             ${!state.showKeywordsExp ? `
