@@ -92,6 +92,7 @@
             selectedChoice: null,
             currentShuffledChoices: null,
             showKeywordsExp: false,
+            isEditingExplanation: false,
             timerEnabled: true,
             timeLeft: 10,
             timePerCard: 10, 
@@ -198,6 +199,7 @@
             return (terms || []).map(t => {
                 const copy = { ...t };
                 delete copy.isGeneratingAI;
+                delete copy.isAppendingAI;
                 delete copy.isGeneratingDerivation;
                 delete copy.isGeneratingSimplify;
                 delete copy.isSplittingStem;
@@ -887,6 +889,7 @@
             state.showAnswer = false;
             state.selectedChoice = null;
             state.showKeywordsExp = false;
+            state.isEditingExplanation = false;
             state.revealedChoicesCount = 0;
             state.currentShuffledChoices = {
                 cardId: currentCard.id,
@@ -1154,10 +1157,61 @@
             return candidates;
         }
 
+        function repairLatexInJsonString(jsonStr) {
+            return String(jsonStr || '').replace(/\\(\\|"|\/|u[0-9a-fA-F]{4}|(?:frac|theta|tau|times|text|tan|rho|right|beta|bar|begin|nu|nabla|neq|ne|approx|alpha|gamma|delta|Delta|sigma|Sigma|omega|Omega|eta|mu|lambda|pi|phi|Phi|psi|epsilon|varepsilon|cdot|cdots|pm|mp|sqrt|sum|int|left|leq|geq|le|ge|circ|degree|infty|partial|propto|to|rightarrow|leftarrow|quad|qquad|mathbf|mathrm|mathit|vec|hat|dot|ddot|overline|underline|end|cos|sin|log|ln|exp|lim)\b|[^"\\/bfnrtu])/g, (match, next) => {
+                if (next === '\\' || next === '"' || next === '/' || /^u[0-9a-fA-F]{4}$/.test(next)) {
+                    return match;
+                }
+                return '\\\\' + next;
+            });
+        }
+
+        function normalizeLatexText(text) {
+            return String(text || '')
+                .replace(/\f(rac\b)/g, '\\f$1')
+                .replace(/\t(au\b|heta\b|imes\b|ext\b|an\b)/g, '\\t$1')
+                .replace(/\r(ho\b|ight\b)/g, '\\r$1')
+                .replace(/\x08(eta\b|ar\b|egin\b)/g, '\\b$1');
+        }
+
+        function renderFormattedNotesHtml(text) {
+            const raw = normalizeLatexText(text || '').trim();
+            if (!raw) {
+                return `<p class="text-xs italic text-purple-400">Wala pang notes. Pindutin ang "Edit" para mag-type o magtanong sa chat box sa baba.</p>`;
+            }
+            const mathSplitRegex = /(\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g;
+            const segments = raw.split(mathSplitRegex);
+
+            return segments.map(seg => {
+                if (!seg) return '';
+                if (seg.startsWith('$') || seg.startsWith('\\(') || seg.startsWith('\\[')) {
+                    // Keep LaTeX delimiters intact for KaTeX auto-render
+                    return escapeHTML(seg);
+                }
+                let html = escapeHTML(seg);
+                // Render horizontal separator lines between accumulative Q&A entries
+                html = html.replace(/(?:^|\n)---(?:\n|$)/g, '<hr class="my-2.5 border-purple-200/90" />');
+                // Highlight Q: and A: prefixes cleanly
+                html = html.replace(/(^|\n)\*\*Q:\*\*\s*/g, '$1<span class="inline-block text-[10px] font-black uppercase tracking-wider bg-purple-200/80 text-purple-900 px-1.5 py-0.5 rounded mr-1">Q</span>');
+                html = html.replace(/(^|\n)\*\*A:\*\*\s*/g, '$1<span class="inline-block text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded mr-1">A</span>');
+                // Basic bold & inline code formatting outside LaTeX
+                html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong class="font-extrabold text-purple-950">$1</strong>');
+                html = html.replace(/`([^`\n]+)`/g, '<code class="px-1 py-0.5 bg-purple-100/80 rounded font-mono text-xs">$1</code>');
+                return html;
+            }).join('');
+        }
+
+        window.toggleExplanationEditMode = (event) => {
+            if (event) event.stopPropagation();
+            state.isEditingExplanation = !state.isEditingExplanation;
+            renderApp();
+        };
+
         window.triggerKeywordsAndExplanation = (termId) => {
             const term = state.terms.find(t => t.id === termId);
             if (!term) return;
             state.showKeywordsExp = true;
+            state.isEditingExplanation = false;
             const hasCachedKeywords = Array.isArray(term.keywords) && term.keywords.length > 0;
             const hasCachedExp = Boolean(term.explanation && String(term.explanation).trim());
             if (hasCachedKeywords && hasCachedExp) {
@@ -1167,11 +1221,94 @@
             window.generateKeywordsAndExplanation(termId, '');
         };
 
-        window.regenerateCustomExplanation = (termId) => {
-            const inputEl = document.getElementById(`custom-regen-input-${termId}`);
-            const customInstruction = inputEl ? inputEl.value.trim() : '';
-            window.generateKeywordsAndExplanation(termId, customInstruction);
+        window.resetBaseExplanation = (termId, event) => {
+            if (event) event.stopPropagation();
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+            if (term.explanation && term.explanation.trim()) {
+                if (!confirm("I-reset at palitan ang buong existing notes ng bagong initial explanation?")) return;
+            }
+            state.isEditingExplanation = false;
+            window.generateKeywordsAndExplanation(termId, '');
         };
+
+        // Accumulative Follow-Up Q&A: Keeps existing notes as-is and appends the AI's answer to the new question
+        window.appendFollowUpNote = async (termId) => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+
+            const inputEl = document.getElementById(`custom-regen-input-${termId}`);
+            const followUpQuestion = inputEl ? inputEl.value.trim() : '';
+
+            if (!followUpQuestion) {
+                showToast("Mag-type muna ng tanong sa chat box para maidagdag sa notes.", "error");
+                if (inputEl) inputEl.focus();
+                return;
+            }
+
+            if (!(state.geminiApiKey || '').trim()) {
+                showToast("Mag-set muna ng API Key (🔑) para makapagtanong sa AI.", "error");
+                return;
+            }
+
+            const existingNotes = normalizeLatexText(term.explanation || '').trim();
+            // If there are no initial notes yet at all, generate initial keywords + notes with the question
+            if (!existingNotes) {
+                if (inputEl) inputEl.value = '';
+                window.generateKeywordsAndExplanation(termId, followUpQuestion);
+                return;
+            }
+
+            state.showKeywordsExp = true;
+            state.isEditingExplanation = false;
+            if (inputEl) inputEl.value = '';
+            updateTerm(termId, { isAppendingAI: true });
+            renderApp();
+
+            const { stem, choicesRaw } = parseQuestionAndChoices(term.question);
+            let choicesContext = choicesRaw;
+            let correctContext = term.answer;
+
+            if (state.currentShuffledChoices && state.currentShuffledChoices.cardId === termId && state.currentShuffledChoices.options) {
+                choicesContext = state.currentShuffledChoices.options
+                    .map(o => `${o.displayLetter}. ${o.text}`)
+                    .join('\n');
+                const correctOpt = state.currentShuffledChoices.options.find(o => o.isCorrect);
+                if (correctOpt) {
+                    correctContext = `${correctOpt.displayLetter}. ${correctOpt.text}`;
+                }
+            }
+
+            const systemPrompt = `You are a Philippine Mechanical Engineering Board Exam tutor helping a student build accumulative study notes on a flashcard.
+The student already has existing notes below and is asking a follow-up question.
+Rules:
+1. Answer ONLY the student's new follow-up question concisely (1 to 3 sentences, or short step-by-step formula breakdown if math). Use clear English or Taglish.
+2. Do NOT repeat the existing notes.
+3. For ALL math formulas, equations, fractions, Greek symbols, or units with exponents, ALWAYS wrap them in valid LaTeX using $...$ (inline) or $$...$$ (display block). Example: $\\eta = 1 - \\frac{T_L}{T_H}$.
+4. Reply with plain formatted text (NOT JSON).`;
+
+            const userQuery = `Question Stem:\n${stem}\n\nChoices:\n${choicesContext}\n\nCorrect Answer:\n${correctContext}\n\nExisting Notes (keep as-is, do not repeat):\n${existingNotes}\n\nStudent's Follow-Up Question:\n${followUpQuestion}`;
+
+            try {
+                const rawAnswer = await callGeminiAPI(systemPrompt, userQuery);
+                if (rawAnswer) {
+                    const cleanAnswer = normalizeLatexText(rawAnswer).replace(/^```(?:markdown|text)?\s*|\s*```$/g, '').trim();
+                    const updatedNotes = `${existingNotes}\n\n---\n**Q:** ${followUpQuestion}\n**A:** ${cleanAnswer}`;
+                    updateTerm(termId, { explanation: updatedNotes, isAppendingAI: false });
+                    renderApp();
+                    showToast("Naidagdag na sa notes mo! ✨");
+                    return;
+                }
+            } catch (e) {
+                showToast("Network error habang nagdadagdag ng note.", "error");
+            }
+
+            updateTerm(termId, { isAppendingAI: false });
+            renderApp();
+        };
+
+        // Keep legacy alias pointing to accumulative append
+        window.regenerateCustomExplanation = (termId) => window.appendFollowUpNote(termId);
 
         window.handleExplanationAutoSave = (termId, newText) => {
             updateTerm(termId, { explanation: newText });
@@ -1187,6 +1324,7 @@
             if (!term) return;
 
             state.showKeywordsExp = true;
+            state.isEditingExplanation = false;
             updateTerm(termId, { isGeneratingAI: true });
             renderApp();
 
@@ -1207,7 +1345,7 @@
             const systemPrompt = `You are a Philippine Mechanical Engineering Board Exam tutor.
 Analyze the question stem, choices, and correct answer, then return a JSON object with two fields:
 1. "keywords": An array of 1 to 4 exact critical keywords or short phrases copied verbatim from the Question Stem that serve as key clues or trap words (e.g. "pure torsion", "maximum", "EXCEPT").
-2. "explanation": A concise 1–2 sentence explanation (in clear English or Taglish) directly linking those keywords in the stem to why the correct answer is right.${customInstruction ? `\nIMPORTANT USER INSTRUCTION FOR EXPLANATION: "${customInstruction}"` : ''}
+2. "explanation": A concise 1–2 sentence explanation (in clear English or Taglish) directly linking those keywords in the stem to why the correct answer is right. Wrap any math/formulas/Greek letters in valid LaTeX using $...$ or $$...$$ (and double-escape backslashes inside JSON like \\\\frac, \\\\tau, \\\\theta).${customInstruction ? `\nIMPORTANT USER INSTRUCTION FOR EXPLANATION: "${customInstruction}"` : ''}
 Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
 
             const userQuery = `Question Stem:\n${stem}\n\nChoices:\n${choicesContext}\n\nCorrect Answer:\n${correctContext}${customInstruction ? `\n\nSpecific Instruction: ${customInstruction}` : ''}`;
@@ -1234,15 +1372,16 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     let explanation = term.explanation || '';
                     try {
                         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-                        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+                        const jsonCandidate = repairLatexInJsonString(jsonMatch ? jsonMatch[0] : rawText);
+                        const parsed = JSON.parse(jsonCandidate);
                         if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
                             keywords = parsed.keywords.map(k => String(k).trim()).filter(Boolean);
                         }
                         if (parsed.explanation) {
-                            explanation = String(parsed.explanation).trim();
+                            explanation = normalizeLatexText(String(parsed.explanation).trim());
                         }
                     } catch (parseErr) {
-                        explanation = rawText.replace(/^```json\s*|\s*```$/g, '').trim();
+                        explanation = normalizeLatexText(rawText.replace(/^```json\s*|\s*```$/g, '').trim());
                     }
                     if (!Array.isArray(keywords) || keywords.length === 0) {
                         keywords = extractFallbackKeywords(stem);
@@ -2659,7 +2798,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                     >${escapeHTML(t.erroneousNote || '')}</textarea>
                                 </div>
                                 ` : ''}
-                                ${t.explanation ? `<p class="text-xs text-purple-700 bg-purple-50 px-2.5 py-1.5 rounded-lg border border-purple-100 line-clamp-2"><i class="ph-fill ph-sparkle"></i> ${escapeHTML(t.explanation)}</p>` : ''}
+                                ${t.explanation ? `<div class="text-xs text-purple-800 bg-purple-50 px-2.5 py-1.5 rounded-lg border border-purple-100 line-clamp-3 whitespace-pre-wrap"><i class="ph-fill ph-sparkle text-purple-600 mr-1"></i>${renderFormattedNotesHtml(t.explanation)}</div>` : ''}
                             </div>
                         </div>
                         <div class="flex flex-wrap items-center gap-2 shrink-0 self-end sm:self-center">
@@ -3643,41 +3782,72 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             <div class="p-4 bg-purple-50/90 border border-purple-200 rounded-2xl text-left space-y-3 fade-in shadow-sm">
                                 <div class="flex items-center justify-between gap-2 flex-wrap">
                                     <span class="text-[10px] font-black text-purple-700 uppercase tracking-widest flex items-center gap-1">
-                                        <i class="ph-fill ph-sparkle"></i> Keywords & Explanation (Editable)
+                                        <i class="ph-fill ph-sparkle"></i> Notes & Explanation (LaTeX Ready)
                                     </span>
-                                    <div class="flex items-center gap-2">
+                                    <div class="flex items-center gap-1.5 flex-wrap">
                                         <select
                                             onchange="window.changeGeminiModel(this.value, event)"
-                                            class="text-[10px] font-bold bg-white text-purple-800 border border-purple-200 rounded-lg px-2 py-1 outline-none cursor-pointer"
+                                            class="text-[10px] font-bold bg-white text-purple-800 border border-purple-200 rounded-lg px-2 py-1 outline-none cursor-pointer max-w-[130px]"
                                             title="Switch AI Model"
                                         >
                                             ${AVAILABLE_GEMINI_MODELS.map(m => `<option value="${m.id}" ${state.geminiModel === m.id ? 'selected' : ''}>${m.id === 'auto' ? '⚡ Auto-Rotate' : m.id}</option>`).join('')}
                                         </select>
+                                        <button
+                                            type="button"
+                                            onclick="window.toggleExplanationEditMode(event)"
+                                            class="px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors flex items-center gap-1 ${state.isEditingExplanation ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-purple-700 border-purple-200 hover:bg-purple-100'}"
+                                            title="${state.isEditingExplanation ? 'Preview Rendered LaTeX Notes' : 'Edit Notes Manually'}"
+                                        >
+                                            <i class="ph-bold ${state.isEditingExplanation ? 'ph-check' : 'ph-pencil-simple'}"></i> ${state.isEditingExplanation ? 'Done' : 'Edit'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onclick="window.resetBaseExplanation('${currentCard.id}', event)"
+                                            class="p-1 rounded-lg text-purple-500 hover:text-purple-800 hover:bg-purple-100 border border-purple-200/70 bg-white transition-colors"
+                                            title="Reset & regenerate base explanation from scratch"
+                                        >
+                                            <i class="ph-bold ph-arrows-clockwise text-xs"></i>
+                                        </button>
                                         <span id="exp-autosave-${currentCard.id}" class="text-[10px] font-bold text-emerald-600 transition-opacity">✓ Cached</span>
                                     </div>
                                 </div>
 
+                                ${state.isEditingExplanation ? `
                                 <textarea
-                                    rows="3"
-                                    placeholder="Add your own explanation, notes, or mnemonics here (auto-saves)..."
+                                    rows="5"
+                                    placeholder="Add or edit your explanation, notes, mnemonics, or LaTeX ($...$) here (auto-saves)..."
                                     oninput="window.handleExplanationAutoSave('${currentCard.id}', this.value)"
-                                    class="w-full p-2.5 text-sm font-medium text-purple-950 bg-white/90 border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-400 outline-none resize-y leading-relaxed"
-                                >${escapeHTML(currentCard.explanation || '')}</textarea>
+                                    class="w-full p-2.5 text-sm font-medium text-purple-950 bg-white border border-purple-300 rounded-xl focus:ring-2 focus:ring-purple-400 outline-none resize-y leading-relaxed font-mono"
+                                >${escapeHTML(normalizeLatexText(currentCard.explanation || ''))}</textarea>
+                                ` : `
+                                <div class="w-full p-3 text-sm font-medium text-purple-950 bg-white/95 border border-purple-200 rounded-xl leading-relaxed whitespace-pre-wrap break-words overflow-x-auto max-h-80 overflow-y-auto custom-scrollbar">
+                                    ${renderFormattedNotesHtml(currentCard.explanation || '')}
+                                </div>
+                                `}
+
+                                ${currentCard.isAppendingAI ? `
+                                <div class="px-3 py-2.5 bg-purple-100/80 border border-purple-200 rounded-xl flex items-center gap-2 text-xs font-bold text-purple-800 animate-pulse">
+                                    <i class="ph-bold ph-spinner-gap animate-spin text-base"></i> Sinasagot ang tanong mo at idinadagdag sa notes...
+                                </div>
+                                ` : ''}
 
                                 <div class="flex items-center gap-2 pt-1">
                                     <input
                                         id="custom-regen-input-${currentCard.id}"
                                         type="text"
-                                        placeholder="e.g., explain why B is wrong, connect to cycle..."
-                                        onkeydown="if(event.key==='Enter'){event.preventDefault(); window.regenerateCustomExplanation('${currentCard.id}');}"
-                                        class="flex-1 text-xs p-2.5 bg-white border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-400 outline-none font-medium text-slate-700"
+                                        ${currentCard.isAppendingAI ? 'disabled' : ''}
+                                        placeholder="Magtanong pa para idagdag sa notes (e.g., bakit mali si B?, ano formula?)..."
+                                        onkeydown="if(event.key==='Enter'){event.preventDefault(); window.appendFollowUpNote('${currentCard.id}');}"
+                                        class="flex-1 text-xs p-2.5 bg-white border border-purple-200 rounded-xl focus:ring-2 focus:ring-purple-400 outline-none font-medium text-slate-700 disabled:opacity-50"
                                     />
                                     <button
                                         type="button"
-                                        onclick="window.regenerateCustomExplanation('${currentCard.id}')"
-                                        class="px-3.5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs flex items-center gap-1 shrink-0 transition-colors active:scale-95 shadow-sm"
+                                        ${currentCard.isAppendingAI ? 'disabled' : ''}
+                                        onclick="window.appendFollowUpNote('${currentCard.id}')"
+                                        class="px-3.5 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs flex items-center gap-1 shrink-0 transition-colors active:scale-95 shadow-sm"
+                                        title="Keep existing notes and append AI answer to your new question"
                                     >
-                                        <i class="ph-bold ph-arrows-clockwise"></i> Regenerate
+                                        <i class="ph-bold ph-plus-circle"></i> Add Note
                                     </button>
                                 </div>
                             </div>
