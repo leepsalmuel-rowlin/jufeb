@@ -932,6 +932,17 @@
         };
 
         // --- FINISH-TIME CLOCK PREDICTOR (SMART WEIGHTED ROLLING PACE) ---
+        function formatDurationHoursMins(totalSeconds) {
+            const sec = Math.max(0, Math.round(totalSeconds || 0));
+            if (sec === 0) return '0m';
+            if (sec < 60) return '< 1m';
+            const totalMins = Math.ceil(sec / 60);
+            if (totalMins < 60) return `${totalMins}m`;
+            const hrs = Math.floor(totalMins / 60);
+            const remMins = totalMins % 60;
+            return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
+        }
+
         function computeSessionEtaInfo() {
             if (!state.sessionData || !Array.isArray(state.sessionData.queue) || state.sessionData.queue.length === 0) {
                 return null;
@@ -956,12 +967,17 @@
                 isLivePace = true;
             }
 
+            const totalSecLeft = remainingCards * secPerCard;
             const now = new Date();
-            const etaDate = new Date(now.getTime() + (remainingCards * secPerCard * 1000));
+            const etaDate = new Date(now.getTime() + (totalSecLeft * 1000));
             const clockStr = etaDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
             const isNextDay = etaDate.getDate() !== now.getDate() || etaDate.getMonth() !== now.getMonth();
+            const clockText = isNextDay ? `${clockStr} (+1d)` : clockStr;
+            const remainingText = formatDurationHoursMins(totalSecLeft);
             return {
-                clockText: isNextDay ? `${clockStr} (+1d)` : clockStr,
+                clockText,
+                remainingText,
+                displayText: `${clockText} • ${remainingText}`,
                 secPerCard: secPerCard.toFixed(1),
                 remainingCards,
                 isLivePace
@@ -975,9 +991,9 @@
             if (!clockEl) return;
             const eta = computeSessionEtaInfo();
             if (!eta) return;
-            clockEl.textContent = eta.clockText;
+            clockEl.textContent = eta.displayText;
             if (pillEl) {
-                pillEl.title = `Expected finish time: ${eta.clockText} (~${eta.secPerCard}s/card • ${eta.remainingCards} left). Click to hide`;
+                pillEl.title = `Expected finish: ${eta.clockText} (${eta.remainingText} left • ~${eta.secPerCard}s/card • ${eta.remainingCards} cards). Click to hide`;
             }
         }
 
@@ -4343,9 +4359,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     </div>
                     <div class="flex items-center gap-2 flex-wrap">
                         ${etaInfo ? (state.showEtaPredictor ? `
-                        <button type="button" id="session-eta-pill" onclick="window.toggleEtaPredictor(event)" class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-full text-xs md:text-sm font-extrabold flex items-center gap-1 transition-all active:scale-95 shadow-sm" title="Expected finish time: ${etaInfo.clockText} (~${etaInfo.secPerCard}s/card • ${etaInfo.remainingCards} left). Click to hide">
+                        <button type="button" id="session-eta-pill" onclick="window.toggleEtaPredictor(event)" class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-full text-xs md:text-sm font-extrabold flex items-center gap-1 transition-all active:scale-95 shadow-sm" title="Expected finish: ${etaInfo.clockText} (${etaInfo.remainingText} left • ~${etaInfo.secPerCard}s/card • ${etaInfo.remainingCards} cards). Click to hide">
                             <i class="ph-fill ph-flag-checkered text-sm"></i>
-                            <span id="session-eta-clock">${etaInfo.clockText}</span>
+                            <span id="session-eta-clock">${etaInfo.displayText}</span>
                         </button>
                         ` : `
                         <button type="button" onclick="window.toggleEtaPredictor(event)" class="px-2 py-1 bg-slate-100 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600 rounded-full text-xs font-bold flex items-center gap-1 transition-colors" title="Show Finish Time ETA Predictor">
@@ -4367,8 +4383,8 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     </div>
                     ` : ''}
                     
-                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 ${currentCard.isErroneous ? 'border-rose-300' : 'border-slate-200'} flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
-                        <!-- Card Top Bar: Deck Path + Parking Lot + Erroneous Tracker + Live OCR Edit -->
+                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 ${state.showAnswer && currentCard.isErroneous ? 'border-rose-300' : 'border-slate-200'} flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
+                        <!-- Card Top Bar: Deck Path + Parking Lot + Erroneous Tracker (Post-Reveal Only) + Live OCR Edit -->
                         <div class="flex items-center justify-between gap-2 w-full mb-4 pb-3 border-b border-slate-100 flex-wrap">
                             <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[180px] sm:max-w-[240px]" title="${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}">
                                 ${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}
@@ -4379,10 +4395,12 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                     <i class="${currentCard.parkingLot ? 'ph-fill' : 'ph-bold'} ph-flag text-sm"></i>
                                     <span>${currentCard.parkingLot ? 'Parked' : 'Parking Lot'}</span>
                                 </button>
+                                ${state.showAnswer ? `
                                 <button type="button" onclick="window.toggleErroneous('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${currentCard.isErroneous ? 'bg-rose-100 text-rose-800 border border-rose-300 shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-rose-50 hover:text-rose-700 border border-transparent'}" title="Mark as Erroneous Question">
                                     <i class="${currentCard.isErroneous ? 'ph-fill' : 'ph-bold'} ph-warning-octagon text-sm"></i>
                                     <span>Erroneous</span>
                                 </button>
+                                ` : ''}
                                 ${state.sessionData.type === 'parking_lot' && currentCard.parkingLot ? `
                                 <button type="button" onclick="window.resolveParkingLot('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 flex items-center gap-1 transition-all active:scale-95" title="Resolve & Remove from Parking Lot">
                                     <i class="ph-bold ph-check-circle text-sm"></i> Resolve
@@ -4401,50 +4419,6 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             ${renderChoicesAndStem(state.showAnswer)}
                         </div>
 
-                        ${currentCard.isErroneous ? `
-                        <div class="mt-3 p-4 bg-rose-50/90 border-2 border-rose-200 rounded-2xl text-left space-y-2.5 fade-in shadow-sm" onclick="event.stopPropagation()">
-                            <div class="flex items-center justify-between gap-2">
-                                <span class="text-[11px] font-black text-rose-700 uppercase tracking-wider flex items-center gap-1.5">
-                                    <i class="ph-fill ph-warning-octagon text-base"></i> Erroneous Question Tracker
-                                </span>
-                                <span id="err-autosave-${currentCard.id}" class="text-[10px] font-bold text-emerald-600 transition-opacity">✓ Saved</span>
-                            </div>
-
-                            <div class="space-y-1.5">
-                                <label class="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Dapat na Tamang Sagot (Optional / Pwede ring wala):</label>
-                                <div class="flex flex-wrap gap-1.5 mb-1">
-                                    ${quickChoicePillsHtml}
-                                    <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', 'Wala sa choices (None)', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors ${currentCard.trueAnswer === 'Wala sa choices (None)' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'}">
-                                        Wala sa choices
-                                    </button>
-                                    ${currentCard.trueAnswer ? `
-                                    <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', '', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500 hover:bg-slate-200">
-                                        Clear
-                                    </button>
-                                    ` : ''}
-                                </div>
-                                <input
-                                    id="err-true-ans-${currentCard.id}"
-                                    type="text"
-                                    placeholder="I-type o piliin ang totoong tamang sagot (o iwanang blangko kung wala)..."
-                                    value="${escapeHTML(currentCard.trueAnswer || '')}"
-                                    oninput="window.handleErroneousTrueAnsInput('${currentCard.id}', this.value)"
-                                    class="board-exam-font w-full text-xs p-2.5 bg-white border border-rose-200 rounded-xl focus:ring-2 focus:ring-rose-400 outline-none font-bold text-rose-950"
-                                />
-                            </div>
-
-                            <div class="space-y-1">
-                                <label class="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Note (Bakit Erroneous at Bakit Yun ang Tamang Sagot Talaga):</label>
-                                <textarea
-                                    rows="2"
-                                    placeholder="Isulat dito bakit erroneous yung tanong/sagot sa book at bakit yun ang dapat na tamang sagot..."
-                                    oninput="window.handleErroneousNoteInput('${currentCard.id}', this.value)"
-                                    class="w-full p-2.5 text-xs font-medium text-rose-950 bg-white border border-rose-200 rounded-xl focus:ring-2 focus:ring-rose-400 outline-none resize-y leading-relaxed"
-                                >${escapeHTML(currentCard.erroneousNote || '')}</textarea>
-                            </div>
-                        </div>
-                        ` : ''}
-
                         ${state.showAnswer ? `
                         <div class="fade-in slide-up duration-300 w-full mt-2 space-y-3" onclick="event.stopPropagation()">
                             <div class="p-4 md:p-5 bg-blue-50 border-2 border-blue-200 rounded-2xl text-center relative overflow-hidden">
@@ -4457,6 +4431,50 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                                 </div>
                                 ` : ''}
                             </div>
+
+                            ${currentCard.isErroneous ? `
+                            <div class="p-4 bg-rose-50/90 border-2 border-rose-200 rounded-2xl text-left space-y-2.5 fade-in shadow-sm">
+                                <div class="flex items-center justify-between gap-2">
+                                    <span class="text-[11px] font-black text-rose-700 uppercase tracking-wider flex items-center gap-1.5">
+                                        <i class="ph-fill ph-warning-octagon text-base"></i> Erroneous Question Tracker
+                                    </span>
+                                    <span id="err-autosave-${currentCard.id}" class="text-[10px] font-bold text-emerald-600 transition-opacity">✓ Saved</span>
+                                </div>
+
+                                <div class="space-y-1.5">
+                                    <label class="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Dapat na Tamang Sagot (Optional / Pwede ring wala):</label>
+                                    <div class="flex flex-wrap gap-1.5 mb-1">
+                                        ${quickChoicePillsHtml}
+                                        <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', 'Wala sa choices (None)', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors ${currentCard.trueAnswer === 'Wala sa choices (None)' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'}">
+                                            Wala sa choices
+                                        </button>
+                                        ${currentCard.trueAnswer ? `
+                                        <button type="button" onclick="window.setErroneousQuickAns('${currentCard.id}', '', event)" class="px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500 hover:bg-slate-200">
+                                            Clear
+                                        </button>
+                                        ` : ''}
+                                    </div>
+                                    <input
+                                        id="err-true-ans-${currentCard.id}"
+                                        type="text"
+                                        placeholder="I-type o piliin ang totoong tamang sagot (o iwanang blangko kung wala)..."
+                                        value="${escapeHTML(currentCard.trueAnswer || '')}"
+                                        oninput="window.handleErroneousTrueAnsInput('${currentCard.id}', this.value)"
+                                        class="board-exam-font w-full text-xs p-2.5 bg-white border border-rose-200 rounded-xl focus:ring-2 focus:ring-rose-400 outline-none font-bold text-rose-950"
+                                    />
+                                </div>
+
+                                <div class="space-y-1">
+                                    <label class="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Note (Bakit Erroneous at Bakit Yun ang Tamang Sagot Talaga):</label>
+                                    <textarea
+                                        rows="2"
+                                        placeholder="Isulat dito bakit erroneous yung tanong/sagot sa book at bakit yun ang dapat na tamang sagot..."
+                                        oninput="window.handleErroneousNoteInput('${currentCard.id}', this.value)"
+                                        class="w-full p-2.5 text-xs font-medium text-rose-950 bg-white border border-rose-200 rounded-xl focus:ring-2 focus:ring-rose-400 outline-none resize-y leading-relaxed"
+                                    >${escapeHTML(currentCard.erroneousNote || '')}</textarea>
+                                </div>
+                            </div>
+                            ` : ''}
                             
                             ${!state.showKeywordsExp ? `
                             <button type="button" onclick="window.triggerKeywordsAndExplanation('${currentCard.id}')" class="w-full py-3 px-4 bg-purple-100 hover:bg-purple-200 text-purple-800 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 border border-purple-200 shadow-sm">
