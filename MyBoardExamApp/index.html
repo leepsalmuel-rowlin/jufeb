@@ -101,6 +101,7 @@
             activeFolderId: 'mdsp',
             studyFolderId: 'all',
             statsFolderId: 'all', 
+            analyticsFolderId: 'all',
             showBulk: false,
             editingFolderId: null,
             addingSubfolderTo: null,
@@ -1184,8 +1185,25 @@
 
             return segments.map(seg => {
                 if (!seg) return '';
-                if (seg.startsWith('$') || seg.startsWith('\\(') || seg.startsWith('\\[')) {
-                    // Keep LaTeX delimiters intact for KaTeX auto-render
+                if (seg.startsWith('$$') && seg.endsWith('$$')) {
+                    const expr = seg.slice(2, -2).trim();
+                    if (window.katex && window.katex.renderToString) {
+                        try { return window.katex.renderToString(expr, { displayMode: true, throwOnError: false }); } catch (e) {}
+                    }
+                    return escapeHTML(seg);
+                }
+                if (seg.startsWith('\\[') && seg.endsWith('\\]')) {
+                    const expr = seg.slice(2, -2).trim();
+                    if (window.katex && window.katex.renderToString) {
+                        try { return window.katex.renderToString(expr, { displayMode: true, throwOnError: false }); } catch (e) {}
+                    }
+                    return escapeHTML(seg);
+                }
+                if ((seg.startsWith('$') && seg.endsWith('$')) || (seg.startsWith('\\(') && seg.endsWith('\\)'))) {
+                    const expr = seg.startsWith('$') ? seg.slice(1, -1).trim() : seg.slice(2, -2).trim();
+                    if (window.katex && window.katex.renderToString) {
+                        try { return window.katex.renderToString(expr, { displayMode: false, throwOnError: false }); } catch (e) {}
+                    }
                     return escapeHTML(seg);
                 }
                 let html = escapeHTML(seg);
@@ -1546,6 +1564,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             renderApp();
         };
         window.setStatsFolder = (id) => { state.statsFolderId = id; renderApp(); };
+        window.setAnalyticsFolder = (id) => { state.analyticsFolderId = id; renderApp(); };
         window.setIntakeSize = (val) => { state.intakeSize = Number(val); renderApp(); };
         window.setLookAheadDays = (val) => { state.lookAheadDays = Number(val); renderApp(); };
         window.toggleBulk = () => { state.showBulk = !state.showBulk; renderApp(); };
@@ -2357,6 +2376,9 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             </button>
                             <button onclick="window.setView('stats')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'stats' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}">
                                 <i class="ph-fill ph-users text-lg"></i> <span class="hidden md:inline">Stats</span>
+                            </button>
+                            <button onclick="window.setView('analytics')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'analytics' ? 'bg-white shadow-sm text-emerald-600' : 'text-slate-500 hover:text-slate-700'}">
+                                <i class="ph-fill ph-chart-line-up text-lg"></i> <span class="hidden md:inline">Analytics</span>
                             </button>
                             <button onclick="window.setView('forecast')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'forecast' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-500 hover:text-slate-700'}">
                                 <i class="ph-fill ph-crystal-ball text-lg"></i> <span class="hidden md:inline">Forecast</span>
@@ -3245,6 +3267,575 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             `;
         }
 
+        // --- STREAMING_CHUNK:Visual Analytics UI (Read-Only from Existing Data & Logs) ---
+        function renderAnalytics() {
+            const todayStart = getTodayStart();
+            const getDescendantIds = (rootId) => {
+                if (!rootId || rootId === 'all') return null;
+                const result = [];
+                const visited = new Set();
+                const queue = [rootId];
+                while (queue.length > 0) {
+                    const curr = queue.shift();
+                    if (visited.has(curr)) continue;
+                    visited.add(curr);
+                    result.push(curr);
+                    state.folders.forEach(f => {
+                        if (f.parentId === curr && !visited.has(f.id)) queue.push(f.id);
+                    });
+                }
+                return result;
+            };
+
+            // Fallback to 'all' if selected folder was deleted
+            if (state.analyticsFolderId !== 'all' && !state.folders.some(f => f.id === state.analyticsFolderId)) {
+                state.analyticsFolderId = 'all';
+            }
+
+            const targetFolderIds = getDescendantIds(state.analyticsFolderId);
+            const scopedTerms = targetFolderIds === null
+                ? state.terms
+                : state.terms.filter(t => targetFolderIds.includes(t.folderId));
+
+            const totalCards = scopedTerms.length;
+            const totalCorrect = scopedTerms.reduce((acc, t) => acc + (t.correct || 0), 0);
+            const totalIncorrect = scopedTerms.reduce((acc, t) => acc + (t.incorrect || 0), 0);
+            const totalAttempts = totalCorrect + totalIncorrect;
+            const accuracyPct = totalAttempts > 0 ? Math.round((totalCorrect / totalAttempts) * 100) : 0;
+
+            const lvlCounts = { new: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+            scopedTerms.forEach(t => {
+                if (t.isNew) lvlCounts.new++;
+                else {
+                    const lv = Math.min(Math.max(t.level || 1, 1), 6);
+                    lvlCounts[lv]++;
+                }
+            });
+
+            const masteredCount = lvlCounts[4] + lvlCounts[5] + lvlCounts[6];
+            const solidifyingCount = lvlCounts[3];
+            const learningCount = lvlCounts[1] + lvlCounts[2];
+            const unseenCount = lvlCounts.new;
+            const masteryPct = totalCards > 0 ? Math.round((masteredCount / totalCards) * 100) : 0;
+
+            const parkedCount = scopedTerms.filter(t => t.parkingLot).length;
+            const erroneousCount = scopedTerms.filter(t => t.isErroneous).length;
+            const highRiskCards = scopedTerms.filter(t => (t.incorrect || 0) >= 2 && (t.isNew || (t.level || 0) <= 2));
+            const reviewedTodayCount = scopedTerms.filter(t => (t.lastReviewedDate || 0) >= todayStart).length;
+
+            // --- 1. Build History Series (Read-Only from state.history) ---
+            let scopedHistory = {};
+            if (state.analyticsFolderId === 'all') {
+                scopedHistory = (state.history && state.history['all']) ? state.history['all'] : {};
+            } else {
+                const isParent = targetFolderIds && targetFolderIds.length > 1;
+                if (isParent) {
+                    targetFolderIds.forEach(fid => {
+                        const fHist = (state.history && state.history[fid]) ? state.history[fid] : {};
+                        Object.keys(fHist).forEach(dateStr => {
+                            if (!scopedHistory[dateStr]) {
+                                scopedHistory[dateStr] = { new: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, total: 0 };
+                            }
+                            const d = fHist[dateStr];
+                            scopedHistory[dateStr].new += d.new || 0;
+                            for (let k = 1; k <= 6; k++) scopedHistory[dateStr][k] += d[k] || 0;
+                            scopedHistory[dateStr].total += d.total || 0;
+                        });
+                    });
+                } else {
+                    scopedHistory = (state.history && state.history[state.analyticsFolderId]) ? state.history[state.analyticsFolderId] : {};
+                }
+            }
+
+            const allLogDates = Object.keys((state.history && state.history['all']) ? state.history['all'] : {}).sort();
+            let activeStreak = 0;
+            if (allLogDates.length > 0) {
+                activeStreak = 1;
+                for (let i = allLogDates.length - 1; i > 0; i--) {
+                    const currD = new Date(allLogDates[i] + 'T00:00:00');
+                    const prevD = new Date(allLogDates[i - 1] + 'T00:00:00');
+                    const diffDays = Math.round((currD - prevD) / MS_PER_DAY);
+                    if (diffDays === 1) activeStreak++;
+                    else break;
+                }
+            }
+
+            const sortedHistoryDates = Object.keys(scopedHistory).sort().slice(-30);
+            const trendPoints = sortedHistoryDates.map(dateStr => {
+                const d = scopedHistory[dateStr] || {};
+                const mastered = (d[4] || 0) + (d[5] || 0) + (d[6] || 0);
+                const mid = (d[2] || 0) + (d[3] || 0);
+                const weak = (d.new || 0) + (d[1] || 0);
+                const tot = d.total || (mastered + mid + weak);
+                const shortLabel = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                return { dateStr, shortLabel, mastered, mid, weak, total: tot };
+            });
+
+            // Build SVG Dual Area/Line Chart for Mastery Trend
+            let trendChartHtml = '';
+            let netMasteryDelta = 0;
+            if (trendPoints.length >= 2) {
+                netMasteryDelta = trendPoints[trendPoints.length - 1].mastered - trendPoints[0].mastered;
+                const svgW = 680;
+                const svgH = 240;
+                const padL = 44;
+                const padR = 18;
+                const padT = 18;
+                const padB = 34;
+                const plotW = svgW - padL - padR;
+                const plotH = svgH - padT - padB;
+                const maxVal = Math.max(10, ...trendPoints.map(p => Math.max(p.mastered, p.mid, p.weak)));
+                const yStep = Math.ceil(maxVal / 4 / 10) * 10 || Math.ceil(maxVal / 4);
+                const yMax = Math.max(maxVal, yStep * 4);
+
+                const getX = (idx) => padL + (idx / (trendPoints.length - 1)) * plotW;
+                const getY = (val) => padT + plotH - (val / yMax) * plotH;
+
+                const masteredCoords = trendPoints.map((p, i) => `${getX(i).toFixed(1)},${getY(p.mastered).toFixed(1)}`);
+                const midCoords = trendPoints.map((p, i) => `${getX(i).toFixed(1)},${getY(p.mid).toFixed(1)}`);
+                const weakCoords = trendPoints.map((p, i) => `${getX(i).toFixed(1)},${getY(p.weak).toFixed(1)}`);
+
+                const masteredArea = `M ${getX(0).toFixed(1)},${(padT + plotH).toFixed(1)} L ${masteredCoords.join(' L ')} L ${getX(trendPoints.length - 1).toFixed(1)},${(padT + plotH).toFixed(1)} Z`;
+                const weakArea = `M ${getX(0).toFixed(1)},${(padT + plotH).toFixed(1)} L ${weakCoords.join(' L ')} L ${getX(trendPoints.length - 1).toFixed(1)},${(padT + plotH).toFixed(1)} Z`;
+
+                let gridLinesSvg = '';
+                for (let g = 0; g <= 4; g++) {
+                    const gVal = Math.round((yMax / 4) * g);
+                    const gy = getY(gVal);
+                    gridLinesSvg += `
+                        <line x1="${padL}" y1="${gy.toFixed(1)}" x2="${svgW - padR}" y2="${gy.toFixed(1)}" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="${g === 0 ? '' : '4 4'}" />
+                        <text x="${padL - 8}" y="${(gy + 3.5).toFixed(1)}" text-anchor="end" font-size="10" font-weight="700" fill="#94a3b8">${gVal}</text>
+                    `;
+                }
+
+                // Pick up to 6 evenly spaced X-axis labels
+                const labelStep = Math.max(1, Math.ceil((trendPoints.length - 1) / 5));
+                let xLabelsSvg = '';
+                trendPoints.forEach((p, i) => {
+                    if (i === 0 || i === trendPoints.length - 1 || i % labelStep === 0) {
+                        xLabelsSvg += `<text x="${getX(i).toFixed(1)}" y="${svgH - 8}" text-anchor="middle" font-size="10" font-weight="700" fill="#64748b">${p.shortLabel}</text>`;
+                    }
+                });
+
+                let dotsSvg = '';
+                trendPoints.forEach((p, i) => {
+                    const cx = getX(i).toFixed(1);
+                    dotsSvg += `
+                        <circle cx="${cx}" cy="${getY(p.mastered).toFixed(1)}" r="4" fill="#10b981" stroke="#ffffff" stroke-width="2" class="cursor-pointer">
+                            <title>${p.dateStr} — Mastered (L4-6): ${p.mastered} | Learning (L2-3): ${p.mid} | Weak/New: ${p.weak}</title>
+                        </circle>
+                        <circle cx="${cx}" cy="${getY(p.weak).toFixed(1)}" r="3.5" fill="#f43f5e" stroke="#ffffff" stroke-width="1.5" class="cursor-pointer">
+                            <title>${p.dateStr} — Weak/New (New-L1): ${p.weak}</title>
+                        </circle>
+                    `;
+                });
+
+                trendChartHtml = `
+                    <div class="w-full overflow-x-auto">
+                        <svg viewBox="0 0 ${svgW} ${svgH}" class="w-full min-w-[460px] h-auto select-none">
+                            <defs>
+                                <linearGradient id="gradMastered" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stop-color="#10b981" stop-opacity="0.28" />
+                                    <stop offset="100%" stop-color="#10b981" stop-opacity="0.02" />
+                                </linearGradient>
+                                <linearGradient id="gradWeak" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stop-color="#f43f5e" stop-opacity="0.16" />
+                                    <stop offset="100%" stop-color="#f43f5e" stop-opacity="0.01" />
+                                </linearGradient>
+                            </defs>
+                            ${gridLinesSvg}
+                            <path d="${weakArea}" fill="url(#gradWeak)" />
+                            <path d="${masteredArea}" fill="url(#gradMastered)" />
+                            <polyline points="${midCoords.join(' ')}" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5 4" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
+                            <polyline points="${weakCoords.join(' ')}" fill="none" stroke="#f43f5e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+                            <polyline points="${masteredCoords.join(' ')}" fill="none" stroke="#10b981" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+                            ${dotsSvg}
+                            ${xLabelsSvg}
+                        </svg>
+                    </div>
+                `;
+            } else {
+                trendChartHtml = `
+                    <div class="p-8 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-slate-400">
+                        <i class="ph-bold ph-chart-line text-3xl mb-2 block"></i>
+                        <p class="text-sm font-bold text-slate-600">Need at least 2 logged days to draw your growth curve.</p>
+                        <p class="text-xs mt-1">Keep reviewing daily—your progress logs are automatically recorded every session!</p>
+                    </div>
+                `;
+            }
+
+            // --- 2. SVG Donut Ring for Mastery Stage Breakdown ---
+            const donutR = 52;
+            const donutC = 2 * Math.PI * donutR;
+            const donutSegs = [
+                { label: 'Mastered (L4-6)', count: masteredCount, color: '#10b981', badge: 'bg-emerald-500' },
+                { label: 'Solidifying (L3)', count: solidifyingCount, color: '#3b82f6', badge: 'bg-blue-500' },
+                { label: 'Learning (L1-2)', count: learningCount, color: '#f59e0b', badge: 'bg-amber-400' },
+                { label: 'Unseen (New)', count: unseenCount, color: '#cbd5e1', badge: 'bg-slate-300' }
+            ];
+            let accumOffset = 0;
+            let donutCirclesSvg = '';
+            if (totalCards > 0) {
+                donutSegs.forEach(seg => {
+                    const segLen = (seg.count / totalCards) * donutC;
+                    if (segLen > 0) {
+                        donutCirclesSvg += `
+                            <circle cx="70" cy="70" r="${donutR}" fill="transparent"
+                                stroke="${seg.color}" stroke-width="18"
+                                stroke-dasharray="${segLen.toFixed(2)} ${(donutC - segLen).toFixed(2)}"
+                                stroke-dashoffset="${(-accumOffset).toFixed(2)}"
+                                transform="rotate(-90 70 70)">
+                                <title>${seg.label}: ${seg.count} cards (${Math.round((seg.count / totalCards) * 100)}%)</title>
+                            </circle>
+                        `;
+                        accumOffset += segLen;
+                    }
+                });
+            } else {
+                donutCirclesSvg = `<circle cx="70" cy="70" r="${donutR}" fill="transparent" stroke="#e2e8f0" stroke-width="18" />`;
+            }
+
+            const levelRows = [
+                { label: 'New', count: lvlCounts.new, barColor: 'bg-slate-400', textColor: 'text-slate-600' },
+                { label: 'Lvl 1', count: lvlCounts[1], barColor: 'bg-rose-500', textColor: 'text-rose-600' },
+                { label: 'Lvl 2', count: lvlCounts[2], barColor: 'bg-amber-400', textColor: 'text-amber-600' },
+                { label: 'Lvl 3', count: lvlCounts[3], barColor: 'bg-blue-500', textColor: 'text-blue-600' },
+                { label: 'Lvl 4', count: lvlCounts[4], barColor: 'bg-emerald-400', textColor: 'text-emerald-600' },
+                { label: 'Lvl 5', count: lvlCounts[5], barColor: 'bg-emerald-500', textColor: 'text-emerald-700' },
+                { label: 'Lvl 6', count: lvlCounts[6], barColor: 'bg-teal-600', textColor: 'text-teal-700' }
+            ];
+
+            const levelBarsHtml = levelRows.map(r => {
+                const pct = totalCards > 0 ? Math.round((r.count / totalCards) * 100) : 0;
+                return `
+                    <div class="flex items-center gap-2.5 text-xs">
+                        <span class="w-11 font-extrabold ${r.textColor} shrink-0">${r.label}</span>
+                        <div class="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                            <div class="h-full ${r.barColor} rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+                        </div>
+                        <span class="w-16 text-right font-bold text-slate-600 shrink-0">${r.count} <span class="text-[10px] text-slate-400">(${pct}%)</span></span>
+                    </div>
+                `;
+            }).join('');
+
+            // --- 3. Upcoming 14-Day Review Load (SVG Vertical Bar Chart from nextReviewDate) ---
+            const dueBuckets = [];
+            for (let d = 0; d < 14; d++) {
+                const bucketStart = todayStart + (d * MS_PER_DAY);
+                const bucketEnd = bucketStart + MS_PER_DAY;
+                const count = scopedTerms.filter(t => {
+                    if (t.isNew) return false;
+                    if (d === 0) return t.nextReviewDate <= todayStart;
+                    return t.nextReviewDate > (bucketStart - MS_PER_DAY) && t.nextReviewDate <= bucketStart;
+                }).length;
+                const dt = new Date(bucketStart);
+                const label = d === 0 ? 'Today' : dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                const shortDay = d === 0 ? 'Now' : dt.toLocaleDateString('en-US', { weekday: 'short' }).slice(0, 2) + ' ' + dt.getDate();
+                dueBuckets.push({ dayIndex: d, label, shortDay, count });
+            }
+            const totalNext14 = dueBuckets.reduce((a, b) => a + b.count, 0);
+            const maxBucket = Math.max(5, ...dueBuckets.map(b => b.count));
+            const peakBucket = dueBuckets.reduce((best, cur) => cur.count > best.count ? cur : best, dueBuckets[0]);
+
+            const barSvgW = 680;
+            const barSvgH = 210;
+            const bPadL = 16;
+            const bPadR = 16;
+            const bPadT = 26;
+            const bPadB = 34;
+            const bPlotH = barSvgH - bPadT - bPadB;
+            const slotW = (barSvgW - bPadL - bPadR) / 14;
+            const barW = Math.max(16, slotW - 12);
+
+            const upcomingBarsSvg = dueBuckets.map((b, i) => {
+                const bx = bPadL + i * slotW + (slotW - barW) / 2;
+                const bh = b.count > 0 ? Math.max(6, (b.count / maxBucket) * bPlotH) : 3;
+                const by = bPadT + bPlotH - bh;
+                const fillColor = b.dayIndex === 0
+                    ? (b.count > 0 ? '#f43f5e' : '#10b981')
+                    : (b.count >= 60 ? '#f59e0b' : (b.count > 0 ? '#6366f1' : '#e2e8f0'));
+                return `
+                    <g class="cursor-pointer">
+                        <title>${b.label}: ${b.count} cards due</title>
+                        <rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" rx="6" fill="${fillColor}" />
+                        ${b.count > 0 ? `<text x="${(bx + barW / 2).toFixed(1)}" y="${(by - 6).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="800" fill="${b.dayIndex === 0 ? '#e11d48' : '#334155'}">${b.count}</text>` : ''}
+                        <text x="${(bx + barW / 2).toFixed(1)}" y="${barSvgH - 10}" text-anchor="middle" font-size="9.5" font-weight="700" fill="${b.dayIndex === 0 ? '#e11d48' : '#64748b'}">${b.shortDay}</text>
+                    </g>
+                `;
+            }).join('');
+
+            // --- 4. Deck-by-Deck Mastery & Accuracy Comparison ---
+            const deckStatsList = state.folders.map(f => {
+                const descIds = getDescendantIds(f.id);
+                const fTerms = state.terms.filter(t => descIds.includes(t.folderId));
+                if (fTerms.length === 0) return null;
+                const fMastered = fTerms.filter(t => !t.isNew && t.level >= 4).length;
+                const fLearning = fTerms.filter(t => !t.isNew && (t.level === 2 || t.level === 3)).length;
+                const fWeak = fTerms.filter(t => !t.isNew && t.level <= 1).length;
+                const fNew = fTerms.filter(t => t.isNew).length;
+                const fCorr = fTerms.reduce((a, t) => a + (t.correct || 0), 0);
+                const fInc = fTerms.reduce((a, t) => a + (t.incorrect || 0), 0);
+                const fAtt = fCorr + fInc;
+                const fAcc = fAtt > 0 ? Math.round((fCorr / fAtt) * 100) : null;
+                const fMastPct = Math.round((fMastered / fTerms.length) * 100);
+                return {
+                    id: f.id,
+                    path: getFolderFullPath(f.id, state.folders),
+                    isRoot: !f.parentId,
+                    total: fTerms.length,
+                    mastered: fMastered,
+                    learning: fLearning,
+                    weak: fWeak,
+                    unseen: fNew,
+                    masteryPct: fMastPct,
+                    accuracyPct: fAcc
+                };
+            }).filter(Boolean).sort((a, b) => a.masteryPct - b.masteryPct);
+
+            const deckComparisonHtml = deckStatsList.length > 0 ? deckStatsList.map(d => {
+                const mPct = (d.mastered / d.total) * 100;
+                const lPct = (d.learning / d.total) * 100;
+                const wPct = (d.weak / d.total) * 100;
+                const accBadgeClass = d.accuracyPct === null
+                    ? 'bg-slate-100 text-slate-500'
+                    : d.accuracyPct >= 80
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : d.accuracyPct >= 65
+                            ? 'bg-amber-100 text-amber-700'
+                            : 'bg-rose-100 text-rose-700';
+                const isSelected = state.analyticsFolderId === d.id;
+                return `
+                    <div onclick="window.setAnalyticsFolder('${isSelected ? 'all' : d.id}')" class="p-3.5 rounded-2xl border transition-all cursor-pointer ${isSelected ? 'bg-emerald-50/70 border-emerald-300 shadow-sm' : 'bg-slate-50/70 border-slate-200/80 hover:bg-white hover:border-blue-300'}">
+                        <div class="flex items-start justify-between gap-2 mb-2">
+                            <div class="min-w-0">
+                                <p class="text-xs md:text-sm font-extrabold text-slate-800 break-words leading-snug">
+                                    ${d.isRoot ? '<i class="ph-fill ph-folder-open text-amber-500 mr-1"></i>' : '<i class="ph-fill ph-folder text-blue-400 mr-1"></i>'}${escapeHTML(d.path)}
+                                </p>
+                                <p class="text-[11px] font-bold text-slate-400 mt-0.5">${d.mastered}/${d.total} mastered (${d.masteryPct}%) • ${d.unseen} new</p>
+                            </div>
+                            <span class="px-2 py-0.5 rounded-lg text-[11px] font-black shrink-0 ${accBadgeClass}" title="Review Accuracy">
+                                ${d.accuracyPct !== null ? `${d.accuracyPct}% acc` : 'No attempts'}
+                            </span>
+                        </div>
+                        <div class="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden flex">
+                            <div style="width: ${mPct.toFixed(1)}%" class="bg-emerald-500 h-full" title="Mastered (L4-6): ${d.mastered}"></div>
+                            <div style="width: ${lPct.toFixed(1)}%" class="bg-blue-400 h-full" title="Learning (L2-3): ${d.learning}"></div>
+                            <div style="width: ${wPct.toFixed(1)}%" class="bg-rose-400 h-full" title="Fragile (L1): ${d.weak}"></div>
+                        </div>
+                    </div>
+                `;
+            }).join('') : `<p class="text-sm text-slate-400 text-center py-6">No decks with cards yet.</p>`;
+
+            // --- 5. Weakest Cards / Leech Radar (Top 8 Most-Missed Cards) ---
+            const weakCards = scopedTerms
+                .filter(t => (t.incorrect || 0) > 0)
+                .map(t => {
+                    const c = t.correct || 0;
+                    const inc = t.incorrect || 0;
+                    const acc = Math.round((c / (c + inc)) * 100);
+                    return { term: t, c, inc, acc };
+                })
+                .sort((a, b) => {
+                    if (b.inc !== a.inc) return b.inc - a.inc;
+                    return a.acc - b.acc;
+                })
+                .slice(0, 8);
+
+            const weakCardsHtml = weakCards.length > 0 ? weakCards.map(item => {
+                const t = item.term;
+                const { stem } = parseQuestionAndChoices(t.question);
+                const deckName = state.folders.find(f => f.id === t.folderId)?.name || 'Deck';
+                return `
+                    <div class="p-3.5 rounded-2xl bg-slate-50/80 border border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-white transition-colors">
+                        <div class="min-w-0 flex-1">
+                            <p class="text-xs md:text-sm font-bold text-slate-800 line-clamp-2 leading-snug">${escapeHTML(stem)}</p>
+                            <div class="flex flex-wrap items-center gap-2 mt-1.5">
+                                <span class="text-[10px] font-bold text-slate-500 bg-slate-200/70 px-2 py-0.5 rounded">${escapeHTML(deckName)}</span>
+                                <span class="text-[10px] font-black text-rose-700 bg-rose-100 px-2 py-0.5 rounded">${item.inc}✗ / ${item.c}✓ (${item.acc}%)</span>
+                                <span class="text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded">${t.isNew ? 'NEW' : `LVL ${t.level}`}</span>
+                            </div>
+                        </div>
+                        <button type="button" onclick="window.toggleParkingLot('${t.id}', event)" class="px-2.5 py-1.5 rounded-xl text-xs font-bold shrink-0 flex items-center gap-1 transition-colors ${t.parkingLot ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-white text-slate-600 border border-slate-200 hover:bg-amber-50 hover:text-amber-700'}">
+                            <i class="${t.parkingLot ? 'ph-fill' : 'ph-bold'} ph-flag"></i> ${t.parkingLot ? 'Parked' : 'Park'}
+                        </button>
+                    </div>
+                `;
+            }).join('') : `
+                <div class="p-8 text-center text-slate-400">
+                    <i class="ph-fill ph-seal-check text-3xl text-emerald-400 mb-1 block"></i>
+                    <p class="text-sm font-bold text-slate-600">No missed cards recorded in this deck yet!</p>
+                </div>
+            `;
+
+            const folderFilterOptions = `<option value="all" ${state.analyticsFolderId === 'all' ? 'selected' : ''}>All Sets (${state.terms.length} cards)</option>` +
+                state.folders.map(f => `<option value="${f.id}" ${state.analyticsFolderId === f.id ? 'selected' : ''}>${escapeHTML(getFolderFullPath(f.id, state.folders))}</option>`).join('');
+
+            return `
+            <div class="max-w-6xl mx-auto p-4 md:p-6 space-y-6 fade-in">
+                <!-- Header + Scope Filter -->
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
+                    <div class="flex items-center gap-3">
+                        <div class="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+                            <i class="ph-fill ph-chart-line-up text-2xl"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-xl md:text-2xl font-extrabold text-slate-900">Visual Study Analytics</h1>
+                            <p class="text-xs md:text-sm text-slate-500">Live graphs built directly from your cards & daily review logs (read-only).</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <select onchange="window.setAnalyticsFolder(this.value)" class="w-full sm:w-auto text-xs md:text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer max-w-[280px]">
+                            ${folderFilterOptions}
+                        </select>
+                    </div>
+                </div>
+
+                <!-- 4 KPI Cards -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+                    <div class="bg-white p-4 md:p-5 rounded-3xl border border-slate-200 shadow-sm">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">Retention Rate</span>
+                            <span class="p-1.5 rounded-lg bg-blue-50 text-blue-600"><i class="ph-fill ph-target text-base"></i></span>
+                        </div>
+                        <div class="text-2xl md:text-3xl font-black text-slate-900">${accuracyPct}%</div>
+                        <p class="text-[11px] font-semibold text-slate-500 mt-1">${totalCorrect.toLocaleString()}✓ correct / ${totalIncorrect.toLocaleString()}✗ wrong</p>
+                    </div>
+
+                    <div class="bg-white p-4 md:p-5 rounded-3xl border border-slate-200 shadow-sm">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">Board Mastery</span>
+                            <span class="p-1.5 rounded-lg bg-emerald-50 text-emerald-600"><i class="ph-fill ph-graduation-cap text-base"></i></span>
+                        </div>
+                        <div class="text-2xl md:text-3xl font-black text-emerald-600">${masteryPct}%</div>
+                        <p class="text-[11px] font-semibold text-slate-500 mt-1">${masteredCount.toLocaleString()} of ${totalCards.toLocaleString()} cards (Lvl 4–6)</p>
+                    </div>
+
+                    <div class="bg-white p-4 md:p-5 rounded-3xl border border-slate-200 shadow-sm">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">Study Log Streak</span>
+                            <span class="p-1.5 rounded-lg bg-amber-50 text-amber-500"><i class="ph-fill ph-fire text-base"></i></span>
+                        </div>
+                        <div class="text-2xl md:text-3xl font-black text-slate-900">${activeStreak} <span class="text-sm font-bold text-slate-400">days</span></div>
+                        <p class="text-[11px] font-semibold text-slate-500 mt-1">${allLogDates.length} total days logged • ${reviewedTodayCount} today</p>
+                    </div>
+
+                    <div class="bg-white p-4 md:p-5 rounded-3xl border border-slate-200 shadow-sm">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-[11px] font-black uppercase tracking-wider text-slate-400">Needs Focus</span>
+                            <span class="p-1.5 rounded-lg bg-rose-50 text-rose-500"><i class="ph-fill ph-warning-circle text-base"></i></span>
+                        </div>
+                        <div class="text-2xl md:text-3xl font-black text-rose-600">${highRiskCards.length}</div>
+                        <p class="text-[11px] font-semibold text-slate-500 mt-1">Hard cards • ${parkedCount} parked • ${erroneousCount} erroneous</p>
+                    </div>
+                </div>
+
+                <!-- Main Charts Row: Growth Curve + Mastery Donut -->
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Mastery Growth Over Time -->
+                    <div class="lg:col-span-7 bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                        <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+                            <div>
+                                <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                    <i class="ph-fill ph-trend-up text-emerald-500 text-xl"></i> Mastery Growth Over Time
+                                </h2>
+                                <p class="text-xs text-slate-500">Tracks how your daily log shifts cards from Weak/New into Mastery (last ${trendPoints.length} logged days).</p>
+                            </div>
+                            ${trendPoints.length >= 2 ? `
+                            <span class="px-2.5 py-1 rounded-xl text-xs font-black ${netMasteryDelta >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}">
+                                ${netMasteryDelta >= 0 ? '+' : ''}${netMasteryDelta} Mastered
+                            </span>
+                            ` : ''}
+                        </div>
+
+                        ${trendChartHtml}
+
+                        <div class="flex flex-wrap items-center justify-center gap-4 mt-3 pt-3 border-t border-slate-100 text-[11px] font-bold text-slate-600">
+                            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-emerald-500 inline-block"></span> Mastered (Lvl 4–6)</span>
+                            <span class="flex items-center gap-1.5"><span class="w-3 h-1 bg-amber-400 inline-block rounded"></span> Learning (Lvl 2–3)</span>
+                            <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full bg-rose-500 inline-block"></span> Weak / New (New–Lvl 1)</span>
+                        </div>
+                    </div>
+
+                    <!-- Mastery Donut + Level Breakdown -->
+                    <div class="lg:col-span-5 bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                        <div class="mb-4">
+                            <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                <i class="ph-fill ph-chart-donut text-blue-500 text-xl"></i> Mastery Funnel
+                            </h2>
+                            <p class="text-xs text-slate-500">Current spread across spaced-repetition levels.</p>
+                        </div>
+
+                        <div class="flex flex-col sm:flex-row lg:flex-col xl:flex-row items-center gap-5 my-auto">
+                            <div class="relative w-36 h-36 shrink-0">
+                                <svg viewBox="0 0 140 140" class="w-full h-full">
+                                    ${donutCirclesSvg}
+                                </svg>
+                                <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                    <span class="text-2xl font-black text-slate-900 leading-none">${masteryPct}%</span>
+                                    <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Mastered</span>
+                                </div>
+                            </div>
+                            <div class="flex-1 w-full space-y-2">
+                                ${levelBarsHtml}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Upcoming 14-Day Review Load Bar Chart -->
+                <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm">
+                    <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+                        <div>
+                            <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                <i class="ph-fill ph-calendar-dots text-indigo-500 text-xl"></i> Upcoming 14-Day Review Load
+                            </h2>
+                            <p class="text-xs text-slate-500">Shows how many scheduled cards are due each day so you can spot heavy waves early.</p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2 text-xs font-bold">
+                            <span class="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100">Next 14d: ${totalNext14} due</span>
+                            ${peakBucket && peakBucket.count > 0 ? `<span class="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-700 border border-amber-200">Peak: ${peakBucket.label} (${peakBucket.count})</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="w-full overflow-x-auto">
+                        <svg viewBox="0 0 ${barSvgW} ${barSvgH}" class="w-full min-w-[520px] h-auto select-none">
+                            <line x1="${bPadL}" y1="${bPadT + bPlotH}" x2="${barSvgW - bPadR}" y2="${bPadT + bPlotH}" stroke="#e2e8f0" stroke-width="1.5" />
+                            ${upcomingBarsSvg}
+                        </svg>
+                    </div>
+                </div>
+
+                <!-- Bottom Row: Deck Comparison + Weakest Cards Radar -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Deck-by-Deck Mastery Comparison -->
+                    <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col">
+                        <div class="mb-4">
+                            <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                <i class="ph-fill ph-stack text-amber-500 text-xl"></i> Deck Mastery & Accuracy
+                            </h2>
+                            <p class="text-xs text-slate-500">Sorted from lowest mastery first — tap any deck to filter all graphs above.</p>
+                        </div>
+                        <div class="space-y-2.5 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar">
+                            ${deckComparisonHtml}
+                        </div>
+                    </div>
+
+                    <!-- Top Most-Missed / Weakest Cards -->
+                    <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col">
+                        <div class="mb-4">
+                            <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                <i class="ph-fill ph-crosshair text-rose-500 text-xl"></i> Most-Missed Cards (Leech Radar)
+                            </h2>
+                            <p class="text-xs text-slate-500">Top cards where you make the most mistakes — park them for focused review.</p>
+                        </div>
+                        <div class="space-y-2.5 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar">
+                            ${weakCardsHtml}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            `;
+        }
+
         // --- STREAMING_CHUNK:Forecast UI ---
         function renderForecast() {
             let optionsHtml = `<option value="all" ${state.forecastFolderId === 'all' ? 'selected' : ''}>All Sets</option>`;
@@ -3939,6 +4530,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             if (state.currentView === 'dashboard') content += renderDashboard();
             else if (state.currentView === 'add') content += renderDatabase();
             else if (state.currentView === 'stats') content += renderStats();
+            else if (state.currentView === 'analytics') content += renderAnalytics();
             else if (state.currentView === 'forecast') content += renderForecast();
             else if (state.currentView === 'session') content += renderSession();
             content += `</main>`;
@@ -4038,6 +4630,12 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             appDiv.innerHTML = content;
 
             // --- STREAMING_CHUNK:Rendering Math Formulas ---
+            renderKatexInApp();
+        }
+
+        function renderKatexInApp() {
+            const appDiv = document.getElementById('app');
+            if (!appDiv) return;
             if (window.renderMathInElement) {
                 renderMathInElement(appDiv, {
                     delimiters: [
@@ -4050,6 +4648,10 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 });
             }
         }
+
+        window.addEventListener('load', () => {
+            renderKatexInApp();
+        });
 
         window.initApp = () => {
             loadData();
