@@ -76,6 +76,9 @@
 
         const mySessionId = generateId(); 
         let timerInterval = null;
+        let etaRefreshInterval = null;
+        let sessionCardDurations = []; // Rolling window of recent card durations (seconds)
+        let currentCardStartTs = 0;
         
         // --- STATE ---
         let state = {
@@ -93,6 +96,7 @@
             currentShuffledChoices: null,
             showKeywordsExp: false,
             isEditingExplanation: false,
+            showEtaPredictor: true, // One-tap toggleable finish-time clock predictor during session
             timerEnabled: true,
             timeLeft: 10,
             timePerCard: 10, 
@@ -215,10 +219,12 @@
             const savedSimForecast = localStorage.getItem('elementVaultSimForecast');
             const savedApiKey = localStorage.getItem('elementVaultGeminiKey');
             const savedModel = localStorage.getItem('elementVaultGeminiModel');
+            const savedShowEta = localStorage.getItem('elementVaultShowEta');
             
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
             if (savedApiKey) state.geminiApiKey = savedApiKey;
+            if (savedShowEta !== null) state.showEtaPredictor = savedShowEta !== 'false';
             if (savedModel && savedModel !== 'gemini-3-flash-preview') {
                 state.geminiModel = savedModel;
             } else {
@@ -892,6 +898,7 @@
             state.showKeywordsExp = false;
             state.isEditingExplanation = false;
             state.revealedChoicesCount = 0;
+            currentCardStartTs = Date.now();
             state.currentShuffledChoices = {
                 cardId: currentCard.id,
                 questionSnapshot: currentCard.question,
@@ -922,6 +929,71 @@
                 stemChunks: chunks,
                 isSplittingStem: false
             });
+        };
+
+        // --- FINISH-TIME CLOCK PREDICTOR (SMART WEIGHTED ROLLING PACE) ---
+        function computeSessionEtaInfo() {
+            if (!state.sessionData || !Array.isArray(state.sessionData.queue) || state.sessionData.queue.length === 0) {
+                return null;
+            }
+            const remainingCards = state.sessionData.type === 'intake'
+                ? state.sessionData.queue.length
+                : Math.max(0, state.sessionData.queue.length - state.currentCardIndex);
+
+            let secPerCard = Math.min(state.timePerCard || 10, 12);
+            let isLivePace = false;
+
+            if (sessionCardDurations.length > 0) {
+                // Weighted rolling average of last 8 cards (more recent cards weigh higher so speeding up updates ETA quickly!)
+                let weightedSum = 0;
+                let weightTotal = 0;
+                sessionCardDurations.forEach((sec, idx) => {
+                    const w = 1 + (idx * 0.35);
+                    weightedSum += sec * w;
+                    weightTotal += w;
+                });
+                secPerCard = weightedSum / weightTotal;
+                isLivePace = true;
+            }
+
+            const now = new Date();
+            const etaDate = new Date(now.getTime() + (remainingCards * secPerCard * 1000));
+            const clockStr = etaDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            const isNextDay = etaDate.getDate() !== now.getDate() || etaDate.getMonth() !== now.getMonth();
+            return {
+                clockText: isNextDay ? `${clockStr} (+1d)` : clockStr,
+                secPerCard: secPerCard.toFixed(1),
+                remainingCards,
+                isLivePace
+            };
+        }
+
+        function updateEtaClockUI() {
+            if (!state.showEtaPredictor || state.currentView !== 'session') return;
+            const clockEl = document.getElementById('session-eta-clock');
+            const pillEl = document.getElementById('session-eta-pill');
+            if (!clockEl) return;
+            const eta = computeSessionEtaInfo();
+            if (!eta) return;
+            clockEl.textContent = eta.clockText;
+            if (pillEl) {
+                pillEl.title = `Expected finish time: ${eta.clockText} (~${eta.secPerCard}s/card • ${eta.remainingCards} left). Click to hide`;
+            }
+        }
+
+        function manageEtaInterval() {
+            clearInterval(etaRefreshInterval);
+            if (state.currentView === 'session' && state.sessionData && state.showEtaPredictor) {
+                etaRefreshInterval = setInterval(updateEtaClockUI, 5000);
+            }
+        }
+
+        window.toggleEtaPredictor = (event) => {
+            if (event) event.stopPropagation();
+            state.showEtaPredictor = !state.showEtaPredictor;
+            localStorage.setItem('elementVaultShowEta', state.showEtaPredictor ? 'true' : 'false');
+            manageEtaInterval();
+            renderApp();
         };
 
         // --- SESSION LOGIC ---
@@ -965,22 +1037,34 @@
                 return;
             }
 
+            sessionCardDurations = [];
             state.sessionData = { type, queue, initialQueueLength: queue.length };
             state.currentCardIndex = 0;
             state.timeLeft = state.timePerCard;
             initCardSessionState();
             window.setView('session');
             manageTimer();
+            manageEtaInterval();
         };
 
         window.endSession = () => {
             state.sessionData = null;
+            sessionCardDurations = [];
             clearInterval(timerInterval);
+            clearInterval(etaRefreshInterval);
             window.logDailyStats();
             window.setView('dashboard');
         };
 
         window.handleAnswer = (answerType) => {
+            // Record active card pace (clamped 1.5s–45s so reading AI notes or breaks won't blow up ETA)
+            if (currentCardStartTs > 0) {
+                const rawSec = (Date.now() - currentCardStartTs) / 1000;
+                const clampedSec = Math.min(45, Math.max(1.5, rawSec));
+                sessionCardDurations.push(clampedSec);
+                if (sessionCardDurations.length > 8) sessionCardDurations.shift();
+            }
+
             const currentCard = state.sessionData.queue[state.currentCardIndex];
             const currentCorrect = currentCard.correct || 0;
             const currentIncorrect = currentCard.incorrect || 0;
@@ -4243,9 +4327,11 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 `).join('')
                 : '';
 
+            const etaInfo = computeSessionEtaInfo();
+
             return `
             <div class="max-w-2xl mx-auto p-3 md:p-4 flex flex-col min-h-[90vh]">
-                <div class="flex flex-wrap items-center justify-between mb-4 gap-3">
+                <div class="flex flex-wrap items-center justify-between mb-4 gap-2.5">
                     <button onclick="window.endSession()" class="text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center gap-1 transition-colors"><i class="ph-bold ph-arrow-left"></i> Exit Session</button>
                     <div class="flex items-center gap-2">
                         <select onchange="window.setTimePerCard(this.value)" class="bg-slate-100 border-none text-xs font-bold text-slate-600 rounded-lg px-2 py-1.5 outline-none cursor-pointer" title="Time per card">
@@ -4255,7 +4341,18 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             <i class="ph-fill ${state.timerEnabled ? 'ph-toggle-right' : 'ph-toggle-left'} text-lg"></i> ${state.timerEnabled ? 'Timer ON' : 'Timer OFF'}
                         </button>
                     </div>
-                    <div class="flex gap-2">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        ${etaInfo ? (state.showEtaPredictor ? `
+                        <button type="button" id="session-eta-pill" onclick="window.toggleEtaPredictor(event)" class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-full text-xs md:text-sm font-extrabold flex items-center gap-1 transition-all active:scale-95 shadow-sm" title="Expected finish time: ${etaInfo.clockText} (~${etaInfo.secPerCard}s/card • ${etaInfo.remainingCards} left). Click to hide">
+                            <i class="ph-fill ph-flag-checkered text-sm"></i>
+                            <span id="session-eta-clock">${etaInfo.clockText}</span>
+                        </button>
+                        ` : `
+                        <button type="button" onclick="window.toggleEtaPredictor(event)" class="px-2 py-1 bg-slate-100 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600 rounded-full text-xs font-bold flex items-center gap-1 transition-colors" title="Show Finish Time ETA Predictor">
+                            <i class="ph-bold ph-flag-checkered text-sm"></i>
+                            <span class="hidden sm:inline">ETA</span>
+                        </button>
+                        `) : ''}
                         <span class="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-xs md:text-sm font-bold uppercase tracking-wider">${sessionLabel}</span>
                         <span class="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs md:text-sm font-bold">${state.sessionData.type === 'intake' ? `${state.sessionData.queue.length} Left` : `${state.currentCardIndex + 1} / ${state.sessionData.queue.length}`}</span>
                     </div>
