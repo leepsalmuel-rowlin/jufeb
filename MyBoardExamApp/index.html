@@ -2093,12 +2093,99 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             await activeTtsAudio.play();
         }
 
+        function pcmToWavBlob(pcmBytes, sampleRate = 24000, numChannels = 1, bitsPerSample = 16) {
+            const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+            const blockAlign = numChannels * (bitsPerSample / 8);
+            const buffer = new ArrayBuffer(44 + pcmBytes.length);
+            const view = new DataView(buffer);
+            const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+            writeStr(0, 'RIFF');
+            view.setUint32(4, 36 + pcmBytes.length, true);
+            writeStr(8, 'WAVE');
+            writeStr(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitsPerSample, true);
+            writeStr(36, 'data');
+            view.setUint32(40, pcmBytes.length, true);
+            new Uint8Array(buffer, 44).set(pcmBytes);
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
         async function speakTextEngine(segments, preferTaglish, cachePrefix, myRunId) {
             if (myRunId !== ttsRunId) return;
             const fullText = segments.filter(Boolean).join('. ... ');
             if (!fullText.trim()) {
                 updateTtsButtonState('idle');
                 return;
+            }
+
+            // 0. Optional Gemini Native Audio TTS (Same Gemini Key! Studio Taglish + Local IndexedDB Audio Cache)
+            if (state.ttsEngine === 'gemini') {
+                const gKeys = (state.geminiApiKey || '').split(/[\n,]+/).map(k => k.trim()).filter(k => k.startsWith('AIza'));
+                if (gKeys.length > 0) {
+                    const voiceId = ['Kore', 'Puck', 'Aoede', 'Zephyr', 'Charon', 'Fenrir'].includes(state.ttsVoiceName)
+                        ? state.ttsVoiceName
+                        : 'Kore';
+                    const cacheKey = `gem_${cachePrefix}_${voiceId}_${hashTtsKey(fullText)}`;
+                    const cachedBlob = await ttsAudioDbGet(cacheKey);
+                    if (cachedBlob && myRunId === ttsRunId) {
+                        try { await playBlobAudio(cachedBlob, myRunId); return; } catch (e) {}
+                    }
+                    const ttsModelsToTry = ['gemini-2.5-flash-preview-tts'];
+                    let gemErr = '';
+                    for (const gKey of gKeys) {
+                        for (const ttsModel of ttsModelsToTry) {
+                            try {
+                                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${ttsModel}:generateContent?key=${gKey}`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        contents: [{ parts: [{ text: `Read aloud clearly and naturally in ${preferTaglish ? 'conversational Taglish' : 'clear English'}:\n\n${fullText}` }] }],
+                                        generationConfig: {
+                                            responseModalities: ['AUDIO'],
+                                            speechConfig: {
+                                                voiceConfig: {
+                                                    prebuiltVoiceConfig: { voiceName: voiceId }
+                                                }
+                                            }
+                                        }
+                                    })
+                                });
+                                if (res.ok && myRunId === ttsRunId) {
+                                    const data = await res.json();
+                                    const inline = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData;
+                                    if (inline && inline.data) {
+                                        const bin = atob(inline.data);
+                                        const bytes = new Uint8Array(bin.length);
+                                        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                                        const mime = String(inline.mimeType || '').toLowerCase();
+                                        let blob;
+                                        if (mime.includes('pcm') || mime.includes('l16') || !mime) {
+                                            const rateMatch = mime.match(/rate=(\d+)/);
+                                            blob = pcmToWavBlob(bytes, rateMatch ? parseInt(rateMatch[1], 10) : 24000);
+                                        } else {
+                                            blob = new Blob([bytes], { type: mime });
+                                        }
+                                        ttsAudioDbPut(cacheKey, blob);
+                                        await playBlobAudio(blob, myRunId);
+                                        return;
+                                    }
+                                } else {
+                                    const eb = await res.json().catch(() => ({}));
+                                    gemErr = eb.error?.message || `HTTP ${res.status}`;
+                                }
+                            } catch (e) {
+                                gemErr = e.message;
+                            }
+                        }
+                    }
+                    showToast(`Gemini TTS limit/unavailable (${gemErr.slice(0, 45)}) -> Fallback voice 🔊`, "error");
+                }
             }
 
             // 1. Optional Google Cloud TTS (1M Neural2 / 4M WaveNet chars/mo FREE) + IndexedDB Audio Cache
@@ -2180,7 +2267,66 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             speakWithBrowserTTS(segments, preferTaglish, myRunId);
         }
 
-        // Main Play/Stop Toggle on Review Card (Strictly separates Original vs Taglish Simplified!)
+        function buildSpokenSegmentsForCard(scriptObj) {
+            const segments = [];
+            if (scriptObj && scriptObj.stem) segments.push(scriptObj.stem);
+
+            // Shuffle-Safe: ALWAYS include ALL Choices (A, B, C, D) in their exact current shuffled display order!
+            const shuffledOpts = state.currentShuffledChoices ? state.currentShuffledChoices.options : null;
+            if (shuffledOpts && shuffledOpts.length > 0) {
+                shuffledOpts.forEach(opt => {
+                    const spokenChoice = (scriptObj && scriptObj.choices && scriptObj.choices[opt.origLetter])
+                        ? scriptObj.choices[opt.origLetter]
+                        : localCleanForTTS(opt.text);
+                    segments.push(`Choice ${opt.displayLetter}. ${spokenChoice}`);
+                });
+            }
+            return segments;
+        }
+
+        async function copyTextToClipboardSafe(text) {
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                }
+            } catch (e) {}
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                return ok;
+            } catch (e) { return false; }
+        }
+
+        // 1-Tap Copy Clean Spoken TTS Version (Question + ALL Choices A–D) for pasting into Gemini App / any TTS reader!
+        window.copyCurrentCardTtsText = async (event) => {
+            if (event) event.stopPropagation();
+            if (!state.sessionData || !state.sessionData.queue[state.currentCardIndex]) return;
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const mode = state.showTaglishSimplified ? 'taglish' : 'orig';
+
+            showToast("Preparing clean TTS script...");
+            const scriptObj = await prepareTtsScriptForCard(currentCard.id, mode);
+            if (!scriptObj) return;
+
+            const segments = buildSpokenSegmentsForCard(scriptObj);
+            const cleanTtsText = segments.join('\n');
+            const copied = await copyTextToClipboardSafe(cleanTtsText);
+            if (copied) {
+                showToast(`Copied ${mode === 'taglish' ? 'Taglish' : 'Original'} TTS Script (Question + A–D)! Ready to paste 📋`);
+            } else {
+                prompt("Copy your clean TTS script below:", cleanTtsText);
+            }
+        };
+
+        // Main Play/Stop Toggle on Review Card (Strictly separates Original vs Taglish Simplified, ALWAYS reads Question + ALL Choices A–D!)
         window.toggleReadCurrentCard = async (event) => {
             if (event) event.stopPropagation();
             if (state.ttsState === 'speaking' || state.ttsState === 'preparing') {
@@ -2210,23 +2356,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 return;
             }
 
-            const segments = [];
-            if (scriptObj.stem) segments.push(scriptObj.stem);
-
-            // Shuffle-Safe & Spoiler-Free: Read ONLY choices currently unblurred/visible on screen in their exact shuffled display order!
-            const shuffledOpts = state.currentShuffledChoices ? state.currentShuffledChoices.options : null;
-            if (shuffledOpts && shuffledOpts.length > 0) {
-                shuffledOpts.forEach((opt, idx) => {
-                    const isVisible = state.showAnswer || (state.revealStep >= 1 && idx < state.revealedChoicesCount);
-                    if (isVisible) {
-                        const spokenChoice = (scriptObj.choices && scriptObj.choices[opt.origLetter])
-                            ? scriptObj.choices[opt.origLetter]
-                            : localCleanForTTS(opt.text);
-                        segments.push(`Choice ${opt.displayLetter}. ${spokenChoice}`);
-                    }
-                });
-            }
-
+            const segments = buildSpokenSegmentsForCard(scriptObj);
             await speakTextEngine(segments, mode === 'taglish', `${currentCard.id}_${mode}`, myRunId);
         };
 
@@ -5293,9 +5423,12 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             </span>
                             <div class="flex items-center gap-1.5 ml-auto flex-wrap" onclick="event.stopPropagation()">
                                 ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1">${lvlDots}</div>` : ''}
-                                <button type="button" id="session-tts-btn" onclick="window.toggleReadCurrentCard(event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${state.ttsState === 'speaking' ? 'bg-rose-600 text-white border border-rose-600 shadow-sm' : state.ttsState === 'preparing' ? 'bg-indigo-100 text-indigo-700 border border-indigo-200 animate-pulse' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200'}" title="${state.showTaglishSimplified ? 'Read Taglish Simplified Card Aloud' : 'Read Original Card Aloud'}">
+                                <button type="button" id="session-tts-btn" onclick="window.toggleReadCurrentCard(event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${state.ttsState === 'speaking' ? 'bg-rose-600 text-white border border-rose-600 shadow-sm' : state.ttsState === 'preparing' ? 'bg-indigo-100 text-indigo-700 border border-indigo-200 animate-pulse' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200'}" title="${state.showTaglishSimplified ? 'Read Taglish Simplified Question + All Choices A–D' : 'Read Original Question + All Choices A–D'}">
                                     <i class="${state.ttsState === 'speaking' ? 'ph-fill ph-stop-circle' : state.ttsState === 'preparing' ? 'ph-bold ph-spinner-gap animate-spin' : 'ph-fill ph-speaker-high'} text-sm"></i>
                                     <span>${state.ttsState === 'speaking' ? 'Stop' : state.ttsState === 'preparing' ? 'Prep...' : 'Listen'}</span>
+                                </button>
+                                <button type="button" onclick="window.copyCurrentCardTtsText(event)" class="p-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-indigo-50 text-slate-500 hover:text-indigo-700 border border-transparent hover:border-indigo-200 transition-all active:scale-95" title="Copy clean TTS-ready script (Question + Choices A–D) to paste into Gemini / external TTS app">
+                                    <i class="ph-bold ph-copy text-sm"></i>
                                 </button>
                                 <button type="button" onclick="window.toggleTaglishSimplifier('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${state.showTaglishSimplified ? 'bg-teal-600 text-white border border-teal-600 shadow-sm' : hasCachedTaglish ? 'bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100' : 'bg-slate-100 text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-transparent'}" title="${state.showTaglishSimplified ? 'Switch back to Original Board Exam Question' : 'Switch to Standalone Taglish Simplified View'}">
                                     <i class="${state.showTaglishSimplified || hasCachedTaglish ? 'ph-fill' : 'ph-bold'} ph-translate text-sm"></i>
@@ -5614,7 +5747,17 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 });
 
                 let ttsVoiceOptionsHtml = '';
-                if (state.ttsEngine === 'gcloud') {
+                if (state.ttsEngine === 'gemini') {
+                    const gemVoices = [
+                        { id: 'Kore', label: 'Kore — Clear Natural Female (Gemini Key)' },
+                        { id: 'Puck', label: 'Puck — Friendly Upbeat Male (Gemini Key)' },
+                        { id: 'Aoede', label: 'Aoede — Smooth Expressive Female (Gemini Key)' },
+                        { id: 'Zephyr', label: 'Zephyr — Bright Conversational (Gemini Key)' },
+                        { id: 'Charon', label: 'Charon — Deep Informative Male (Gemini Key)' },
+                        { id: 'Fenrir', label: 'Fenrir — Energetic Male (Gemini Key)' }
+                    ];
+                    ttsVoiceOptionsHtml = gemVoices.map(v => `<option value="${v.id}" ${state.ttsVoiceName === v.id ? 'selected' : ''}>${v.label}</option>`).join('');
+                } else if (state.ttsEngine === 'gcloud') {
                     const gcVoices = [
                         { id: 'fil-PH-Neural2-A', label: 'Filipino Neural2 Female (1M free/mo)' },
                         { id: 'fil-PH-Neural2-D', label: 'Filipino Neural2 Male (1M free/mo)' },
@@ -5685,9 +5828,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 <div>
                                     <label class="text-[10px] font-bold text-indigo-700 uppercase tracking-wider mb-1 block">Voice Engine</label>
                                     <select id="tts-engine-select" onchange="window.onTtsEngineChange(this.value)" class="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800 outline-none cursor-pointer">
-                                        <option value="browser" ${state.ttsEngine === 'browser' ? 'selected' : ''}>📱 Free Unlimited Phone / Edge Natural Voice (0 Quota!)</option>
-                                        <option value="gcloud" ${state.ttsEngine === 'gcloud' ? 'selected' : ''}>☁️ Google Cloud TTS (1M Neural2 / 4M WaveNet Free/mo)</option>
-                                        <option value="azure" ${state.ttsEngine === 'azure' ? 'selected' : ''}>💎 Azure Speech Neural — Blessica/Angelo (500K Free/mo)</option>
+                                        <option value="browser" ${state.ttsEngine === 'browser' ? 'selected' : ''}>📱 Free Unlimited Phone / Edge Voice (0 Quota)</option>
+                                        <option value="gemini" ${state.ttsEngine === 'gemini' ? 'selected' : ''}>✨ Gemini Native TTS (Same Gemini Key • Studio Taglish • ~10/day Free)</option>
+                                        <option value="gcloud" ${state.ttsEngine === 'gcloud' ? 'selected' : ''}>☁️ Google Cloud TTS (1M Neural2 / 4M WaveNet Free/mo!)</option>
+                                        <option value="azure" ${state.ttsEngine === 'azure' ? 'selected' : ''}>💎 Azure Speech Neural — Blessica/Angelo (500K Free/mo!)</option>
                                     </select>
                                 </div>
 
@@ -5706,7 +5850,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                     </div>
                                 </div>
 
-                                ${state.ttsEngine !== 'browser' ? `
+                                ${state.ttsEngine === 'gcloud' || state.ttsEngine === 'azure' ? `
                                 <div class="space-y-2 pt-1">
                                     <input
                                         id="tts-cloud-key-input"
