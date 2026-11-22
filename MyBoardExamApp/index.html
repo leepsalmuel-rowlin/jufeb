@@ -96,6 +96,8 @@
             currentShuffledChoices: null,
             showKeywordsExp: false,
             isEditingExplanation: false,
+            showTaglishSimplified: false,
+            isEditingTaglish: false,
             showEtaPredictor: true, // One-tap toggleable finish-time clock predictor during session
             timerEnabled: true,
             timeLeft: 10,
@@ -205,6 +207,7 @@
                 const copy = { ...t };
                 delete copy.isGeneratingAI;
                 delete copy.isAppendingAI;
+                delete copy.isGeneratingTaglish;
                 delete copy.isGeneratingDerivation;
                 delete copy.isGeneratingSimplify;
                 delete copy.isSplittingStem;
@@ -897,6 +900,8 @@
             state.selectedChoice = null;
             state.showKeywordsExp = false;
             state.isEditingExplanation = false;
+            state.showTaglishSimplified = false;
+            state.isEditingTaglish = false;
             state.revealedChoicesCount = 0;
             currentCardStartTs = Date.now();
             state.currentShuffledChoices = {
@@ -1525,6 +1530,158 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
 
         window.generateAIExplanation = (termId) => window.triggerKeywordsAndExplanation(termId);
 
+        // --- QUESTION & CHOICES TAGLISH SIMPLIFIER (CONTEXTUAL, SPOILER-FREE, CACHED, EDITABLE & REFRESHABLE) ---
+        window.toggleTaglishSimplifier = (termId, event) => {
+            if (event) event.stopPropagation();
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+
+            if (state.showTaglishSimplified) {
+                state.showTaglishSimplified = false;
+                state.isEditingTaglish = false;
+                renderApp();
+                return;
+            }
+
+            state.showTaglishSimplified = true;
+            state.isEditingTaglish = false;
+            const hasCached = term.taglishSimplified && term.taglishSimplified.stem && String(term.taglishSimplified.stem).trim();
+            if (hasCached) {
+                renderApp();
+                return;
+            }
+            window.generateTaglishSimplifier(termId, '');
+        };
+
+        window.toggleTaglishEditMode = (event) => {
+            if (event) event.stopPropagation();
+            state.isEditingTaglish = !state.isEditingTaglish;
+            renderApp();
+        };
+
+        window.handleTaglishStemEdit = (termId, newStemVal) => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+            const existing = term.taglishSimplified || { stem: '', choices: {} };
+            updateTerm(termId, {
+                taglishSimplified: {
+                    ...existing,
+                    stem: newStemVal,
+                    choices: existing.choices || {}
+                }
+            });
+            const badge = document.getElementById(`taglish-autosave-${termId}`);
+            if (badge) {
+                badge.textContent = '✓ Auto-saved';
+                badge.classList.remove('opacity-0');
+            }
+        };
+
+        window.handleTaglishChoiceEdit = (termId, origLetter, newChoiceVal) => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+            const existing = term.taglishSimplified || { stem: '', choices: {} };
+            const updatedChoices = { ...(existing.choices || {}), [origLetter]: newChoiceVal };
+            updateTerm(termId, {
+                taglishSimplified: {
+                    ...existing,
+                    choices: updatedChoices
+                }
+            });
+            const badge = document.getElementById(`taglish-autosave-${termId}`);
+            if (badge) {
+                badge.textContent = '✓ Auto-saved';
+                badge.classList.remove('opacity-0');
+            }
+        };
+
+        window.refreshTaglishSimplifier = (termId, event) => {
+            if (event) event.stopPropagation();
+            const inputEl = document.getElementById(`taglish-suggest-input-${termId}`);
+            const suggestion = inputEl ? inputEl.value.trim() : '';
+            if (inputEl) inputEl.value = '';
+            window.generateTaglishSimplifier(termId, suggestion);
+        };
+
+        window.generateTaglishSimplifier = async (termId, userSuggestion = '') => {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return;
+
+            if (!(state.geminiApiKey || '').trim()) {
+                showToast("Mag-set muna ng API Key (🔑) para sa Taglish Simplifier, o pindutin ang Edit para mag-type ng sarili mong version.", "error");
+                state.showTaglishSimplified = true;
+                state.isEditingTaglish = true;
+                renderApp();
+                return;
+            }
+
+            state.showTaglishSimplified = true;
+            state.isEditingTaglish = false;
+            updateTerm(termId, { isGeneratingTaglish: true });
+            renderApp();
+
+            const { stem, parsedChoices, choicesRaw } = parseQuestionAndChoices(term.question);
+            const hasParsedChoices = Array.isArray(parsedChoices) && parsedChoices.length > 0;
+            const origChoicesBlock = hasParsedChoices
+                ? parsedChoices.map(c => `${c.origLetter}. ${c.text}`).join('\n')
+                : choicesRaw;
+
+            const existingTaglish = term.taglishSimplified && term.taglishSimplified.stem
+                ? `Current Taglish Version (that user wants improved):\nQuestion: ${term.taglishSimplified.stem}\nChoices: ${JSON.stringify(term.taglishSimplified.choices || {})}`
+                : '';
+
+            // NOTE: We intentionally DO NOT send term.answer so it is 100% spoiler-free while answering!
+            const systemPrompt = `You are an expert Philippine Mechanical Engineering Board Exam coach who explains tough textbook/jargon questions in super clear, natural conversational Taglish WITH practical engineering context.
+Your job:
+1. Rewrite the Question Stem ("stem") into easy-to-understand Taglish WITH context—break down heavy technical jargon into plain everyday meaning/physical picture (parang nag-eexplain na kaibigan o topnotcher review coach) while keeping 100% engineering accuracy, exact numbers, units, and trap words like EXCEPT / NOT.
+2. ${hasParsedChoices ? 'For EACH choice key (A, B, C, D matching the ORIGINAL letter keys given below), rewrite that choice into a simplified Taglish version WITH context connected to the question—explain briefly what that term/option actually means in plain Taglish so it is not just pure jargon (keep each choice concise, 1–2 short lines). For "All of the above"/"None of the above", translate naturally.' : 'If there are no multiple choices, return an empty object {} for "choices".'}
+3. STRICT NO-SPOILER RULE: NEVER reveal, hint at, or favor which choice is correct. Explain every choice neutrally and equally.
+4. For any math/formulas/symbols, wrap in valid LaTeX ($...$) and double-escape backslashes inside JSON (e.g. \\\\frac, \\\\tau, \\\\sqrt).
+${userSuggestion ? `5. IMPORTANT USER FEEDBACK / PREFERRED VERSION: "${userSuggestion}"\nFollow the user's feedback closely. If the user gave their own better wording or angle, adopt and polish their exact idea as the core simplification and align all simplified choices smoothly with it.` : ''}
+Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "...", "C": "...", "D": "..."}}`;
+
+            const userQuery = `Original Question Stem:\n${stem}${origChoicesBlock ? `\n\nOriginal Choices (keep these exact letter keys in JSON):\n${origChoicesBlock}` : ''}${existingTaglish && userSuggestion ? `\n\n${existingTaglish}` : ''}${userSuggestion ? `\n\nUser Suggestion / Preferred Version:\n${userSuggestion}` : ''}`;
+
+            try {
+                const rawText = await callGeminiAPI(systemPrompt, userQuery);
+                if (rawText) {
+                    let simpStem = '';
+                    let simpChoices = {};
+                    try {
+                        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+                        const jsonCandidate = repairLatexInJsonString(jsonMatch ? jsonMatch[0] : rawText);
+                        const parsed = JSON.parse(jsonCandidate);
+                        if (parsed.stem) simpStem = normalizeLatexText(String(parsed.stem).trim());
+                        if (parsed.choices && typeof parsed.choices === 'object') {
+                            Object.keys(parsed.choices).forEach(k => {
+                                const cleanKey = String(k).trim().toUpperCase().replace(/[^A-D]/g, '');
+                                if (cleanKey && parsed.choices[k]) {
+                                    simpChoices[cleanKey] = normalizeLatexText(String(parsed.choices[k]).trim());
+                                }
+                            });
+                        }
+                    } catch (parseErr) {
+                        simpStem = normalizeLatexText(rawText.replace(/^```json\s*|\s*```$/g, '').trim());
+                    }
+
+                    if (simpStem) {
+                        updateTerm(termId, {
+                            taglishSimplified: { stem: simpStem, choices: simpChoices },
+                            isGeneratingTaglish: false
+                        });
+                        renderApp();
+                        if (userSuggestion) showToast("Na-update na ang Taglish version base sa suggestion mo! ✨");
+                        return;
+                    }
+                }
+            } catch (e) {
+                showToast("Network error habang sini-simplify sa Taglish.", "error");
+            }
+
+            updateTerm(termId, { isGeneratingTaglish: false });
+            renderApp();
+        };
+
         // --- PARKING LOT FLAG & UPGRADED EXCEL EXPORT ---
         window.toggleParkingLot = (termId, event) => {
             if (event) event.stopPropagation();
@@ -1843,12 +2000,13 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 combinedQuestion = `${qStem}\n\n[Choices]:\n${qChoices}`;
             }
 
-            // Cache Invalidation Rule: Whenever Question text is edited and saved, clear cached AI blur chunks & keyword underlines
+            // Cache Invalidation Rule: Whenever Question text is edited and saved, clear cached AI blur chunks, keyword underlines & Taglish simplification
             updateTerm(state.editingTermId, {
                 question: combinedQuestion,
                 answer: a,
                 stemChunks: null,
-                keywords: null
+                keywords: null,
+                taglishSimplified: null
             });
 
             const editedId = state.editingTermId;
@@ -4344,6 +4502,138 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 : '';
 
             const etaInfo = computeSessionEtaInfo();
+            const hasCachedTaglish = Boolean(currentCard.taglishSimplified && currentCard.taglishSimplified.stem && String(currentCard.taglishSimplified.stem).trim());
+
+            function renderTaglishPanelHtml() {
+                if (!state.showTaglishSimplified) return '';
+                if (currentCard.isGeneratingTaglish) {
+                    return `
+                    <div class="mt-2 mb-3 p-4 bg-teal-50/90 border-2 border-teal-200 rounded-2xl flex items-center justify-center gap-2 animate-pulse text-teal-800 font-bold text-xs md:text-sm" onclick="event.stopPropagation()">
+                        <i class="ph-bold ph-spinner-gap animate-spin text-xl text-teal-600"></i> Sini-simplify sa Taglish with context...
+                    </div>
+                    `;
+                }
+
+                const tData = currentCard.taglishSimplified || { stem: '', choices: {} };
+                const tChoicesMap = tData.choices || {};
+                const shuffledOpts = state.currentShuffledChoices ? state.currentShuffledChoices.options : null;
+
+                let taglishChoicesHtml = '';
+                if (shuffledOpts && shuffledOpts.length > 0) {
+                    if (state.isEditingTaglish) {
+                        taglishChoicesHtml = `
+                        <div class="space-y-2 mt-2">
+                            <span class="text-[10px] font-black text-teal-700 uppercase tracking-wider block">Simplified Choices (Auto-Save):</span>
+                            ${shuffledOpts.map(opt => `
+                                <div class="flex items-start gap-2">
+                                    <span class="px-2 py-1.5 rounded-lg bg-teal-100 text-teal-900 font-black text-xs shrink-0 mt-0.5">${opt.displayLetter}.</span>
+                                    <textarea
+                                        rows="2"
+                                        placeholder="Taglish version ng ${opt.displayLetter} (${escapeHTML(opt.text.slice(0, 35))})..."
+                                        oninput="window.handleTaglishChoiceEdit('${currentCard.id}', '${opt.origLetter}', this.value)"
+                                        class="flex-1 text-xs p-2 bg-white border border-teal-200 rounded-xl focus:ring-2 focus:ring-teal-400 outline-none font-medium text-slate-800 resize-y"
+                                    >${escapeHTML(normalizeLatexText(tChoicesMap[opt.origLetter] || ''))}</textarea>
+                                </div>
+                            `).join('')}
+                        </div>
+                        `;
+                    } else {
+                        taglishChoicesHtml = `
+                        <div class="grid grid-cols-1 gap-2 mt-2.5">
+                            ${shuffledOpts.map((opt, idx) => {
+                                const isChoiceBlurred = !state.showAnswer && (state.revealStep === 0 || idx >= state.revealedChoicesCount);
+                                const tText = tChoicesMap[opt.origLetter] || opt.text;
+                                let optStyle = 'bg-white border-teal-200/80 text-slate-800 hover:border-teal-400';
+                                let badgeStyle = 'bg-teal-100 text-teal-800';
+                                if (state.showAnswer) {
+                                    if (opt.isCorrect) {
+                                        optStyle = 'bg-green-50 border-green-500 text-green-950 ring-1 ring-green-400';
+                                        badgeStyle = 'bg-green-600 text-white';
+                                    } else if (state.selectedChoice === opt.displayLetter) {
+                                        optStyle = 'bg-rose-50 border-rose-400 text-rose-900';
+                                        badgeStyle = 'bg-rose-500 text-white';
+                                    } else {
+                                        optStyle = 'bg-white/60 border-slate-200 text-slate-400 opacity-60';
+                                        badgeStyle = 'bg-slate-200 text-slate-400';
+                                    }
+                                }
+                                return `
+                                <button type="button" onclick="window.selectChoiceOption(event, '${opt.displayLetter}')" class="w-full p-2.5 rounded-xl border text-left flex items-start gap-2.5 transition-all ${optStyle}">
+                                    <span class="font-black px-2 py-0.5 rounded text-xs shrink-0 ${badgeStyle}">${opt.displayLetter}.</span>
+                                    <span class="text-xs md:text-sm font-medium leading-snug flex-1 break-words transition-all duration-300 ${isChoiceBlurred ? 'blur-[7px] opacity-30 select-none' : 'blur-0 opacity-100'}">${renderFormattedNotesHtml(tText)}</span>
+                                </button>
+                                `;
+                            }).join('')}
+                        </div>
+                        `;
+                    }
+                }
+
+                return `
+                <div class="mt-2 mb-3 p-4 bg-teal-50/95 border-2 border-teal-200 rounded-2xl text-left space-y-2.5 fade-in shadow-sm" onclick="event.stopPropagation()">
+                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <span class="text-[10px] font-black text-teal-800 uppercase tracking-widest flex items-center gap-1.5">
+                            <i class="ph-fill ph-translate text-base text-teal-600"></i> Taglish Simplified (with Context)
+                        </span>
+                        <div class="flex items-center gap-1.5">
+                            <span id="taglish-autosave-${currentCard.id}" class="text-[10px] font-bold text-emerald-600 transition-opacity">${hasCachedTaglish ? '✓ Cached' : ''}</span>
+                            <button
+                                type="button"
+                                onclick="window.toggleTaglishEditMode(event)"
+                                class="px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors flex items-center gap-1 ${state.isEditingTaglish ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-teal-700 border-teal-200 hover:bg-teal-100'}"
+                                title="${state.isEditingTaglish ? 'Preview Taglish Version' : 'I-edit / ilagay ang sarili mong better simplification'}"
+                            >
+                                <i class="ph-bold ${state.isEditingTaglish ? 'ph-check' : 'ph-pencil-simple'}"></i> ${state.isEditingTaglish ? 'Done' : 'My Version'}
+                            </button>
+                            <button
+                                type="button"
+                                onclick="window.toggleTaglishSimplifier('${currentCard.id}', event)"
+                                class="px-2 py-1 rounded-lg text-[10px] font-bold bg-white text-slate-500 hover:text-slate-800 border border-slate-200 hover:bg-slate-100 flex items-center gap-1 transition-colors"
+                                title="Hide Taglish Simplified"
+                            >
+                                <i class="ph-bold ph-eye-slash"></i> Hide
+                            </button>
+                        </div>
+                    </div>
+
+                    ${state.isEditingTaglish ? `
+                    <div class="space-y-1.5">
+                        <span class="text-[10px] font-black text-teal-700 uppercase tracking-wider block">Simplified Question (Auto-Save):</span>
+                        <textarea
+                            rows="3"
+                            placeholder="I-type dito ang sarili mong mas madaling intindihing Taglish question..."
+                            oninput="window.handleTaglishStemEdit('${currentCard.id}', this.value)"
+                            class="w-full p-2.5 text-xs md:text-sm font-medium text-teal-950 bg-white border border-teal-300 rounded-xl focus:ring-2 focus:ring-teal-400 outline-none resize-y leading-relaxed"
+                        >${escapeHTML(normalizeLatexText(tData.stem || ''))}</textarea>
+                    </div>
+                    ` : `
+                    <div class="p-3 bg-white/95 border border-teal-200/90 rounded-xl text-sm font-semibold text-teal-950 leading-relaxed whitespace-pre-wrap break-words">
+                        ${tData.stem ? renderFormattedNotesHtml(tData.stem) : '<span class="text-xs italic text-teal-500">Wala pang Taglish simplification. Click Refresh o My Version.</span>'}
+                    </div>
+                    `}
+
+                    ${taglishChoicesHtml}
+
+                    <div class="flex items-center gap-2 pt-1.5 border-t border-teal-200/60">
+                        <input
+                            id="taglish-suggest-input-${currentCard.id}"
+                            type="text"
+                            placeholder="Suggestion o sariling version (hal: mas simple, analogy, o 'mas ok kung ganito...')..."
+                            onkeydown="if(event.key==='Enter'){event.preventDefault(); window.refreshTaglishSimplifier('${currentCard.id}', event);}"
+                            class="flex-1 text-xs p-2.5 bg-white border border-teal-200 rounded-xl focus:ring-2 focus:ring-teal-400 outline-none font-medium text-slate-700"
+                        />
+                        <button
+                            type="button"
+                            onclick="window.refreshTaglishSimplifier('${currentCard.id}', event)"
+                            class="px-3 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-bold text-xs flex items-center gap-1 shrink-0 transition-colors active:scale-95 shadow-sm"
+                            title="Refresh / improve Taglish simplification gamit ang suggestion mo"
+                        >
+                            <i class="ph-bold ph-arrows-clockwise"></i> Improve
+                        </button>
+                    </div>
+                </div>
+                `;
+            }
 
             return `
             <div class="max-w-2xl mx-auto p-3 md:p-4 flex flex-col min-h-[90vh]">
@@ -4391,6 +4681,10 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                             </span>
                             <div class="flex items-center gap-1.5 ml-auto flex-wrap" onclick="event.stopPropagation()">
                                 ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1">${lvlDots}</div>` : ''}
+                                <button type="button" onclick="window.toggleTaglishSimplifier('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${state.showTaglishSimplified ? 'bg-teal-600 text-white border border-teal-600 shadow-sm' : hasCachedTaglish ? 'bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100' : 'bg-slate-100 text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-transparent'}" title="${state.showTaglishSimplified ? 'Hide Taglish Simplified' : 'Simplify Question & Choices sa Taglish (with context)'}">
+                                    <i class="${state.showTaglishSimplified || hasCachedTaglish ? 'ph-fill' : 'ph-bold'} ph-translate text-sm"></i>
+                                    <span>${state.showTaglishSimplified ? 'Hide Taglish' : 'Taglish'}</span>
+                                </button>
                                 <button type="button" onclick="window.toggleParkingLot('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${currentCard.parkingLot ? 'bg-amber-100 text-amber-800 border border-amber-300 shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-700 border border-transparent'}" title="Toggle Parking Lot Flag">
                                     <i class="${currentCard.parkingLot ? 'ph-fill' : 'ph-bold'} ph-flag text-sm"></i>
                                     <span>${currentCard.parkingLot ? 'Parked' : 'Parking Lot'}</span>
@@ -4417,6 +4711,7 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                         
                         <div class="my-auto w-full">
                             ${renderChoicesAndStem(state.showAnswer)}
+                            ${renderTaglishPanelHtml()}
                         </div>
 
                         ${state.showAnswer ? `
