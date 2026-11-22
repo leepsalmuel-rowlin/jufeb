@@ -1630,17 +1630,23 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 ? `Current Taglish Version (that user wants improved):\nQuestion: ${term.taglishSimplified.stem}\nChoices: ${JSON.stringify(term.taglishSimplified.choices || {})}`
                 : '';
 
-            // NOTE: We intentionally DO NOT send term.answer so it is 100% spoiler-free while answering!
-            const systemPrompt = `You are an expert Philippine Mechanical Engineering Board Exam coach who explains tough textbook/jargon questions in super clear, natural conversational Taglish WITH practical engineering context.
+            // NOTE: We intentionally DO NOT send term.answer AND enforce strict equal-advocacy / zero-bias rules so choices never leak the answer!
+            const systemPrompt = `You are a neutral Philippine Mechanical Engineering Board Exam translator & simplifier who rewrites tough English/jargon questions into clear conversational Taglish WITHOUT ever leaking or hinting at the correct answer.
 Your job:
-1. Rewrite the Question Stem ("stem") into easy-to-understand Taglish WITH context—break down heavy technical jargon into plain everyday meaning/physical picture (parang nag-eexplain na kaibigan o topnotcher review coach) while keeping 100% engineering accuracy, exact numbers, units, and trap words like EXCEPT / NOT.
-2. ${hasParsedChoices ? 'For EACH choice key (A, B, C, D matching the ORIGINAL letter keys given below), rewrite that choice into a simplified Taglish version WITH context connected to the question—explain briefly what that term/option actually means in plain Taglish so it is not just pure jargon (keep each choice concise, 1–2 short lines). For "All of the above"/"None of the above", translate naturally.' : 'If there are no multiple choices, return an empty object {} for "choices".'}
-3. STRICT NO-SPOILER RULE: NEVER reveal, hint at, or favor which choice is correct. Explain every choice neutrally and equally.
-4. For any math/formulas/symbols, wrap in valid LaTeX ($...$) and double-escape backslashes inside JSON (e.g. \\\\frac, \\\\tau, \\\\sqrt).
-${userSuggestion ? `5. IMPORTANT USER FEEDBACK / PREFERRED VERSION: "${userSuggestion}"\nFollow the user's feedback closely. If the user gave their own better wording or angle, adopt and polish their exact idea as the core simplification and align all simplified choices smoothly with it.` : ''}
+1. Question Stem ("stem"): Rewrite the question into easy-to-understand Taglish WITH practical physical context (parang kaibigang nagpapaliwanag ng sitwasyon), keeping exact numbers, units, and trap words like EXCEPT / NOT.
+2. ${hasParsedChoices ? `Choices ("choices" keyed by A, B, C, D matching the ORIGINAL letter keys):
+   - CRITICAL ANTI-BIAS / EQUAL-ADVOCACY RULE ("Ang pinaglalaban ng choice na ito"):
+     * Present EVERY choice as an equally plausible, confident claim/standpoint—e.g. what that choice is claiming or standing for in plain Taglish ("Ang pinaglalaban nito ay..." / "**Term** — claim nito ay..." / plain meaning ng option na ito).
+     * ALL choices MUST have roughly the SAME length (1 short sentence, ~10–18 words each) and the SAME confident, objective tone!
+     * DO NOT make the true answer longer, richer, more detailed, or more closely worded to the stem's trigger words than the other choices!
+     * DO NOT explain whether a choice fits or contradicts the question. Explain ONLY what that choice itself means or claims on its own!
+     * STRICTLY FORBIDDEN phrases that betray distractors: "hindi ito", "sa ibang case", "pero iba ito", "mali", "kabaligtaran", "tama dahil", "ito talaga".
+     * For "All of the above" / "None of the above", simply translate neutrally ("Lahat ng nabanggit sa taas" / "Wala sa mga nabanggit").` : 'If there are no multiple choices, return an empty object {} for "choices".'}
+3. For any math/formulas/symbols, wrap in valid LaTeX ($...$) and double-escape backslashes inside JSON (e.g. \\\\frac, \\\\tau, \\\\sqrt).
+${userSuggestion ? `4. IMPORTANT USER FEEDBACK / PREFERRED VERSION: "${userSuggestion}"\nFollow the user's feedback closely while strictly keeping all choices unbiased and equal in length/confidence.` : ''}
 Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "...", "C": "...", "D": "..."}}`;
 
-            const userQuery = `Original Question Stem:\n${stem}${origChoicesBlock ? `\n\nOriginal Choices (keep these exact letter keys in JSON):\n${origChoicesBlock}` : ''}${existingTaglish && userSuggestion ? `\n\n${existingTaglish}` : ''}${userSuggestion ? `\n\nUser Suggestion / Preferred Version:\n${userSuggestion}` : ''}`;
+            const userQuery = `Original Question Stem:\n${stem}${origChoicesBlock ? `\n\nOriginal Choices (keep these exact letter keys in JSON; explain each choice's own claim/meaning with equal length and ZERO bias):\n${origChoicesBlock}` : ''}${existingTaglish && userSuggestion ? `\n\n${existingTaglish}` : ''}${userSuggestion ? `\n\nUser Suggestion / Preferred Version:\n${userSuggestion}` : ''}`;
 
             try {
                 const rawText = await callGeminiAPI(systemPrompt, userQuery);
