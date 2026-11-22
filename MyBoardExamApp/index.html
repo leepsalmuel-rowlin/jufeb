@@ -98,6 +98,13 @@
             isEditingExplanation: false,
             showTaglishSimplified: false,
             isEditingTaglish: false,
+            ttsState: 'idle', // 'idle' | 'preparing' | 'speaking'
+            ttsEngine: 'browser', // 'browser' (Free Unlimited) | 'gcloud' (1M-4M free/mo) | 'azure' (500k free/mo)
+            ttsVoiceName: 'auto', // Selected browser voice name or cloud voice ID
+            ttsRate: 1.05, // Speaking speed (0.85 - 1.6)
+            ttsUseAiPolish: true, // AI converts formulas/numbers to clean spoken script & caches per card
+            ttsCloudApiKey: '', // Optional Google Cloud TTS API key or Azure Speech Key
+            ttsAzureRegion: 'southeastasia', // Azure Speech region (default Southeast Asia / PH-closest)
             showEtaPredictor: true, // One-tap toggleable finish-time clock predictor during session
             timerEnabled: true,
             timeLeft: 10,
@@ -223,11 +230,23 @@
             const savedApiKey = localStorage.getItem('elementVaultGeminiKey');
             const savedModel = localStorage.getItem('elementVaultGeminiModel');
             const savedShowEta = localStorage.getItem('elementVaultShowEta');
+            const savedTtsConfig = localStorage.getItem('elementVaultTtsConfig');
             
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
             if (savedApiKey) state.geminiApiKey = savedApiKey;
             if (savedShowEta !== null) state.showEtaPredictor = savedShowEta !== 'false';
+            if (savedTtsConfig) {
+                try {
+                    const tc = JSON.parse(savedTtsConfig);
+                    if (tc.ttsEngine) state.ttsEngine = tc.ttsEngine;
+                    if (tc.ttsVoiceName) state.ttsVoiceName = tc.ttsVoiceName;
+                    if (tc.ttsRate) state.ttsRate = Number(tc.ttsRate) || 1.05;
+                    if (typeof tc.ttsUseAiPolish === 'boolean') state.ttsUseAiPolish = tc.ttsUseAiPolish;
+                    if (typeof tc.ttsCloudApiKey === 'string') state.ttsCloudApiKey = tc.ttsCloudApiKey;
+                    if (tc.ttsAzureRegion) state.ttsAzureRegion = tc.ttsAzureRegion;
+                } catch (e) {}
+            }
             if (savedModel && savedModel !== 'gemini-3-flash-preview') {
                 state.geminiModel = savedModel;
             } else {
@@ -568,12 +587,37 @@
             state.geminiModel = modelVal;
             localStorage.setItem('elementVaultGeminiKey', val);
             localStorage.setItem('elementVaultGeminiModel', modelVal);
+
+            // Save TTS Voice settings (stored locally on device — zero impact on cards/backup schema)
+            const ttsEngineEl = document.getElementById('tts-engine-select');
+            const ttsVoiceEl = document.getElementById('tts-voice-select');
+            const ttsRateEl = document.getElementById('tts-rate-select');
+            const ttsPolishEl = document.getElementById('tts-ai-polish-check');
+            const ttsCloudKeyEl = document.getElementById('tts-cloud-key-input');
+            const ttsAzureRegEl = document.getElementById('tts-azure-region-input');
+
+            if (ttsEngineEl) state.ttsEngine = ttsEngineEl.value;
+            if (ttsVoiceEl) state.ttsVoiceName = ttsVoiceEl.value;
+            if (ttsRateEl) state.ttsRate = parseFloat(ttsRateEl.value) || 1.05;
+            if (ttsPolishEl) state.ttsUseAiPolish = Boolean(ttsPolishEl.checked);
+            if (ttsCloudKeyEl) state.ttsCloudApiKey = ttsCloudKeyEl.value.trim();
+            if (ttsAzureRegEl && ttsAzureRegEl.value.trim()) state.ttsAzureRegion = ttsAzureRegEl.value.trim();
+
+            localStorage.setItem('elementVaultTtsConfig', JSON.stringify({
+                ttsEngine: state.ttsEngine,
+                ttsVoiceName: state.ttsVoiceName,
+                ttsRate: state.ttsRate,
+                ttsUseAiPolish: state.ttsUseAiPolish,
+                ttsCloudApiKey: state.ttsCloudApiKey,
+                ttsAzureRegion: state.ttsAzureRegion
+            }));
+
             saveData();
             state.showApiKeyModal = false;
             if (state.currentView === 'session') manageTimer();
             renderApp();
             const keyCount = val.split(/[\n,]+/).map(k => k.trim()).filter(Boolean).length;
-            showToast(val ? `Saved ${keyCount} AI Key(s) & Model (${modelVal})! 🔑` : "AI Key cleared.");
+            showToast(val ? `Saved ${keyCount} AI Key(s), Model & Voice Settings! 🔑🔊` : "Voice Settings saved! 🔊");
         };
 
         let currentKeyIndex = 0;
@@ -1069,6 +1113,7 @@
         };
 
         window.endSession = () => {
+            window.stopTTS(true);
             state.sessionData = null;
             sessionCardDurations = [];
             clearInterval(timerInterval);
@@ -1078,6 +1123,7 @@
         };
 
         window.handleAnswer = (answerType) => {
+            window.stopTTS(true);
             // Record active card pace (clamped 1.5s–45s so reading AI notes or breaks won't blow up ETA)
             if (currentCardStartTs > 0) {
                 const rawSec = (Date.now() - currentCardStartTs) / 1000;
@@ -1537,12 +1583,14 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
             if (!term) return;
 
             if (state.showTaglishSimplified) {
+                window.stopTTS(true);
                 state.showTaglishSimplified = false;
                 state.isEditingTaglish = false;
                 renderApp();
                 return;
             }
 
+            window.stopTTS(true);
             state.showTaglishSimplified = true;
             state.isEditingTaglish = false;
             if (state.revealStep === 0) state.revealStep = 1;
@@ -1569,7 +1617,8 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                     ...existing,
                     stem: newStemVal,
                     choices: existing.choices || {}
-                }
+                },
+                ttsScriptTaglish: null
             });
             const badge = document.getElementById(`taglish-autosave-${termId}`);
             if (badge) {
@@ -1587,7 +1636,8 @@ Respond ONLY with valid JSON: {"keywords": ["..."], "explanation": "..."}`;
                 taglishSimplified: {
                     ...existing,
                     choices: updatedChoices
-                }
+                },
+                ttsScriptTaglish: null
             });
             const badge = document.getElementById(`taglish-autosave-${termId}`);
             if (badge) {
@@ -1675,6 +1725,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     if (simpStem) {
                         updateTerm(termId, {
                             taglishSimplified: { stem: simpStem, choices: simpChoices },
+                            ttsScriptTaglish: null,
                             isGeneratingTaglish: false
                         });
                         renderApp();
@@ -1687,6 +1738,543 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             }
 
             updateTerm(termId, { isGeneratingTaglish: false });
+            renderApp();
+        };
+
+        // --- 2-STEP TAGLISH-READY TEXT-TO-SPEECH ENGINE (INVISIBLE CACHED SCRIPTS + FREE UNLIMITED / CLOUD VOICES) ---
+        let ttsRunId = 0;
+        let activeTtsAudio = null;
+        let availableSpeechVoices = [];
+
+        function refreshBrowserVoices() {
+            if (!('speechSynthesis' in window)) return [];
+            const voices = window.speechSynthesis.getVoices() || [];
+            if (voices.length > 0) availableSpeechVoices = voices;
+            return availableSpeechVoices;
+        }
+        if ('speechSynthesis' in window) {
+            refreshBrowserVoices();
+            window.speechSynthesis.onvoiceschanged = () => {
+                refreshBrowserVoices();
+                if (state.showApiKeyModal) renderApp();
+            };
+        }
+
+        function pickBestBrowserVoice(preferTaglish = true) {
+            const voices = refreshBrowserVoices();
+            if (!voices || voices.length === 0) return null;
+
+            if (state.ttsVoiceName && state.ttsVoiceName !== 'auto') {
+                const exact = voices.find(v => v.name === state.ttsVoiceName);
+                if (exact) return exact;
+            }
+
+            const scoreVoice = (v) => {
+                const name = String(v.name || '').toLowerCase();
+                const lang = String(v.lang || '').toLowerCase();
+                let s = 0;
+                const isFil = lang.startsWith('fil') || lang.startsWith('tl') || name.includes('filipino') || name.includes('tagalog') || name.includes('blessica') || name.includes('angelo');
+                const isEnPh = lang === 'en-ph' || name.includes('rosa') || name.includes('james');
+                const isNatural = name.includes('natural') || name.includes('online') || name.includes('neural') || name.includes('google') || name.includes('enhanced');
+
+                if (preferTaglish) {
+                    if (name.includes('blessica') || name.includes('angelo')) s += 500; // Edge Neural Filipino voices!
+                    else if (isFil && isNatural) s += 420;
+                    else if (isFil) s += 360;
+                    else if (isEnPh && isNatural) s += 280;
+                    else if (isEnPh) s += 220;
+                    else if (lang.startsWith('en') && isNatural) s += 160;
+                    else if (lang.startsWith('en')) s += 100;
+                } else {
+                    if (isEnPh && isNatural) s += 400;
+                    else if (lang.startsWith('en-us') && isNatural) s += 360;
+                    else if (isFil && isNatural) s += 330;
+                    else if (lang.startsWith('en') && isNatural) s += 280;
+                    else if (lang.startsWith('en')) s += 180;
+                    else if (isFil) s += 150;
+                }
+                return s;
+            };
+
+            return [...voices].sort((a, b) => scoreVoice(b) - scoreVoice(a))[0] || voices[0];
+        }
+
+        // IndexedDB Local Audio Cache for Cloud/Azure MP3 blobs (0 repeat characters used!)
+        function openTtsAudioDb() {
+            return new Promise((resolve, reject) => {
+                if (!window.indexedDB) return resolve(null);
+                const req = indexedDB.open('ElementVaultTtsAudio', 1);
+                req.onupgradeneeded = () => {
+                    const db = req.result;
+                    if (!db.objectStoreNames.contains('clips')) db.createObjectStore('clips');
+                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => resolve(null);
+            });
+        }
+
+        async function ttsAudioDbGet(key) {
+            try {
+                const db = await openTtsAudioDb();
+                if (!db) return null;
+                return await new Promise(resolve => {
+                    const tx = db.transaction('clips', 'readonly');
+                    const r = tx.objectStore('clips').get(key);
+                    r.onsuccess = () => resolve(r.result || null);
+                    r.onerror = () => resolve(null);
+                });
+            } catch (e) { return null; }
+        }
+
+        async function ttsAudioDbPut(key, blob) {
+            try {
+                const db = await openTtsAudioDb();
+                if (!db) return;
+                await new Promise(resolve => {
+                    const tx = db.transaction('clips', 'readwrite');
+                    tx.objectStore('clips').put(blob, key);
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => resolve();
+                });
+            } catch (e) {}
+        }
+
+        function hashTtsKey(str) {
+            let h = 2166136261;
+            const s = String(str || '');
+            for (let i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = Math.imul(h, 16777619);
+            }
+            return (h >>> 0).toString(36);
+        }
+
+        // Built-in ME / LaTeX / Number-to-Words Local TTS Cleaner (0 quota, instant fallback)
+        function intToEnglishWords(n) {
+            const num = parseInt(n, 10);
+            if (isNaN(num) || num < 0 || num > 9999) return String(n);
+            const ones = ['zero','one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen'];
+            const tens = ['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+            if (num < 20) return ones[num];
+            if (num < 100) return tens[Math.floor(num / 10)] + (num % 10 ? ' ' + ones[num % 10] : '');
+            if (num < 1000) return ones[Math.floor(num / 100)] + ' hundred' + (num % 100 ? ' ' + intToEnglishWords(num % 100) : '');
+            return ones[Math.floor(num / 1000)] + ' thousand' + (num % 1000 ? ' ' + intToEnglishWords(num % 1000) : '');
+        }
+
+        function localCleanForTTS(raw) {
+            let s = normalizeLatexText(raw || '');
+            // Strip markdown formatting
+            s = s.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').replace(/---+/g, '. ');
+            // Remove leading question numbering like "123."
+            s = s.replace(/^\s*\d+\.\s*/, '');
+            // Convert common LaTeX constructs into natural speech
+            s = s.replace(/\$\$|\$|\\\(|\\\)|\\\[|\\\]/g, ' ');
+            s = s.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, '$1 over $2');
+            s = s.replace(/\\sqrt\{([^}]+)\}/g, 'square root of $1');
+            s = s.replace(/\\text\{([^}]+)\}/g, '$1').replace(/\\mathrm\{([^}]+)\}/g, '$1').replace(/\\mathbf\{([^}]+)\}/g, '$1');
+            s = s.replace(/\^2\b/g, ' squared').replace(/\^3\b/g, ' cubed').replace(/\^\{2\}/g, ' squared').replace(/\^\{3\}/g, ' cubed');
+            s = s.replace(/\^\{([^}]+)\}/g, ' to the power of $1');
+            s = s.replace(/_\{([^}]+)\}/g, ' $1').replace(/_([A-Za-z0-9])/g, ' $1');
+            // Greek & math commands
+            const latexMap = {
+                '\\eta': 'eta', '\\tau': 'tau', '\\sigma': 'sigma', '\\theta': 'theta', '\\rho': 'rho',
+                '\\pi': 'pi', '\\alpha': 'alpha', '\\beta': 'beta', '\\gamma': 'gamma', '\\omega': 'omega',
+                '\\Delta': 'delta', '\\delta': 'delta', '\\mu': 'mu', '\\lambda': 'lambda', '\\phi': 'phi',
+                '\\times': 'times', '\\cdot': 'times', '\\pm': 'plus or minus', '\\approx': 'approximately',
+                '\\neq': 'not equal to', '\\leq': 'less than or equal to', '\\geq': 'greater than or equal to',
+                '\\circ': 'degrees', '\\degree': 'degrees', '\\infty': 'infinity', '\\left': '', '\\right': ''
+            };
+            Object.keys(latexMap).forEach(k => {
+                s = s.split(k).join(' ' + latexMap[k] + ' ');
+            });
+            s = s.replace(/\\[A-Za-z]+/g, ' ').replace(/[{}]/g, ' ');
+            // Common ME units & symbols
+            s = s.replace(/°\s*C\b/gi, ' degrees Celsius').replace(/°\s*F\b/gi, ' degrees Fahrenheit').replace(/°/g, ' degrees');
+            s = s.replace(/\bMPa\b/g, 'megapascals').replace(/\bkPa\b/g, 'kilopascals').replace(/\bGPa\b/g, 'gigapascals');
+            s = s.replace(/\bkW\b/g, 'kilowatts').replace(/\bMW\b/g, 'megawatts').replace(/\bkJ\b/g, 'kilojoules');
+            s = s.replace(/\bkN\b/g, 'kilonewtons').replace(/\brpm\b/gi, 'R P M').replace(/\bpsi\b/gi, 'P S I');
+            s = s.replace(/\bm\/s\b/g, 'meters per second').replace(/\bkg\/m3\b/gi, 'kilograms per cubic meter');
+            s = s.replace(/>=/g, ' greater than or equal to ').replace(/<=/g, ' less than or equal to ').replace(/!=/g, ' not equal to ');
+            s = s.replace(/\s*\+\s*/g, ' plus ').replace(/=/g, ' equals ').replace(/%/g, ' percent ').replace(/—|--/g, ', ').replace(/[•·]/g, ', ');
+            // Convert standalone integers (0-9999) into clean English spoken words (e.g. 30 -> thirty)
+            s = s.replace(/\b(\d{1,4})\b/g, (m, digits) => intToEnglishWords(digits));
+            return s.replace(/\s+/g, ' ').trim();
+        }
+
+        function updateTtsButtonState(newState) {
+            state.ttsState = newState;
+            const btn = document.getElementById('session-tts-btn');
+            if (!btn) return;
+            if (newState === 'preparing') {
+                btn.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all bg-indigo-100 text-indigo-700 border border-indigo-200 animate-pulse';
+                btn.innerHTML = '<i class="ph-bold ph-spinner-gap animate-spin text-sm"></i> <span>Prep...</span>';
+            } else if (newState === 'speaking') {
+                btn.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all bg-rose-600 text-white border border-rose-600 shadow-sm active:scale-95';
+                btn.innerHTML = '<i class="ph-fill ph-stop-circle text-sm"></i> <span>Stop</span>';
+            } else {
+                btn.className = 'px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200';
+                btn.innerHTML = '<i class="ph-fill ph-speaker-high text-sm"></i> <span>Listen</span>';
+            }
+        }
+
+        window.stopTTS = (silent = false) => {
+            ttsRunId++;
+            if ('speechSynthesis' in window) {
+                try { window.speechSynthesis.cancel(); } catch (e) {}
+            }
+            if (activeTtsAudio) {
+                try {
+                    activeTtsAudio.pause();
+                    activeTtsAudio.currentTime = 0;
+                } catch (e) {}
+            }
+            if (!silent) {
+                updateTtsButtonState('idle');
+            } else {
+                state.ttsState = 'idle';
+            }
+        };
+
+        // Step 1: Prepare & Cache Invisible Spoken TTS Script (Separate for 'orig' vs 'taglish'!)
+        async function prepareTtsScriptForCard(termId, mode) {
+            const term = state.terms.find(t => t.id === termId);
+            if (!term) return null;
+
+            const cacheField = mode === 'taglish' ? 'ttsScriptTaglish' : 'ttsScriptOrig';
+            if (term[cacheField] && term[cacheField].stem) {
+                return term[cacheField];
+            }
+
+            const { stem: origStem, parsedChoices } = parseQuestionAndChoices(term.question);
+            const hasParsedChoices = Array.isArray(parsedChoices) && parsedChoices.length > 0;
+
+            let sourceStem = origStem;
+            let sourceChoicesMap = {};
+            if (hasParsedChoices) {
+                parsedChoices.forEach(c => { sourceChoicesMap[c.origLetter] = c.text; });
+            }
+
+            if (mode === 'taglish' && term.taglishSimplified && term.taglishSimplified.stem) {
+                sourceStem = term.taglishSimplified.stem;
+                if (hasParsedChoices) {
+                    const tc = term.taglishSimplified.choices || {};
+                    parsedChoices.forEach(c => {
+                        sourceChoicesMap[c.origLetter] = tc[c.origLetter] || c.text;
+                    });
+                }
+            }
+
+            // Build instant local fallback first
+            const buildLocalFallback = () => {
+                const cMap = {};
+                Object.keys(sourceChoicesMap).forEach(k => {
+                    cMap[k] = localCleanForTTS(sourceChoicesMap[k]);
+                });
+                return { stem: localCleanForTTS(sourceStem), choices: cMap };
+            };
+
+            // Optional Step 1 AI TTS-Script Polish (uses fast 500-14.4K RPD text AI & caches permanently on the card!)
+            if (state.ttsUseAiPolish && (state.geminiApiKey || '').trim()) {
+                const choicesPromptLines = Object.keys(sourceChoicesMap)
+                    .map(k => `${k}: ${sourceChoicesMap[k]}`)
+                    .join('\n');
+
+                const systemPrompt = `You convert flashcard text into an EXACT, clean spoken script for Text-to-Speech (TTS).
+Rules:
+1. Keep the EXACT language and meaning (${mode === 'taglish' ? 'natural conversational Taglish — keep Tagalog words natural and English technical words/numbers in clear English' : 'clear spoken English'}).
+2. Convert ALL raw syntax, LaTeX math, symbols, units, fractions, exponents, and numbers into natural spoken words (numbers in English words like "thirty", "zero point twenty-five", "twenty-five degrees Celsius", "Z equals the square root of R squared plus X squared").
+3. Remove ALL markdown (**bold**, backticks, dashes, brackets, slashes, underscores, question numbers like "12.").
+4. Use smooth commas and periods for natural breathing pauses. NEVER add explanations, opinions, or spoilers.
+Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "...", "C": "...", "D": "..."}}`;
+
+                const userQuery = `Question Stem:\n${sourceStem}${choicesPromptLines ? `\n\nChoices (keep exact keys A, B, C, D):\n${choicesPromptLines}` : ''}`;
+
+                try {
+                    const raw = await callGeminiAPI(systemPrompt, userQuery, true);
+                    if (raw) {
+                        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+                        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+                        if (parsed && parsed.stem) {
+                            const cleanedChoices = {};
+                            if (parsed.choices && typeof parsed.choices === 'object') {
+                                Object.keys(parsed.choices).forEach(k => {
+                                    const ck = String(k).trim().toUpperCase().replace(/[^A-D]/g, '');
+                                    if (ck && parsed.choices[k]) cleanedChoices[ck] = String(parsed.choices[k]).trim();
+                                });
+                            }
+                            const resultObj = { stem: String(parsed.stem).trim(), choices: cleanedChoices };
+                            updateTerm(termId, { [cacheField]: resultObj });
+                            return resultObj;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            const localObj = buildLocalFallback();
+            updateTerm(termId, { [cacheField]: localObj });
+            return localObj;
+        }
+
+        // Speak using Free Unlimited Phone/Browser SpeechSynthesis (chunked to prevent Android 15s cutoff!)
+        function speakWithBrowserTTS(segments, preferTaglish, myRunId) {
+            if (!('speechSynthesis' in window)) {
+                showToast("Hindi supported ang voice playback sa browser na ito.", "error");
+                updateTtsButtonState('idle');
+                return;
+            }
+            window.speechSynthesis.cancel();
+            const chosenVoice = pickBestBrowserVoice(preferTaglish);
+            const rate = Math.min(1.6, Math.max(0.7, Number(state.ttsRate) || 1.05));
+
+            // Split long strings into ~160-char sentence chunks so mobile Chrome never cuts off mid-sentence
+            const chunks = [];
+            segments.forEach(seg => {
+                const text = String(seg || '').trim();
+                if (!text) return;
+                if (text.length <= 160) {
+                    chunks.push(text);
+                } else {
+                    const parts = text.match(/[^.!?]+[.!?]*/g) || [text];
+                    parts.forEach(p => { if (p.trim()) chunks.push(p.trim()); });
+                }
+            });
+
+            if (chunks.length === 0) {
+                updateTtsButtonState('idle');
+                return;
+            }
+
+            updateTtsButtonState('speaking');
+            let idx = 0;
+
+            const speakNext = () => {
+                if (myRunId !== ttsRunId) return;
+                if (idx >= chunks.length) {
+                    updateTtsButtonState('idle');
+                    return;
+                }
+                const utt = new SpeechSynthesisUtterance(chunks[idx]);
+                if (chosenVoice) {
+                    utt.voice = chosenVoice;
+                    utt.lang = chosenVoice.lang;
+                } else {
+                    utt.lang = preferTaglish ? 'fil-PH' : 'en-US';
+                }
+                utt.rate = rate;
+                utt.pitch = 1.0;
+                utt.onend = () => {
+                    idx++;
+                    speakNext();
+                };
+                utt.onerror = () => {
+                    if (myRunId === ttsRunId) updateTtsButtonState('idle');
+                };
+                window.speechSynthesis.speak(utt);
+            };
+
+            speakNext();
+        }
+
+        async function playBlobAudio(blob, myRunId) {
+            if (myRunId !== ttsRunId) return;
+            const url = URL.createObjectURL(blob);
+            if (!activeTtsAudio) activeTtsAudio = new Audio();
+            activeTtsAudio.src = url;
+            activeTtsAudio.playbackRate = Math.min(1.6, Math.max(0.7, Number(state.ttsRate) || 1.05));
+            activeTtsAudio.onended = () => {
+                URL.revokeObjectURL(url);
+                if (myRunId === ttsRunId) updateTtsButtonState('idle');
+            };
+            activeTtsAudio.onerror = () => {
+                URL.revokeObjectURL(url);
+                if (myRunId === ttsRunId) updateTtsButtonState('idle');
+            };
+            updateTtsButtonState('speaking');
+            await activeTtsAudio.play();
+        }
+
+        async function speakTextEngine(segments, preferTaglish, cachePrefix, myRunId) {
+            if (myRunId !== ttsRunId) return;
+            const fullText = segments.filter(Boolean).join('. ... ');
+            if (!fullText.trim()) {
+                updateTtsButtonState('idle');
+                return;
+            }
+
+            // 1. Optional Google Cloud TTS (1M Neural2 / 4M WaveNet chars/mo FREE) + IndexedDB Audio Cache
+            if (state.ttsEngine === 'gcloud') {
+                const gKey = (state.ttsCloudApiKey || '').trim() || (state.geminiApiKey || '').split(/[\n,]+/).map(k => k.trim()).find(k => k.startsWith('AIza'));
+                if (gKey) {
+                    const voiceId = (state.ttsVoiceName && state.ttsVoiceName.startsWith('fil-PH'))
+                        ? state.ttsVoiceName
+                        : 'fil-PH-Neural2-A';
+                    const cacheKey = `gc_${cachePrefix}_${voiceId}_${hashTtsKey(fullText)}`;
+                    const cachedBlob = await ttsAudioDbGet(cacheKey);
+                    if (cachedBlob && myRunId === ttsRunId) {
+                        try { await playBlobAudio(cachedBlob, myRunId); return; } catch (e) {}
+                    }
+                    try {
+                        const res = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${gKey}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                input: { text: fullText },
+                                voice: { languageCode: 'fil-PH', name: voiceId },
+                                audioConfig: { audioEncoding: 'MP3', speakingRate: Math.min(1.5, Math.max(0.75, Number(state.ttsRate) || 1.05)) }
+                            })
+                        });
+                        if (res.ok && myRunId === ttsRunId) {
+                            const data = await res.json();
+                            if (data.audioContent) {
+                                const bin = atob(data.audioContent);
+                                const bytes = new Uint8Array(bin.length);
+                                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                                const blob = new Blob([bytes], { type: 'audio/mp3' });
+                                ttsAudioDbPut(cacheKey, blob);
+                                await playBlobAudio(blob, myRunId);
+                                return;
+                            }
+                        }
+                    } catch (e) {}
+                    showToast("Google Cloud TTS unavailable -> Switched to Free Phone Voice 🔊", "error");
+                }
+            }
+
+            // 2. Optional Azure Speech Free Tier F0 (500k Neural chars/mo FREE — Blessica / Angelo) + IndexedDB Audio Cache
+            if (state.ttsEngine === 'azure') {
+                const azKey = (state.ttsCloudApiKey || '').trim();
+                const azRegion = (state.ttsAzureRegion || 'southeastasia').trim();
+                if (azKey) {
+                    const voiceId = (state.ttsVoiceName && state.ttsVoiceName.startsWith('fil-PH'))
+                        ? state.ttsVoiceName
+                        : 'fil-PH-BlessicaNeural';
+                    const cacheKey = `az_${cachePrefix}_${voiceId}_${hashTtsKey(fullText)}`;
+                    const cachedBlob = await ttsAudioDbGet(cacheKey);
+                    if (cachedBlob && myRunId === ttsRunId) {
+                        try { await playBlobAudio(cachedBlob, myRunId); return; } catch (e) {}
+                    }
+                    try {
+                        const safeSsmlText = fullText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        const ssml = `<speak version='1.0' xml:lang='fil-PH'><voice name='${voiceId}'>${safeSsmlText}</voice></speak>`;
+                        const res = await fetch(`https://${azRegion}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+                            method: 'POST',
+                            headers: {
+                                'Ocp-Apim-Subscription-Key': azKey,
+                                'Content-Type': 'application/ssml+xml',
+                                'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3'
+                            },
+                            body: ssml
+                        });
+                        if (res.ok && myRunId === ttsRunId) {
+                            const blob = await res.blob();
+                            ttsAudioDbPut(cacheKey, blob);
+                            await playBlobAudio(blob, myRunId);
+                            return;
+                        }
+                    } catch (e) {}
+                    showToast("Azure Speech unavailable -> Switched to Free Phone Voice 🔊", "error");
+                }
+            }
+
+            // 3. Default / Auto-Fallback: Free Unlimited Phone/Browser Natural Voice!
+            speakWithBrowserTTS(segments, preferTaglish, myRunId);
+        }
+
+        // Main Play/Stop Toggle on Review Card (Strictly separates Original vs Taglish Simplified!)
+        window.toggleReadCurrentCard = async (event) => {
+            if (event) event.stopPropagation();
+            if (state.ttsState === 'speaking' || state.ttsState === 'preparing') {
+                window.stopTTS();
+                return;
+            }
+            if (!state.sessionData || !state.sessionData.queue[state.currentCardIndex]) return;
+            const currentCard = state.sessionData.queue[state.currentCardIndex];
+            const mode = state.showTaglishSimplified ? 'taglish' : 'orig';
+
+            // Synchronously unlock mobile audio/speechSynthesis on direct user tap (required for iOS Safari & Android Chrome!)
+            if ('speechSynthesis' in window) {
+                try {
+                    const unlockUtt = new SpeechSynthesisUtterance('');
+                    unlockUtt.volume = 0;
+                    window.speechSynthesis.speak(unlockUtt);
+                } catch (e) {}
+            }
+            if (!activeTtsAudio) activeTtsAudio = new Audio();
+
+            const myRunId = ++ttsRunId;
+            updateTtsButtonState('preparing');
+
+            const scriptObj = await prepareTtsScriptForCard(currentCard.id, mode);
+            if (myRunId !== ttsRunId || !scriptObj) {
+                if (myRunId === ttsRunId) updateTtsButtonState('idle');
+                return;
+            }
+
+            const segments = [];
+            if (scriptObj.stem) segments.push(scriptObj.stem);
+
+            // Shuffle-Safe & Spoiler-Free: Read ONLY choices currently unblurred/visible on screen in their exact shuffled display order!
+            const shuffledOpts = state.currentShuffledChoices ? state.currentShuffledChoices.options : null;
+            if (shuffledOpts && shuffledOpts.length > 0) {
+                shuffledOpts.forEach((opt, idx) => {
+                    const isVisible = state.showAnswer || (state.revealStep >= 1 && idx < state.revealedChoicesCount);
+                    if (isVisible) {
+                        const spokenChoice = (scriptObj.choices && scriptObj.choices[opt.origLetter])
+                            ? scriptObj.choices[opt.origLetter]
+                            : localCleanForTTS(opt.text);
+                        segments.push(`Choice ${opt.displayLetter}. ${spokenChoice}`);
+                    }
+                });
+            }
+
+            await speakTextEngine(segments, mode === 'taglish', `${currentCard.id}_${mode}`, myRunId);
+        };
+
+        window.readExplanationNotes = async (termId, event) => {
+            if (event) event.stopPropagation();
+            if (state.ttsState === 'speaking' || state.ttsState === 'preparing') {
+                window.stopTTS();
+                return;
+            }
+            const term = state.terms.find(t => t.id === termId);
+            if (!term || !term.explanation || !term.explanation.trim()) return;
+
+            if ('speechSynthesis' in window) {
+                try {
+                    const u = new SpeechSynthesisUtterance('');
+                    u.volume = 0;
+                    window.speechSynthesis.speak(u);
+                } catch (e) {}
+            }
+            const myRunId = ++ttsRunId;
+            updateTtsButtonState('preparing');
+            const cleanNotes = localCleanForTTS(term.explanation);
+            await speakTextEngine([cleanNotes], true, `${termId}_notes`, myRunId);
+        };
+
+        window.testTtsVoice = (event) => {
+            if (event) event.stopPropagation();
+            const engineEl = document.getElementById('tts-engine-select');
+            const voiceEl = document.getElementById('tts-voice-select');
+            const rateEl = document.getElementById('tts-rate-select');
+            const keyEl = document.getElementById('tts-cloud-key-input');
+            const regEl = document.getElementById('tts-azure-region-input');
+            if (engineEl) state.ttsEngine = engineEl.value;
+            if (voiceEl) state.ttsVoiceName = voiceEl.value;
+            if (rateEl) state.ttsRate = parseFloat(rateEl.value) || 1.05;
+            if (keyEl) state.ttsCloudApiKey = keyEl.value.trim();
+            if (regEl && regEl.value.trim()) state.ttsAzureRegion = regEl.value.trim();
+
+            window.stopTTS(true);
+            const myRunId = ++ttsRunId;
+            speakTextEngine([
+                "Hello Engineer! Sample ito ng Taglish voice mo. Ang stress ay thirty megapascals, kaya Z equals the square root of R squared plus X squared."
+            ], true, 'voice_test', myRunId);
+        };
+
+        window.onTtsEngineChange = (newEngine) => {
+            state.ttsEngine = newEngine;
+            state.ttsVoiceName = 'auto';
             renderApp();
         };
 
@@ -2008,13 +2596,15 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 combinedQuestion = `${qStem}\n\n[Choices]:\n${qChoices}`;
             }
 
-            // Cache Invalidation Rule: Whenever Question text is edited and saved, clear cached AI blur chunks, keyword underlines & Taglish simplification
+            // Cache Invalidation Rule: Whenever Question text is edited and saved, clear cached AI blur chunks, keyword underlines, Taglish simplification & TTS scripts
             updateTerm(state.editingTermId, {
                 question: combinedQuestion,
                 answer: a,
                 stemChunks: null,
                 keywords: null,
-                taglishSimplified: null
+                taglishSimplified: null,
+                ttsScriptOrig: null,
+                ttsScriptTaglish: null
             });
 
             const editedId = state.editingTermId;
@@ -4703,6 +5293,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             </span>
                             <div class="flex items-center gap-1.5 ml-auto flex-wrap" onclick="event.stopPropagation()">
                                 ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1">${lvlDots}</div>` : ''}
+                                <button type="button" id="session-tts-btn" onclick="window.toggleReadCurrentCard(event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${state.ttsState === 'speaking' ? 'bg-rose-600 text-white border border-rose-600 shadow-sm' : state.ttsState === 'preparing' ? 'bg-indigo-100 text-indigo-700 border border-indigo-200 animate-pulse' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200'}" title="${state.showTaglishSimplified ? 'Read Taglish Simplified Card Aloud' : 'Read Original Card Aloud'}">
+                                    <i class="${state.ttsState === 'speaking' ? 'ph-fill ph-stop-circle' : state.ttsState === 'preparing' ? 'ph-bold ph-spinner-gap animate-spin' : 'ph-fill ph-speaker-high'} text-sm"></i>
+                                    <span>${state.ttsState === 'speaking' ? 'Stop' : state.ttsState === 'preparing' ? 'Prep...' : 'Listen'}</span>
+                                </button>
                                 <button type="button" onclick="window.toggleTaglishSimplifier('${currentCard.id}', event)" class="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all active:scale-95 ${state.showTaglishSimplified ? 'bg-teal-600 text-white border border-teal-600 shadow-sm' : hasCachedTaglish ? 'bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100' : 'bg-slate-100 text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-transparent'}" title="${state.showTaglishSimplified ? 'Switch back to Original Board Exam Question' : 'Switch to Standalone Taglish Simplified View'}">
                                     <i class="${state.showTaglishSimplified || hasCachedTaglish ? 'ph-fill' : 'ph-bold'} ph-translate text-sm"></i>
                                     <span>${state.showTaglishSimplified ? 'Original' : 'Taglish'}</span>
@@ -4814,6 +5408,14 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                         >
                                             ${AVAILABLE_GEMINI_MODELS.map(m => `<option value="${m.id}" ${state.geminiModel === m.id ? 'selected' : ''}>${m.id === 'auto' ? '⚡ Auto-Rotate' : m.id}</option>`).join('')}
                                         </select>
+                                        <button
+                                            type="button"
+                                            onclick="window.readExplanationNotes('${currentCard.id}', event)"
+                                            class="p-1 rounded-lg text-indigo-600 hover:text-indigo-800 hover:bg-indigo-100 border border-indigo-200/70 bg-white transition-colors"
+                                            title="Listen to Notes & Explanation"
+                                        >
+                                            <i class="ph-fill ph-speaker-high text-xs"></i>
+                                        </button>
                                         <button
                                             type="button"
                                             onclick="window.toggleExplanationEditMode(event)"
@@ -5002,21 +5604,49 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 }
             }
 
-            // --- STREAMING_CHUNK:Gemini API Key & Model Modal (Account-Synced) ---
+            // --- STREAMING_CHUNK:Gemini API Key, Model & TTS Voice Modal (Account-Synced) ---
             if (state.showApiKeyModal) {
+                const devVoices = refreshBrowserVoices();
+                const sortedVoices = [...devVoices].sort((a, b) => {
+                    const aFil = /fil|tl|phil|blessica|angelo/i.test(`${a.lang} ${a.name}`) ? 1 : 0;
+                    const bFil = /fil|tl|phil|blessica|angelo/i.test(`${b.lang} ${b.name}`) ? 1 : 0;
+                    return bFil - aFil;
+                });
+
+                let ttsVoiceOptionsHtml = '';
+                if (state.ttsEngine === 'gcloud') {
+                    const gcVoices = [
+                        { id: 'fil-PH-Neural2-A', label: 'Filipino Neural2 Female (1M free/mo)' },
+                        { id: 'fil-PH-Neural2-D', label: 'Filipino Neural2 Male (1M free/mo)' },
+                        { id: 'fil-PH-Wavenet-A', label: 'Filipino WaveNet Female (4M free/mo)' },
+                        { id: 'fil-PH-Wavenet-D', label: 'Filipino WaveNet Male (4M free/mo)' }
+                    ];
+                    ttsVoiceOptionsHtml = gcVoices.map(v => `<option value="${v.id}" ${state.ttsVoiceName === v.id ? 'selected' : ''}>${v.label}</option>`).join('');
+                } else if (state.ttsEngine === 'azure') {
+                    const azVoices = [
+                        { id: 'fil-PH-BlessicaNeural', label: 'Blessica Neural — Filipino Female (500K free/mo)' },
+                        { id: 'fil-PH-AngeloNeural', label: 'Angelo Neural — Filipino Male (500K free/mo)' }
+                    ];
+                    ttsVoiceOptionsHtml = azVoices.map(v => `<option value="${v.id}" ${state.ttsVoiceName === v.id ? 'selected' : ''}>${v.label}</option>`).join('');
+                } else {
+                    const bestAuto = pickBestBrowserVoice(true);
+                    ttsVoiceOptionsHtml = `<option value="auto" ${state.ttsVoiceName === 'auto' ? 'selected' : ''}>⚡ Auto Best Taglish Voice${bestAuto ? ` (${bestAuto.name.slice(0, 28)})` : ''}</option>` +
+                        sortedVoices.map(v => `<option value="${escapeHTML(v.name)}" ${state.ttsVoiceName === v.name ? 'selected' : ''}>${escapeHTML(v.name)} [${escapeHTML(v.lang)}]</option>`).join('');
+                }
+
                 content += `
                 <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeApiKeyModal()">
-                    <div class="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl zoom-in flex flex-col" onclick="event.stopPropagation()">
-                        <div class="flex items-center justify-between mb-3">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-md max-h-[90vh] shadow-2xl zoom-in flex flex-col" onclick="event.stopPropagation()">
+                        <div class="flex items-center justify-between mb-3 shrink-0">
                             <h3 class="text-lg font-extrabold text-slate-800 flex items-center gap-2">
-                                <i class="ph-fill ph-key text-amber-500 text-xl"></i> Gemini AI Key & Model
+                                <i class="ph-fill ph-key text-amber-500 text-xl"></i> AI Key, Model & Voice
                             </h3>
                             <button onclick="window.closeApiKeyModal()" class="p-1 text-slate-400 hover:text-slate-600 rounded-lg"><i class="ph-bold ph-x text-lg"></i></button>
                         </div>
-                        <p class="text-xs text-slate-500 leading-relaxed mb-4">
-                            Naka-sync ito sa iyong <b>Firebase Account Vault</b> (CP + Laptop). Kung maubusan ng quota ang isang model, pwede kang magpalit ng model dito o gamitin ang <b>Auto-Rotate</b>.
-                        </p>
-                        <div class="space-y-4">
+                        <div class="flex-1 overflow-y-auto pr-1 custom-scrollbar space-y-4">
+                            <p class="text-xs text-slate-500 leading-relaxed">
+                                Naka-sync ang AI Key & Model sa <b>Firebase Vault</b> (CP + Laptop). Ang <b>TTS Voice</b> ay 100% libre & unlimited sa phone/browser mo!
+                            </p>
                             <div>
                                 <div class="flex items-center justify-between mb-1.5">
                                     <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Active AI Model</label>
@@ -5026,30 +5656,95 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 </div>
                                 <select
                                     id="gemini-model-select"
-                                    class="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs md:text-sm font-bold text-slate-800 cursor-pointer"
+                                    class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs md:text-sm font-bold text-slate-800 cursor-pointer"
                                 >
                                     ${AVAILABLE_GEMINI_MODELS.map(m => `<option value="${m.id}" ${state.geminiModel === m.id ? 'selected' : ''}>${escapeHTML(m.label)}</option>`).join('')}
                                 </select>
                             </div>
                             <div>
-                                <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">API Key(s) — Pwede Multiple Keys (1 per line) o Groq Key (<code class="text-purple-600">gsk_...</code>)</label>
+                                <label class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 block">API Key(s) — Gemini (<code class="text-blue-600">AIza...</code>) o Groq (<code class="text-purple-600">gsk_...</code>)</label>
                                 <textarea
                                     id="gemini-api-key-input"
-                                    rows="3"
-                                    placeholder="AIzaSy... (Gemini Key 1)&#10;AIzaSy... (Gemini Key 2 - optional backup)&#10;gsk_... (Groq Key - 14,400/day free!)"
+                                    rows="2"
+                                    placeholder="AIzaSy... (Gemini Key)&#10;gsk_... (Groq Key - 14,400/day free!)"
                                     class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-mono text-xs font-bold text-slate-800 resize-y"
                                 >${escapeHTML(state.geminiApiKey || '')}</textarea>
                             </div>
+
+                            <!-- 🔊 Text-to-Speech (Taglish Voice) Settings -->
+                            <div class="p-4 bg-indigo-50/70 border border-indigo-200/80 rounded-2xl space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-extrabold text-indigo-900 flex items-center gap-1.5">
+                                        <i class="ph-fill ph-speaker-high text-indigo-600 text-base"></i> Taglish Text-to-Speech (TTS)
+                                    </span>
+                                    <button type="button" onclick="window.testTtsVoice(event)" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold flex items-center gap-1 transition-colors active:scale-95">
+                                        <i class="ph-fill ph-play"></i> Test Voice
+                                    </button>
+                                </div>
+
+                                <div>
+                                    <label class="text-[10px] font-bold text-indigo-700 uppercase tracking-wider mb-1 block">Voice Engine</label>
+                                    <select id="tts-engine-select" onchange="window.onTtsEngineChange(this.value)" class="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800 outline-none cursor-pointer">
+                                        <option value="browser" ${state.ttsEngine === 'browser' ? 'selected' : ''}>📱 Free Unlimited Phone / Edge Natural Voice (0 Quota!)</option>
+                                        <option value="gcloud" ${state.ttsEngine === 'gcloud' ? 'selected' : ''}>☁️ Google Cloud TTS (1M Neural2 / 4M WaveNet Free/mo)</option>
+                                        <option value="azure" ${state.ttsEngine === 'azure' ? 'selected' : ''}>💎 Azure Speech Neural — Blessica/Angelo (500K Free/mo)</option>
+                                    </select>
+                                </div>
+
+                                <div class="grid grid-cols-3 gap-2">
+                                    <div class="col-span-2">
+                                        <label class="text-[10px] font-bold text-indigo-700 uppercase tracking-wider mb-1 block">Voice</label>
+                                        <select id="tts-voice-select" class="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800 outline-none cursor-pointer">
+                                            ${ttsVoiceOptionsHtml}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="text-[10px] font-bold text-indigo-700 uppercase tracking-wider mb-1 block">Speed</label>
+                                        <select id="tts-rate-select" class="w-full p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800 outline-none cursor-pointer">
+                                            ${[0.85, 0.95, 1.0, 1.05, 1.15, 1.25, 1.4, 1.5].map(r => `<option value="${r}" ${Number(state.ttsRate) === r ? 'selected' : ''}>${r}x</option>`).join('')}
+                                        </select>
+                                    </div>
+                                </div>
+
+                                ${state.ttsEngine !== 'browser' ? `
+                                <div class="space-y-2 pt-1">
+                                    <input
+                                        id="tts-cloud-key-input"
+                                        type="password"
+                                        placeholder="${state.ttsEngine === 'gcloud' ? 'Google Cloud TTS Key (o iwanang blank para gamitin Gemini Key)' : 'Azure Speech API Key (F0 Free Tier)'}"
+                                        value="${escapeHTML(state.ttsCloudApiKey || '')}"
+                                        class="w-full p-2.5 bg-white border border-indigo-200 rounded-xl font-mono text-xs font-bold text-slate-800 outline-none"
+                                    />
+                                    ${state.ttsEngine === 'azure' ? `
+                                    <input
+                                        id="tts-azure-region-input"
+                                        type="text"
+                                        placeholder="Azure Region (e.g. southeastasia, eastus)"
+                                        value="${escapeHTML(state.ttsAzureRegion || 'southeastasia')}"
+                                        class="w-full p-2 bg-white border border-indigo-200 rounded-xl font-mono text-xs font-bold text-slate-800 outline-none"
+                                    />
+                                    ` : ''}
+                                </div>
+                                ` : ''}
+
+                                <label class="flex items-start gap-2 cursor-pointer pt-1">
+                                    <input id="tts-ai-polish-check" type="checkbox" ${state.ttsUseAiPolish ? 'checked' : ''} class="mt-0.5 w-4 h-4 rounded text-indigo-600 border-indigo-300" />
+                                    <span class="text-[11px] font-semibold text-indigo-900 leading-snug">
+                                        <b>AI Spoken-Script Polish (Cached):</b> Iko-convert muna ng AI ang formulas, symbols & numbers ("thirty") sa background bago basahin (hiwalay sa Original at Taglish).
+                                    </span>
+                                </label>
+                            </div>
+
                             <div class="flex flex-col gap-1 pt-1">
                                 <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 hover:text-blue-800">
                                     <i class="ph-bold ph-arrow-square-out"></i> Kunin ang Google Gemini API Key (AIza...)
                                 </a>
                                 <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs font-bold text-purple-600 hover:text-purple-800">
-                                    <i class="ph-bold ph-lightning"></i> O kumuha ng libreng Groq API Key (gsk_... — 14,400 requests/day!)
+                                    <i class="ph-bold ph-lightning"></i> O libreng Groq API Key (gsk_... — 14,400 requests/day!)
                                 </a>
                             </div>
                         </div>
-                        <div class="flex gap-3 mt-6 pt-4 border-t border-slate-100">
+                        <div class="flex gap-3 mt-4 pt-3 border-t border-slate-100 shrink-0">
                             <button onclick="window.closeApiKeyModal()" class="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-sm transition-colors">Cancel</button>
                             <button onclick="window.saveGeminiApiKey()" class="flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm transition-colors shadow-lg shadow-blue-200">Save & Sync</button>
                         </div>
