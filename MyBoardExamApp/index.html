@@ -86,6 +86,7 @@
             folders: [],
             terms: [],
             history: {}, 
+            activityLog: {}, // Compact hourly activity buckets: { "YYYY-MM-DD": { "0".."23": { c, w, s } } }
             currentView: 'dashboard',
             sessionData: null,
             currentCardIndex: 0,
@@ -115,6 +116,8 @@
             studyFolderId: 'all',
             statsFolderId: 'all', 
             analyticsFolderId: 'all',
+            analyticsHeatmapRange: 'this_week', // 'today' | 'this_week' | 'last_week' | 'all'
+            analyticsSelectedSlot: null, // Selected cell key for tap inspection on phone
             showBulk: false,
             editingFolderId: null,
             addingSubfolderTo: null,
@@ -226,6 +229,7 @@
             const savedFolders = localStorage.getItem('elementVaultFolders');
             const savedTerms = localStorage.getItem('elementVaultTerms');
             const savedHistory = localStorage.getItem('elementVaultHistory');
+            const savedActivityLog = localStorage.getItem('elementVaultActivityLog');
             const savedSimForecast = localStorage.getItem('elementVaultSimForecast');
             const savedApiKey = localStorage.getItem('elementVaultGeminiKey');
             const savedModel = localStorage.getItem('elementVaultGeminiModel');
@@ -234,6 +238,9 @@
             
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
+            if (savedActivityLog) {
+                try { state.activityLog = JSON.parse(savedActivityLog) || {}; } catch (e) { state.activityLog = {}; }
+            }
             if (savedApiKey) state.geminiApiKey = savedApiKey;
             if (savedShowEta !== null) state.showEtaPredictor = savedShowEta !== 'false';
             if (savedTtsConfig) {
@@ -279,6 +286,9 @@
             localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
             localStorage.setItem('elementVaultTerms', JSON.stringify(cleanedTerms));
             localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
+            if (state.activityLog) {
+                localStorage.setItem('elementVaultActivityLog', JSON.stringify(state.activityLog));
+            }
             if (state.geminiApiKey !== undefined) {
                 localStorage.setItem('elementVaultGeminiKey', state.geminiApiKey || '');
             }
@@ -389,6 +399,10 @@
                     if (data.folders) state.folders = data.folders;
                     if (data.terms) state.terms = data.terms;
                     if (data.history) state.history = data.history;
+                    if (data.activityLog && typeof data.activityLog === 'object') {
+                        state.activityLog = data.activityLog;
+                        localStorage.setItem('elementVaultActivityLog', JSON.stringify(state.activityLog));
+                    }
                     if (data.geminiApiKey) {
                         state.geminiApiKey = data.geminiApiKey;
                         localStorage.setItem('elementVaultGeminiKey', state.geminiApiKey);
@@ -424,6 +438,7 @@
                         folders: state.folders,
                         terms: cleanTermsForStorage(state.terms),
                         history: state.history,
+                        activityLog: state.activityLog || {},
                         geminiApiKey: state.geminiApiKey || '',
                         geminiModel: state.geminiModel || 'auto'
                     });
@@ -1122,15 +1137,32 @@
             window.setView('dashboard');
         };
 
+        function recordActivityEvent(answerType, durationSec) {
+            if (!state.activityLog || typeof state.activityLog !== 'object') state.activityLog = {};
+            const now = new Date();
+            const dateStr = now.toLocaleDateString('en-CA'); // YYYY-MM-DD (local date)
+            const hourStr = String(now.getHours()); // "0".."23"
+            if (!state.activityLog[dateStr]) state.activityLog[dateStr] = {};
+            if (!state.activityLog[dateStr][hourStr]) {
+                state.activityLog[dateStr][hourStr] = { c: 0, w: 0, s: 0 };
+            }
+            const bucket = state.activityLog[dateStr][hourStr];
+            if (answerType === 'wrong') bucket.w = (bucket.w || 0) + 1;
+            else bucket.c = (bucket.c || 0) + 1;
+            bucket.s = Math.round(((bucket.s || 0) + (Number(durationSec) || 8)) * 10) / 10;
+        }
+
         window.handleAnswer = (answerType) => {
             window.stopTTS(true);
             // Record active card pace (clamped 1.5s–45s so reading AI notes or breaks won't blow up ETA)
+            let clampedSec = 10;
             if (currentCardStartTs > 0) {
                 const rawSec = (Date.now() - currentCardStartTs) / 1000;
-                const clampedSec = Math.min(45, Math.max(1.5, rawSec));
+                clampedSec = Math.min(45, Math.max(1.5, rawSec));
                 sessionCardDurations.push(clampedSec);
                 if (sessionCardDurations.length > 8) sessionCardDurations.shift();
             }
+            recordActivityEvent(answerType, clampedSec);
 
             const currentCard = state.sessionData.queue[state.currentCardIndex];
             const currentCorrect = currentCard.correct || 0;
@@ -2548,6 +2580,15 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
         };
         window.setStatsFolder = (id) => { state.statsFolderId = id; renderApp(); };
         window.setAnalyticsFolder = (id) => { state.analyticsFolderId = id; renderApp(); };
+        window.setAnalyticsHeatmapRange = (range) => {
+            state.analyticsHeatmapRange = range;
+            state.analyticsSelectedSlot = null;
+            renderApp();
+        };
+        window.selectAnalyticsHeatmapSlot = (slotKey) => {
+            state.analyticsSelectedSlot = state.analyticsSelectedSlot === slotKey ? null : slotKey;
+            renderApp();
+        };
         window.setIntakeSize = (val) => { state.intakeSize = Number(val); renderApp(); };
         window.setLookAheadDays = (val) => { state.lookAheadDays = Number(val); renderApp(); };
         window.toggleBulk = () => { state.showBulk = !state.showBulk; renderApp(); };
@@ -3175,7 +3216,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
         // --- STREAMING_CHUNK:Data Import and Export ---
         window.exportBackup = () => {
-            const backupData = { folders: state.folders, terms: cleanTermsForStorage(state.terms), history: state.history };
+            const backupData = { folders: state.folders, terms: cleanTermsForStorage(state.terms), history: state.history, activityLog: state.activityLog || {} };
             const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData));
             const downloadAnchorNode = document.createElement('a');
             downloadAnchorNode.setAttribute("href", dataStr);
@@ -3196,6 +3237,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         state.folders = data.folders;
                         state.terms = data.terms;
                         if (data.history) state.history = data.history;
+                        if (data.activityLog && typeof data.activityLog === 'object') state.activityLog = data.activityLog;
                         ensureValidActiveFolder();
                         saveData();
                         renderApp();
@@ -4964,6 +5006,351 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 </div>
             `;
 
+            // --- 7. STUDY RHYTHM & TIME-OF-DAY HEATMAP (Today / This Week / Last Week / All Time) ---
+            const formatHourShort = (h) => h === 0 ? '12a' : h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`;
+            const formatHourFull = (h) => h === 0 ? '12:00 AM' : h === 12 ? '12:00 PM' : h < 12 ? `${h}:00 AM` : `${h - 12}:00 PM`;
+            const toLocalDateKey = (dt) => dt.toLocaleDateString('en-CA');
+
+            // Merge live activityLog (exact c, w, s) + read-only historical fallback from card lastReviewedDate (no double counting!)
+            const mergedLog = {};
+            const liveLog = (state.activityLog && typeof state.activityLog === 'object') ? state.activityLog : {};
+            Object.keys(liveLog).forEach(dKey => {
+                mergedLog[dKey] = {};
+                const hrsObj = liveLog[dKey] || {};
+                Object.keys(hrsObj).forEach(hKey => {
+                    const b = hrsObj[hKey] || {};
+                    const c = Number(b.c) || 0;
+                    const w = Number(b.w) || 0;
+                    const s = Number(b.s) || 0;
+                    if (c + w > 0) {
+                        mergedLog[dKey][hKey] = { count: c + w, c, w, s, isLive: true };
+                    }
+                });
+            });
+
+            // Historical fallback from existing card lastReviewedDate timestamps for past date/hour slots without live log
+            scopedTerms.forEach(t => {
+                if (t.lastReviewedDate && t.lastReviewedDate > 0) {
+                    const dt = new Date(t.lastReviewedDate);
+                    const dKey = toLocalDateKey(dt);
+                    const hKey = String(dt.getHours());
+                    if (liveLog[dKey] && liveLog[dKey][hKey]) return; // Live bucket takes precedence
+                    if (!mergedLog[dKey]) mergedLog[dKey] = {};
+                    if (!mergedLog[dKey][hKey]) {
+                        mergedLog[dKey][hKey] = { count: 0, c: 0, w: 0, s: 0, isLive: false };
+                    }
+                    mergedLog[dKey][hKey].count += 1;
+                }
+            });
+
+            const activeRange = state.analyticsHeatmapRange || 'this_week';
+            const nowDateObj = new Date();
+            nowDateObj.setHours(0, 0, 0, 0);
+            const todayKeyStr = toLocalDateKey(nowDateObj);
+            const dayOfWeekMon0 = (nowDateObj.getDay() + 6) % 7; // Mon=0 .. Sun=6
+            const thisWeekMon = new Date(nowDateObj.getTime() - dayOfWeekMon0 * MS_PER_DAY);
+            const lastWeekMon = new Date(thisWeekMon.getTime() - 7 * MS_PER_DAY);
+            const dayNamesShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+            // Build rows: each row has { label, subLabel, hours: [24 buckets] }
+            let heatmapRows = [];
+            let rangeSubtitle = '';
+
+            if (activeRange === 'today') {
+                rangeSubtitle = `Today (${nowDateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })})`;
+                const hrs = [];
+                for (let h = 0; h < 24; h++) {
+                    const cell = (mergedLog[todayKeyStr] && mergedLog[todayKeyStr][String(h)])
+                        ? { ...mergedLog[todayKeyStr][String(h)] }
+                        : { count: 0, c: 0, w: 0, s: 0, isLive: false };
+                    hrs.push(cell);
+                }
+                heatmapRows.push({ rowKey: todayKeyStr, label: 'Today', subLabel: todayKeyStr.slice(5), hours: hrs });
+            } else if (activeRange === 'this_week' || activeRange === 'last_week') {
+                const startMon = activeRange === 'this_week' ? thisWeekMon : lastWeekMon;
+                const endSun = new Date(startMon.getTime() + 6 * MS_PER_DAY);
+                rangeSubtitle = `${startMon.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${endSun.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                for (let d = 0; d < 7; d++) {
+                    const dt = new Date(startMon.getTime() + d * MS_PER_DAY);
+                    const dKey = toLocalDateKey(dt);
+                    const hrs = [];
+                    for (let h = 0; h < 24; h++) {
+                        const cell = (mergedLog[dKey] && mergedLog[dKey][String(h)])
+                            ? { ...mergedLog[dKey][String(h)] }
+                            : { count: 0, c: 0, w: 0, s: 0, isLive: false };
+                        hrs.push(cell);
+                    }
+                    heatmapRows.push({
+                        rowKey: dKey,
+                        label: dayNamesShort[d],
+                        subLabel: dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                        isToday: dKey === todayKeyStr,
+                        hours: hrs
+                    });
+                }
+            } else {
+                // 'all' -> Aggregate across ALL dates into Mon..Sun × 24 hours!
+                const allDateKeys = Object.keys(mergedLog).sort();
+                rangeSubtitle = allDateKeys.length > 0
+                    ? `All Time (${allDateKeys.length} active days)`
+                    : 'All Time';
+                for (let d = 0; d < 7; d++) {
+                    const hrs = Array.from({ length: 24 }, () => ({ count: 0, c: 0, w: 0, s: 0, isLive: false }));
+                    heatmapRows.push({ rowKey: `dow_${d}`, label: dayNamesShort[d], subLabel: 'All', hours: hrs });
+                }
+                allDateKeys.forEach(dKey => {
+                    const dt = new Date(dKey + 'T00:00:00');
+                    const dow = (dt.getDay() + 6) % 7;
+                    const dayObj = mergedLog[dKey] || {};
+                    Object.keys(dayObj).forEach(hKey => {
+                        const h = parseInt(hKey, 10);
+                        if (h >= 0 && h < 24) {
+                            const src = dayObj[hKey];
+                            const dst = heatmapRows[dow].hours[h];
+                            dst.count += src.count || 0;
+                            dst.c += src.c || 0;
+                            dst.w += src.w || 0;
+                            dst.s += src.s || 0;
+                            if (src.isLive) dst.isLive = true;
+                        }
+                    });
+                });
+            }
+
+            // Compute summary insights across the active range
+            const hourlyTotals = Array.from({ length: 24 }, (_, h) => ({ h, count: 0, c: 0, w: 0, s: 0 }));
+            let periodTotalCards = 0;
+            let periodLiveCards = 0;
+            let periodLiveCorrect = 0;
+            let periodLiveSeconds = 0;
+            let maxCellCount = 1;
+            const slotLookup = {};
+
+            heatmapRows.forEach(row => {
+                row.hours.forEach((cell, h) => {
+                    if (cell.count > maxCellCount) maxCellCount = cell.count;
+                    periodTotalCards += cell.count;
+                    hourlyTotals[h].count += cell.count;
+                    if (cell.c + cell.w > 0) {
+                        hourlyTotals[h].c += cell.c;
+                        hourlyTotals[h].w += cell.w;
+                        hourlyTotals[h].s += cell.s;
+                        periodLiveCards += (cell.c + cell.w);
+                        periodLiveCorrect += cell.c;
+                        periodLiveSeconds += cell.s;
+                    }
+                    const slotKey = `${row.rowKey}_${h}`;
+                    slotLookup[slotKey] = {
+                        rowLabel: `${row.label}${row.subLabel && row.subLabel !== 'All' ? ' (' + row.subLabel + ')' : ''}`,
+                        hour: h,
+                        ...cell
+                    };
+                });
+            });
+
+            const peakHourObj = hourlyTotals.reduce((best, cur) => cur.count > best.count ? cur : best, hourlyTotals[0]);
+            const activeHoursCount = hourlyTotals.filter(x => x.count > 0).length;
+            const bestRateHourObj = hourlyTotals
+                .filter(x => (x.c + x.w) >= 3)
+                .sort((a, b) => {
+                    const accA = a.c / (a.c + a.w);
+                    const accB = b.c / (b.c + b.w);
+                    if (Math.abs(accB - accA) > 0.05) return accB - accA;
+                    return (b.c + b.w) - (a.c + a.w);
+                })[0] || null;
+
+            const getHeatCellColor = (count) => {
+                if (!count || count <= 0) return 'bg-slate-100 border-slate-200/70 text-slate-300';
+                const ratio = count / maxCellCount;
+                if (ratio <= 0.25) return 'bg-emerald-100 border-emerald-200 text-emerald-800';
+                if (ratio <= 0.50) return 'bg-emerald-300 border-emerald-400 text-emerald-950';
+                if (ratio <= 0.78) return 'bg-emerald-500 border-emerald-600 text-white';
+                return 'bg-emerald-700 border-emerald-800 text-white shadow-sm';
+            };
+
+            const formatSlotDetailText = (slot) => {
+                if (!slot || slot.count <= 0) return 'No cards answered in this hour.';
+                const hrRange = `${formatHourFull(slot.hour)} – ${formatHourFull((slot.hour + 1) % 24)}`;
+                const liveTot = slot.c + slot.w;
+                if (liveTot > 0 && slot.s > 0) {
+                    const acc = Math.round((slot.c / liveTot) * 100);
+                    const secPerCard = (slot.s / liveTot).toFixed(1);
+                    const cardsPerMin = (liveTot / (slot.s / 60)).toFixed(1);
+                    return `<b>${slot.rowLabel} • ${hrRange}:</b> <span class="text-emerald-700 font-black">${slot.count} cards</span> • ${acc}% accuracy (${slot.c}✓/${slot.w}✗) • <b>${cardsPerMin} cards/min</b> (${secPerCard}s/card)`;
+                }
+                return `<b>${slot.rowLabel} • ${hrRange}:</b> <span class="text-emerald-700 font-black">${slot.count} cards</span> <span class="text-slate-400">(from card review timestamps; live speed & accuracy tracks automatically going forward)</span>`;
+            };
+
+            // Render either 24-Hour Vertical Bar Chart (Today) OR 7x24 Heatmap Matrix (This Week / Last Week / All Time)
+            let heatmapBodyHtml = '';
+            if (activeRange === 'today') {
+                const todayRow = heatmapRows[0];
+                const maxHr = Math.max(5, ...todayRow.hours.map(c => c.count));
+                const hSvgW = 720;
+                const hSvgH = 185;
+                const hPadL = 12;
+                const hPadR = 12;
+                const hPadT = 24;
+                const hPadB = 30;
+                const hPlotH = hSvgH - hPadT - hPadB;
+                const colW = (hSvgW - hPadL - hPadR) / 24;
+                const bW = Math.max(12, colW - 6);
+
+                const todayBarsSvg = todayRow.hours.map((cell, h) => {
+                    const x = hPadL + h * colW + (colW - bW) / 2;
+                    const bh = cell.count > 0 ? Math.max(8, (cell.count / maxHr) * hPlotH) : 3;
+                    const y = hPadT + hPlotH - bh;
+                    const slotKey = `${todayRow.rowKey}_${h}`;
+                    const isSel = state.analyticsSelectedSlot === slotKey;
+                    const liveTot = cell.c + cell.w;
+                    const accTxt = liveTot > 0 ? ` • ${Math.round((cell.c / liveTot) * 100)}% acc` : '';
+                    const fill = isSel ? '#0284c7' : cell.count > 0 ? '#10b981' : '#e2e8f0';
+                    return `
+                        <g class="cursor-pointer" onclick="window.selectAnalyticsHeatmapSlot('${slotKey}')">
+                            <title>${formatHourFull(h)}: ${cell.count} cards${accTxt}</title>
+                            <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bW.toFixed(1)}" height="${bh.toFixed(1)}" rx="5" fill="${fill}" />
+                            ${cell.count > 0 ? `<text x="${(x + bW / 2).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#065f46">${cell.count}</text>` : ''}
+                            ${h % 2 === 0 ? `<text x="${(x + bW / 2).toFixed(1)}" y="${hSvgH - 9}" text-anchor="middle" font-size="9" font-weight="700" fill="#64748b">${formatHourShort(h)}</text>` : ''}
+                        </g>
+                    `;
+                }).join('');
+
+                heatmapBodyHtml = `
+                    <div class="w-full overflow-x-auto">
+                        <svg viewBox="0 0 ${hSvgW} ${hSvgH}" class="w-full min-w-[540px] h-auto select-none">
+                            <line x1="${hPadL}" y1="${hPadT + hPlotH}" x2="${hSvgW - hPadR}" y2="${hPadT + hPlotH}" stroke="#e2e8f0" stroke-width="1.5" />
+                            ${todayBarsSvg}
+                        </svg>
+                    </div>
+                `;
+            } else {
+                const hourHeadersHtml = Array.from({ length: 24 }, (_, h) =>
+                    `<div class="text-[9px] font-bold text-slate-400 text-center">${h % 3 === 0 ? formatHourShort(h) : ''}</div>`
+                ).join('');
+
+                const matrixRowsHtml = heatmapRows.map(row => {
+                    const rowTotal = row.hours.reduce((a, c) => a + c.count, 0);
+                    const cellsHtml = row.hours.map((cell, h) => {
+                        const slotKey = `${row.rowKey}_${h}`;
+                        const isSel = state.analyticsSelectedSlot === slotKey;
+                        const liveTot = cell.c + cell.w;
+                        const rateTip = (liveTot > 0 && cell.s > 0)
+                            ? ` • ${Math.round((cell.c / liveTot) * 100)}% acc • ${(liveTot / (cell.s / 60)).toFixed(1)} cards/min`
+                            : '';
+                        return `
+                            <button
+                                type="button"
+                                onclick="window.selectAnalyticsHeatmapSlot('${slotKey}')"
+                                class="h-7 md:h-8 rounded-md border text-[9px] font-black flex items-center justify-center transition-all ${getHeatCellColor(cell.count)} ${isSel ? 'ring-2 ring-blue-500 scale-110 z-10' : 'hover:scale-105'}"
+                                title="${row.label} ${row.subLabel !== 'All' ? row.subLabel : ''} • ${formatHourFull(h)}: ${cell.count} cards${rateTip}"
+                            >
+                                ${cell.count > 0 ? cell.count : ''}
+                            </button>
+                        `;
+                    }).join('');
+                    return `
+                        <div class="grid items-center gap-1" style="grid-template-columns: 62px repeat(24, minmax(22px, 1fr)) 36px;">
+                            <div class="text-left pr-1">
+                                <span class="text-[11px] font-extrabold ${row.isToday ? 'text-emerald-700' : 'text-slate-700'} block leading-tight">${row.label}</span>
+                                ${row.subLabel !== 'All' ? `<span class="text-[9px] font-semibold text-slate-400 block leading-tight">${row.subLabel}</span>` : ''}
+                            </div>
+                            ${cellsHtml}
+                            <div class="text-right text-[10px] font-black ${rowTotal > 0 ? 'text-emerald-700' : 'text-slate-300'} pl-1">${rowTotal > 0 ? rowTotal : '–'}</div>
+                        </div>
+                    `;
+                }).join('');
+
+                heatmapBodyHtml = `
+                    <div class="w-full overflow-x-auto pb-1 custom-scrollbar">
+                        <div class="min-w-[650px] space-y-1">
+                            <div class="grid items-center gap-1 mb-1" style="grid-template-columns: 62px repeat(24, minmax(22px, 1fr)) 36px;">
+                                <div class="text-[9px] font-black uppercase text-slate-400">Day / Hr</div>
+                                ${hourHeadersHtml}
+                                <div class="text-[9px] font-black uppercase text-slate-400 text-right">Sum</div>
+                            </div>
+                            ${matrixRowsHtml}
+                        </div>
+                    </div>
+                `;
+            }
+
+            const selectedSlotObj = state.analyticsSelectedSlot ? slotLookup[state.analyticsSelectedSlot] : null;
+            const periodPaceText = (periodLiveCards > 0 && periodLiveSeconds > 0)
+                ? `${(periodLiveCards / (periodLiveSeconds / 60)).toFixed(1)} cards/min • ${Math.round((periodLiveCorrect / periodLiveCards) * 100)}% acc`
+                : `${activeHoursCount} active hour${activeHoursCount === 1 ? '' : 's'}`;
+
+            const rangePills = [
+                { id: 'today', label: 'Today' },
+                { id: 'this_week', label: 'This Week' },
+                { id: 'last_week', label: 'Last Week' },
+                { id: 'all', label: 'All Time' }
+            ].map(r => `
+                <button type="button" onclick="window.setAnalyticsHeatmapRange('${r.id}')" class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${activeRange === r.id ? 'bg-emerald-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-emerald-50 hover:text-emerald-700'}">
+                    ${r.label}
+                </button>
+            `).join('');
+
+            const studyRhythmHtml = `
+                <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                            <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                <i class="ph-fill ph-clock-afternoon text-emerald-500 text-xl"></i> Study Rhythm & Time-of-Day Heatmap
+                            </h2>
+                            <p class="text-xs text-slate-500">${rangeSubtitle} — Tap any box/bar to inspect exact cards, accuracy & speed rate at that hour.</p>
+                        </div>
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                            ${rangePills}
+                        </div>
+                    </div>
+
+                    <!-- 3 Quick Study Rhythm Insights -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                        <div class="p-3 rounded-2xl bg-emerald-50/80 border border-emerald-200/80 flex items-center justify-between gap-2">
+                            <div>
+                                <span class="text-[10px] font-black uppercase tracking-wider text-emerald-700 block">🔥 Peak Hour</span>
+                                <span class="text-sm font-black text-emerald-950">${peakHourObj && peakHourObj.count > 0 ? `${formatHourFull(peakHourObj.h)} (${peakHourObj.count})` : 'No activity yet'}</span>
+                            </div>
+                            <i class="ph-fill ph-fire text-2xl text-emerald-500/70"></i>
+                        </div>
+                        <div class="p-3 rounded-2xl bg-blue-50/80 border border-blue-200/80 flex items-center justify-between gap-2">
+                            <div>
+                                <span class="text-[10px] font-black uppercase tracking-wider text-blue-700 block">⚡ Sharpest Rate Hour</span>
+                                <span class="text-sm font-black text-blue-950">${bestRateHourObj ? `${formatHourFull(bestRateHourObj.h)} (${Math.round((bestRateHourObj.c / (bestRateHourObj.c + bestRateHourObj.w)) * 100)}% • ${(bestRateHourObj.s > 0 ? ((bestRateHourObj.c + bestRateHourObj.w) / (bestRateHourObj.s / 60)).toFixed(1) : '–')}/m)` : 'Tracks live next review'}</span>
+                            </div>
+                            <i class="ph-fill ph-lightning text-2xl text-blue-500/70"></i>
+                        </div>
+                        <div class="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
+                            <div>
+                                <span class="text-[10px] font-black uppercase tracking-wider text-slate-500 block">📊 Period Volume</span>
+                                <span class="text-sm font-black text-slate-900">${periodTotalCards.toLocaleString()} cards <span class="text-[11px] font-bold text-slate-500">(${periodPaceText})</span></span>
+                            </div>
+                            <i class="ph-fill ph-chart-bar text-2xl text-slate-400/70"></i>
+                        </div>
+                    </div>
+
+                    ${heatmapBodyHtml}
+
+                    <!-- Selected Hour Inspector (Great for Mobile Taps!) + Heat Scale Legend -->
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs">
+                        <div class="text-slate-600 font-medium">
+                            ${selectedSlotObj
+                                ? `<i class="ph-fill ph-clock text-emerald-600 mr-1"></i>${formatSlotDetailText(selectedSlotObj)}`
+                                : `<span class="text-slate-400"><i class="ph-bold ph-hand-tap mr-1"></i>Tap any green cell or bar to view exact accuracy & cards/min speed for that hour.</span>`}
+                        </div>
+                        <div class="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 shrink-0">
+                            <span>Less</span>
+                            <span class="w-3.5 h-3.5 rounded bg-slate-100 border border-slate-200 inline-block"></span>
+                            <span class="w-3.5 h-3.5 rounded bg-emerald-100 border border-emerald-200 inline-block"></span>
+                            <span class="w-3.5 h-3.5 rounded bg-emerald-300 border border-emerald-400 inline-block"></span>
+                            <span class="w-3.5 h-3.5 rounded bg-emerald-500 border border-emerald-600 inline-block"></span>
+                            <span class="w-3.5 h-3.5 rounded bg-emerald-700 border border-emerald-800 inline-block"></span>
+                            <span>More</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
             return `
             <div class="max-w-6xl mx-auto p-4 md:p-6 space-y-6 fade-in">
                 <!-- Header + Scope Filter -->
@@ -5078,6 +5465,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         </div>
                     </div>
                 </div>
+
+                <!-- Study Rhythm & Time-of-Day Heatmap (Today / This Week / Last Week / All Time) -->
+                ${studyRhythmHtml}
 
                 <!-- Upcoming 14-Day Review Load Bar Chart -->
                 <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm">
