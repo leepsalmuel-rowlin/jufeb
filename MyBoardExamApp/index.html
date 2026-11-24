@@ -53,6 +53,77 @@
             -webkit-tap-highlight-color: transparent;
             touch-action: manipulation;
         }
+        .tabular-nums { font-variant-numeric: tabular-nums; }
+
+        /* Feature 2: Top 1 Impact Game-Style Feedback Animations */
+        @keyframes top1FlashEmerald {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); background-color: rgba(236, 253, 245, 0.95); }
+            100% { box-shadow: 0 0 0 18px rgba(16, 185, 129, 0); }
+        }
+        .top1-flash-emerald { animation: top1FlashEmerald 0.55s ease-out; }
+
+        @keyframes top1ShimmerGold {
+            0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.75); border-color: #f59e0b; }
+            45% { box-shadow: 0 0 28px 6px rgba(251, 191, 36, 0.65); border-color: #eab308; background-color: #fffbeb; }
+            100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+        }
+        .top1-shimmer-gold { animation: top1ShimmerGold 0.85s ease-out; }
+
+        @keyframes top1MicroShake {
+            0%, 100% { transform: translateX(0); }
+            20% { transform: translateX(-6px); }
+            40% { transform: translateX(6px); }
+            60% { transform: translateX(-4px); }
+            80% { transform: translateX(4px); }
+        }
+        .top1-shake { animation: top1MicroShake 0.36s ease-in-out; }
+
+        @keyframes top1VignetteCrimson {
+            0% { opacity: 0; }
+            25% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+        .top1-vignette-crimson {
+            position: fixed; inset: 0; pointer-events: none; z-index: 60;
+            box-shadow: inset 0 0 90px 18px rgba(220, 38, 38, 0.45);
+            animation: top1VignetteCrimson 0.65s ease-out forwards;
+        }
+
+        @keyframes top1FloatDelta {
+            0% { opacity: 0; transform: translate(-50%, 12px) scale(0.85); }
+            20% { opacity: 1; transform: translate(-50%, -6px) scale(1.06); }
+            80% { opacity: 1; transform: translate(-50%, -26px) scale(1); }
+            100% { opacity: 0; transform: translate(-50%, -42px) scale(0.95); }
+        }
+        .top1-float-delta {
+            position: fixed; top: 82px; left: 50%; z-index: 70; pointer-events: none;
+            animation: top1FloatDelta 1.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        @keyframes top1AmberSlide {
+            0% { opacity: 0; transform: translateY(-10px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        .top1-amber-slide { animation: top1AmberSlide 0.28s ease-out; }
+
+        @keyframes objSideSlideIn {
+            0% { opacity: 0; transform: translateX(36px) scale(0.92); }
+            14% { opacity: 1; transform: translateX(0) scale(1.03); }
+            24% { opacity: 1; transform: translateX(0) scale(1); }
+            82% { opacity: 1; transform: translateX(0) scale(1); }
+            100% { opacity: 0; transform: translateX(26px) scale(0.95); }
+        }
+        .obj-side-popup {
+            animation: objSideSlideIn 2.1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        .obj-side-popup-long {
+            animation: objSideSlideIn 2.85s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        @keyframes overdriveShimmer {
+            0%, 100% { box-shadow: 0 0 0 1px rgba(245,158,11,0.45), 0 4px 14px -2px rgba(245,158,11,0.28); }
+            50% { box-shadow: 0 0 0 2px rgba(234,179,8,0.85), 0 6px 20px -2px rgba(234,179,8,0.45); }
+        }
+        .overdrive-card-glow { animation: overdriveShimmer 2.6s ease-in-out infinite; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-blue-200">
@@ -69,6 +140,8 @@
         // --- CONSTANTS ---
         const INTERVALS = { 1: 1, 2: 3, 3: 7, 4: 15, 5: 30, 6: 60 };
         const MS_PER_DAY = 24 * 60 * 60 * 1000;
+        const MELE_EXAM_DATE_MS = new Date('2027-02-15T00:00:00').getTime();
+        const MELE_POST_EXAM_MS = new Date('2027-02-28T23:59:59').getTime();
 
         const generateId = () => {
             return Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -79,6 +152,7 @@
         let etaRefreshInterval = null;
         let sessionCardDurations = []; // Rolling window of recent card durations (seconds)
         let currentCardStartTs = 0;
+        let lastFeedbackAnim = null; // { type: 'emerald'|'gold'|'miss'|'crit_miss'|'rushed', ts }
         
         // --- STATE ---
         let state = {
@@ -87,6 +161,19 @@
             terms: [],
             history: {}, 
             activityLog: {}, // Compact hourly activity buckets: { "YYYY-MM-DD": { "0".."23": { c, w, s } } }
+            dailyTelemetry: {}, // Local-only daily telemetry (micro-wins, pace brackets, clean blocks, orders)
+            orderThrottle: { masteryScale: 1.0, leechScale: 1.0, sharpnessScale: 1.0, consecutiveAllClear: 0, missedStreak: { mastery: 0, leech: 0, sharpness: 0 }, lastEvaluatedDate: null },
+            topnotcherScope: 'full', // 'prime' | 'full'
+            topnotcherDisplayUnit: 'pct', // 'pct' (%) | 'rp' (RP)
+            intakeRateMode: 'auto', // 'auto' (history-detected) | 'custom' (user-set cards/day)
+            customIntakeRate: 10, // cards/day when intakeRateMode === 'custom'
+            hudStakesMode: 'stakes', // 'stakes' (Pre-Answer Stakes) | 'clean' (Clean Exam / Post-Reveal Only)
+            queueMode: 'smart', // 'smart' (Warm-Up + Interleaved Leeches) | 'random'
+            weeklyTargets: { 0: 120, 1: 80, 2: 80, 3: 80, 4: 80, 5: 80, 6: 50 }, // Sun(0)..Sat(6) adaptive daily targets
+            showWeeklyTargetEditor: false,
+            showYesterdayOrders: false,
+            sessionLastImpact: null, // { delta, dodgedOrMissed, type, isRushed, label, cardId }
+            sessionSummaryModal: null, // Shown after Leech Surgery or completed session
             currentView: 'dashboard',
             sessionData: null,
             currentCardIndex: 0,
@@ -235,11 +322,41 @@
             const savedModel = localStorage.getItem('elementVaultGeminiModel');
             const savedShowEta = localStorage.getItem('elementVaultShowEta');
             const savedTtsConfig = localStorage.getItem('elementVaultTtsConfig');
+            const savedTopPrefs = localStorage.getItem('elementVaultTopnotcherPrefs');
+            const savedDailyTel = localStorage.getItem('elementVaultDailyTelemetry');
+            const savedThrottle = localStorage.getItem('elementVaultOrderThrottle');
             
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
             if (savedActivityLog) {
                 try { state.activityLog = JSON.parse(savedActivityLog) || {}; } catch (e) { state.activityLog = {}; }
+            }
+            if (savedTopPrefs) {
+                try {
+                    const tp = JSON.parse(savedTopPrefs);
+                    if (tp.topnotcherScope) state.topnotcherScope = tp.topnotcherScope;
+                    if (tp.topnotcherDisplayUnit) state.topnotcherDisplayUnit = tp.topnotcherDisplayUnit;
+                    if (tp.intakeRateMode) state.intakeRateMode = tp.intakeRateMode;
+                    if (typeof tp.customIntakeRate === 'number' && !isNaN(tp.customIntakeRate)) state.customIntakeRate = tp.customIntakeRate;
+                    if (tp.hudStakesMode) state.hudStakesMode = tp.hudStakesMode;
+                    if (tp.queueMode) state.queueMode = tp.queueMode;
+                    if (tp.weeklyTargets && typeof tp.weeklyTargets === 'object') {
+                        state.weeklyTargets = { ...state.weeklyTargets, ...tp.weeklyTargets };
+                    }
+                } catch (e) {}
+            }
+            if (savedDailyTel) {
+                try { state.dailyTelemetry = JSON.parse(savedDailyTel) || {}; } catch (e) { state.dailyTelemetry = {}; }
+            }
+            if (savedThrottle) {
+                try {
+                    const th = JSON.parse(savedThrottle);
+                    state.orderThrottle = {
+                        ...state.orderThrottle,
+                        ...th,
+                        missedStreak: { ...state.orderThrottle.missedStreak, ...(th.missedStreak || {}) }
+                    };
+                } catch (e) {}
             }
             if (savedApiKey) state.geminiApiKey = savedApiKey;
             if (savedShowEta !== null) state.showEtaPredictor = savedShowEta !== 'false';
@@ -295,8 +412,28 @@
             if (state.geminiModel) {
                 localStorage.setItem('elementVaultGeminiModel', state.geminiModel);
             }
+            saveLocalTelemetryOnly();
             
             if (window.saveToCloud) window.saveToCloud();
+        }
+
+        function saveLocalTelemetryOnly() {
+            // Prune dailyTelemetry to last 45 days so localStorage stays super light (ZERO Firestore writes!)
+            const keys = Object.keys(state.dailyTelemetry || {}).sort();
+            if (keys.length > 45) {
+                keys.slice(0, keys.length - 45).forEach(k => delete state.dailyTelemetry[k]);
+            }
+            localStorage.setItem('elementVaultTopnotcherPrefs', JSON.stringify({
+                topnotcherScope: state.topnotcherScope,
+                topnotcherDisplayUnit: state.topnotcherDisplayUnit,
+                intakeRateMode: state.intakeRateMode,
+                customIntakeRate: state.customIntakeRate,
+                hudStakesMode: state.hudStakesMode,
+                queueMode: state.queueMode,
+                weeklyTargets: state.weeklyTargets
+            }));
+            localStorage.setItem('elementVaultDailyTelemetry', JSON.stringify(state.dailyTelemetry || {}));
+            localStorage.setItem('elementVaultOrderThrottle', JSON.stringify(state.orderThrottle || {}));
         }
 
         const firebaseConfig = {
@@ -1076,6 +1213,1129 @@
             renderApp();
         };
 
+        // =========================================================================
+        // MELE (FEB 2027) TOPNOTCHER ENGINE, TELEMETRY, SMART QUEUE & DAILY ORDERS
+        // =========================================================================
+        function getTodayDateKey() {
+            return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD (local)
+        }
+
+        function getYesterdayDateKey() {
+            const d = new Date();
+            d.setDate(d.getDate() - 1);
+            return d.toLocaleDateString('en-CA');
+        }
+
+        function getTodayAdaptiveTarget() {
+            const dow = new Date().getDay(); // 0=Sun .. 6=Sat
+            const val = Number(state.weeklyTargets && state.weeklyTargets[dow]);
+            return val > 0 ? val : 80;
+        }
+
+        function safeHaptic(pattern) {
+            try {
+                if (navigator && typeof navigator.vibrate === 'function') {
+                    navigator.vibrate(pattern);
+                }
+            } catch (e) {}
+        }
+
+        function ensureDailyTelemetry(dateKey = getTodayDateKey()) {
+            if (!state.dailyTelemetry || typeof state.dailyTelemetry !== 'object') state.dailyTelemetry = {};
+            if (!state.dailyTelemetry[dateKey]) {
+                state.dailyTelemetry[dateKey] = {
+                    levelUps: { '0->1': 0, '1->2': 0, '2->3': 0, '3->4': 0, '4->5': 0, '5->6': 0, net: 0 },
+                    leechesTamed: 0,
+                    lockedToday: 0,
+                    addedToday: 0,
+                    clearedToday: 0,
+                    forwardAns: 0,
+                    loopbackAns: 0,
+                    paceBrackets: { b1: { c: 0, w: 0 }, b2: { c: 0, w: 0 }, b3: { c: 0, w: 0 }, b4: { c: 0, w: 0 } },
+                    cleanBlockSec: 0,
+                    cleanBlockC: 0,
+                    cleanBlockW: 0,
+                    cleanBlocksEarned: 0,
+                    breakBankClaimed: 0,
+                    promotedWeakSubjectCards: 0,
+                    newCardsUnlocked: 0,
+                    deliberateAccurateToday: 0,
+                    leechSurgeriesDone: 0,
+                    ordersSnapshot: null,
+                    ordersClearedFlags: { mastery: false, leech: false, sharpness: false }
+                };
+            }
+            const t = state.dailyTelemetry[dateKey];
+            if (!t.levelUps) t.levelUps = { '0->1': 0, '1->2': 0, '2->3': 0, '3->4': 0, '4->5': 0, '5->6': 0, net: 0 };
+            if (!t.paceBrackets) t.paceBrackets = { b1: { c: 0, w: 0 }, b2: { c: 0, w: 0 }, b3: { c: 0, w: 0 }, b4: { c: 0, w: 0 } };
+            if (!t.ordersClearedFlags) t.ordersClearedFlags = { mastery: false, leech: false, sharpness: false };
+            if (typeof t.deliberateAccurateToday !== 'number') t.deliberateAccurateToday = 0;
+            return t;
+        }
+
+        function isActiveLeechCard(t) {
+            return Boolean(t && !t.isErroneous && !t.isNew && (t.incorrect || 0) >= 2 && (t.level || 0) <= 2);
+        }
+
+        function isLockedForFeb2027(t) {
+            return Boolean(t && !t.isErroneous && !t.isNew && ((t.level || 0) >= 6 || (t.nextReviewDate || 0) > MELE_POST_EXAM_MS));
+        }
+
+        function getCardExamDayWeight(t) {
+            if (!t || t.isNew) return 0;
+            if ((t.level || 0) >= 6 || (t.nextReviewDate || 0) > MELE_POST_EXAM_MS) return 0.98;
+            const lv = Math.min(Math.max(t.level || 1, 1), 6);
+            const map = { 1: 0.30, 2: 0.50, 3: 0.72, 4: 0.86, 5: 0.94, 6: 0.98 };
+            return map[lv] || 0.30;
+        }
+
+        function mapFolderToPrcSubject(folderId) {
+            const fullPath = getFolderFullPath(folderId, state.folders || []).toLowerCase();
+            if (/\bpipe\b|power\s*plant|thermo|fluid|heat\s*transfer|refrig|aircon|hvac|boiler|turbine|compressor|steam|combustion/.test(fullPath)) return 'PIPE';
+            if (/\bmdsp\b|machine\s*design|shop\s*practice|gear|shaft|bearing|belt|weld|rivet|spring|flywheel|clutch|brake|metallurgy/.test(fullPath)) return 'MDSP';
+            if (/\bmesl\b|math|econ|mechanics|strength|materials|statics|dynamics|engineering\s*science|\bes\b/.test(fullPath)) return 'MESL';
+            return 'UNMAPPED';
+        }
+
+        function getTopnotcherScopedTerms(termsList = state.terms, scope = state.topnotcherScope) {
+            const allNonErr = (termsList || []).filter(t => !t.isErroneous);
+            if (scope === 'prime') {
+                const primeFolderIds = new Set(
+                    (state.folders || [])
+                        .filter(f => /\bprime\b/i.test(getFolderFullPath(f.id, state.folders)))
+                        .map(f => f.id)
+                );
+                if (primeFolderIds.size > 0) {
+                    const primeTerms = allNonErr.filter(t => primeFolderIds.has(t.folderId));
+                    if (primeTerms.length > 0) return { terms: primeTerms, scopeFallback: false };
+                }
+                return { terms: allNonErr, scopeFallback: true };
+            }
+            return { terms: allNonErr, scopeFallback: false };
+        }
+
+        // Compute actual Card Addition Rate (cards/day) from history['all'] + live dailyTelemetry.addedToday
+        function computeCardIntakeRate() {
+            const histAll = (state.history && state.history.all) ? state.history.all : {};
+            const dates = Object.keys(histAll).sort().slice(-15);
+            const todayKey = getTodayDateKey();
+            const todayTel = ensureDailyTelemetry(todayKey);
+            const addedTodayLive = Number(todayTel.addedToday) || 0;
+
+            const dailyAdds = [];
+            for (let i = 1; i < dates.length; i++) {
+                const prevTot = Number(histAll[dates[i - 1]]?.total) || 0;
+                const currTot = Number(histAll[dates[i]]?.total) || 0;
+                const dtPrev = new Date(dates[i - 1] + 'T00:00:00');
+                const dtCurr = new Date(dates[i] + 'T00:00:00');
+                const dayGap = Math.max(1, Math.round((dtCurr - dtPrev) / MS_PER_DAY));
+                const rawInc = Math.max(0, currTot - prevTot);
+                // Distribute multi-day gaps evenly; damp single-day bulk imports (>60) for steady ongoing rate
+                const perDayRaw = rawInc / dayGap;
+                const perDayDamped = Math.min(60, perDayRaw);
+                for (let g = 0; g < Math.min(dayGap, 7); g++) {
+                    dailyAdds.push({ date: dates[i], raw: perDayRaw, damped: perDayDamped });
+                }
+            }
+            if (addedTodayLive > 0 && (dates.length === 0 || dates[dates.length - 1] !== todayKey)) {
+                dailyAdds.push({ date: todayKey, raw: addedTodayLive, damped: Math.min(60, addedTodayLive) });
+            }
+
+            let raw14dRate = 0;
+            let steadyAutoRate = 0;
+            let addedLast7d = 0;
+            if (dailyAdds.length > 0) {
+                const last14 = dailyAdds.slice(-14);
+                raw14dRate = last14.reduce((a, x) => a + x.raw, 0) / last14.length;
+                const recent7 = last14.slice(-7);
+                const older7 = last14.slice(0, Math.max(0, last14.length - 7));
+                const avgRecent = recent7.reduce((a, x) => a + x.damped, 0) / recent7.length;
+                const avgOlder = older7.length > 0 ? older7.reduce((a, x) => a + x.damped, 0) / older7.length : avgRecent;
+                steadyAutoRate = Math.round((avgRecent * 0.65 + avgOlder * 0.35) * 10) / 10;
+                addedLast7d = Math.round(recent7.reduce((a, x) => a + x.raw, 0));
+            } else {
+                steadyAutoRate = addedTodayLive;
+                raw14dRate = addedTodayLive;
+                addedLast7d = addedTodayLive;
+            }
+
+            const isCustom = state.intakeRateMode === 'custom';
+            const effectiveRate = isCustom
+                ? Math.max(0, Math.min(200, Number(state.customIntakeRate) || 0))
+                : steadyAutoRate;
+
+            return {
+                mode: isCustom ? 'custom' : 'auto',
+                effectiveRate: Math.round(effectiveRate * 10) / 10,
+                steadyAutoRate: Math.round(steadyAutoRate * 10) / 10,
+                raw14dRate: Math.round(raw14dRate * 10) / 10,
+                addedLast7d,
+                addedTodayLive
+            };
+        }
+
+        // Fast deterministic projection of days & review workload to reach L5 mastery (INCLUDING incoming card addition rate!)
+        function estimateWorkloadToL5(cards, dailyQuota, projectedAddedCards = 0) {
+            const quota = Math.max(15, Number(dailyQuota) || 60);
+            const remainingReviewsCurrent = (cards || []).reduce((acc, t) => {
+                if (t.isNew) return acc + 6.4;
+                const lv = t.level || 1;
+                if (lv >= 5 || (t.nextReviewDate || 0) > MELE_POST_EXAM_MS) return acc;
+                const expMap = { 1: 5.0, 2: 3.7, 3: 2.3, 4: 1.15 };
+                return acc + (expMap[lv] || 0);
+            }, 0);
+            const futureReviewsWorkload = Math.max(0, Number(projectedAddedCards) || 0) * 6.4;
+            const totalWorkUnits = remainingReviewsCurrent + futureReviewsWorkload;
+            if (totalWorkUnits <= 0.1) {
+                return { days: 1, remainingReviewsCurrent: 0, futureReviewsWorkload: 0, totalWorkUnits: 0 };
+            }
+            // Account for minimum SRS spacing floor (L0->L5 takes at least 1+3+7+15 = 26d if any L0-L1 or future cards exist)
+            const hasLow = projectedAddedCards > 0 || (cards || []).some(t => t.isNew || (t.level || 0) <= 1);
+            const hasMid = (cards || []).some(t => !t.isNew && t.level === 2);
+            const minSpanFloor = hasLow ? 26 : hasMid ? 22 : 12;
+            const workloadDays = Math.ceil(totalWorkUnits / quota);
+            return {
+                days: Math.max(minSpanFloor, workloadDays),
+                remainingReviewsCurrent: Math.round(remainingReviewsCurrent),
+                futureReviewsWorkload: Math.round(futureReviewsWorkload),
+                totalWorkUnits: Math.round(totalWorkUnits)
+            };
+        }
+
+        function estimateDaysToL5Deterministic(cards, dailyQuota, projectedAddedCards = 0) {
+            return estimateWorkloadToL5(cards, dailyQuota, projectedAddedCards).days;
+        }
+
+        function compute14DayRollingSharpness(scopedTerms, activityLogObj = state.activityLog) {
+            const log = activityLogObj || {};
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - 13);
+            const cutoffKey = cutoff.toLocaleDateString('en-CA');
+            const recentKeys = Object.keys(log).filter(k => k >= cutoffKey).sort().slice(-14);
+
+            let c = 0, w = 0;
+            recentKeys.forEach(dKey => {
+                const hrs = log[dKey] || {};
+                Object.keys(hrs).forEach(hKey => {
+                    c += Number(hrs[hKey]?.c) || 0;
+                    w += Number(hrs[hKey]?.w) || 0;
+                });
+            });
+            if (c + w >= 5) {
+                return { pct: (c / (c + w)) * 100, c, w, daysUsed: recentKeys.length, isFallback: false };
+            }
+            // Fallback to scoped card history if < 5 live logged answers so Day 1 is realistic
+            const tc = (scopedTerms || []).reduce((a, t) => a + (t.correct || 0), 0);
+            const tw = (scopedTerms || []).reduce((a, t) => a + (t.incorrect || 0), 0);
+            const pct = (tc + tw) > 0 ? (tc / (tc + tw)) * 100 : 0;
+            return { pct, c: tc, w: tw, daysUsed: recentKeys.length, isFallback: true };
+        }
+
+        function get7DayMedianDailyCards() {
+            const log = state.activityLog || {};
+            const counts = [];
+            for (let i = 1; i <= 7; i++) {
+                const d = new Date();
+                d.setDate(d.getDate() - i);
+                const key = d.toLocaleDateString('en-CA');
+                const hrs = log[key] || {};
+                let sum = 0;
+                Object.keys(hrs).forEach(h => { sum += (Number(hrs[h]?.c) || 0) + (Number(hrs[h]?.w) || 0); });
+                if (sum > 0) counts.push(sum);
+            }
+            if (counts.length === 0) return getTodayAdaptiveTarget();
+            counts.sort((a, b) => a - b);
+            const mid = Math.floor(counts.length / 2);
+            return counts.length % 2 === 1 ? counts[mid] : Math.round((counts[mid - 1] + counts[mid]) / 2);
+        }
+
+        function computeTopnotcherIndex(termsOverride = null, scopeOverride = null, activityOverride = null) {
+            const scope = scopeOverride || state.topnotcherScope || 'full';
+            const { terms: scopedTerms, scopeFallback } = getTopnotcherScopedTerms(termsOverride || state.terms, scope);
+            const total = scopedTerms.length;
+
+            // --- Pillar 1 (45%): Exam-Day Mastery (PRC-weighted 35% PIPE, 35% MDSP, 30% MESL; fallback unweighted) ---
+            const PRC_WEIGHTS = { PIPE: 0.35, MDSP: 0.35, MESL: 0.30 };
+            const subjectBuckets = { PIPE: [], MDSP: [], MESL: [], UNMAPPED: [] };
+            scopedTerms.forEach(t => {
+                const subj = mapFolderToPrcSubject(t.folderId);
+                subjectBuckets[subj].push(t);
+            });
+
+            const subjectStats = {};
+            ['PIPE', 'MDSP', 'MESL'].forEach(subj => {
+                const arr = subjectBuckets[subj];
+                if (arr.length > 0) {
+                    const avgScore = (arr.reduce((a, t) => a + getCardExamDayWeight(t), 0) / arr.length) * 100;
+                    const l12Count = arr.filter(t => !t.isNew && (t.level || 0) <= 2).length;
+                    subjectStats[subj] = { count: arr.length, pct: avgScore, weight: PRC_WEIGHTS[subj], l12Count };
+                }
+            });
+
+            const mappedSubjects = Object.keys(subjectStats);
+            const isPrcWeighted = mappedSubjects.length >= 2;
+            let masteryPct = 0;
+            if (total > 0) {
+                if (isPrcWeighted) {
+                    let wSum = 0, wTotal = 0;
+                    mappedSubjects.forEach(subj => {
+                        wSum += subjectStats[subj].pct * subjectStats[subj].weight;
+                        wTotal += subjectStats[subj].weight;
+                    });
+                    masteryPct = wTotal > 0 ? (wSum / wTotal) : 0;
+                } else {
+                    masteryPct = (scopedTerms.reduce((a, t) => a + getCardExamDayWeight(t), 0) / total) * 100;
+                }
+            }
+
+            // Find weakest subject or weakest folder for Biggest Drag & Daily Orders
+            let weakestTarget = { name: 'All Sets', type: 'all', pct: masteryPct, folderIds: null, l12Count: scopedTerms.filter(t => !t.isNew && (t.level || 0) <= 2).length };
+            if (mappedSubjects.length >= 2) {
+                const worstSubj = mappedSubjects.sort((a, b) => subjectStats[a].pct - subjectStats[b].pct)[0];
+                const subjFolderIds = (state.folders || []).filter(f => mapFolderToPrcSubject(f.id) === worstSubj).map(f => f.id);
+                weakestTarget = { name: worstSubj, type: 'subject', pct: subjectStats[worstSubj].pct, folderIds: subjFolderIds, l12Count: subjectStats[worstSubj].l12Count };
+            } else {
+                const byFolder = {};
+                scopedTerms.forEach(t => {
+                    if (!byFolder[t.folderId]) byFolder[t.folderId] = [];
+                    byFolder[t.folderId].push(t);
+                });
+                const folderEntries = Object.keys(byFolder).filter(fid => byFolder[fid].length >= 5).map(fid => {
+                    const arr = byFolder[fid];
+                    const avg = (arr.reduce((a, t) => a + getCardExamDayWeight(t), 0) / arr.length) * 100;
+                    const fName = state.folders.find(f => f.id === fid)?.name || 'Deck';
+                    return { name: fName, type: 'folder', pct: avg, folderIds: [fid], l12Count: arr.filter(t => !t.isNew && (t.level || 0) <= 2).length };
+                }).sort((a, b) => a.pct - b.pct);
+                if (folderEntries.length > 0) weakestTarget = folderEntries[0];
+            }
+
+            // --- Pillar 2 (25%): 14-Day Rolling Sharpness ---
+            const sharpnessObj = compute14DayRollingSharpness(scopedTerms, activityOverride || state.activityLog);
+            const sharpnessPct = sharpnessObj.pct;
+
+            // --- Pillar 3 (15%): Leech Control ---
+            const reviewedCards = scopedTerms.filter(t => !t.isNew).length;
+            const activeLeechesList = scopedTerms.filter(isActiveLeechCard);
+            const activeLeeches = activeLeechesList.length;
+            const leechControlPct = reviewedCards > 0
+                ? Math.max(0, 100 - (activeLeeches / reviewedCards) * 200)
+                : 100;
+
+            // --- Pillar 4 (15%): Feb 2027 Trajectory (Factors in Card Addition Rate!) ---
+            const todayStart = getTodayStart();
+            const daysLeftToExam = Math.max(1, Math.ceil((MELE_EXAM_DATE_MS - todayStart) / MS_PER_DAY));
+            const weeklyAvgQuota = Math.round(Object.values(state.weeklyTargets || {}).reduce((a, v) => a + (Number(v) || 80), 0) / 7) || state.forecastQuota || 60;
+            const effectiveQuota = Math.max(25, Math.round((weeklyAvgQuota + get7DayMedianDailyCards()) / 2));
+
+            // Factor card intake rate up until the final 21-day exam lock-in freeze before Feb 15, 2027
+            const intakeInfo = computeCardIntakeRate();
+            const intakeWindowDays = Math.max(0, daysLeftToExam - 21);
+            const scopeShare = (state.terms && state.terms.length > 0) ? Math.min(1, total / Math.max(1, state.terms.filter(t => !t.isErroneous).length)) : 1;
+            const scopedIntakeRate = Math.round(intakeInfo.effectiveRate * scopeShare * 10) / 10;
+            const projectedFutureCards = Math.round(scopedIntakeRate * intakeWindowDays);
+            const projectedExamBankSize = total + projectedFutureCards;
+
+            const workloadInfo = estimateWorkloadToL5(scopedTerms, effectiveQuota, projectedFutureCards);
+            const projectedDaysToL5 = workloadInfo.days;
+            const safeRunwayDays = Math.max(7, daysLeftToExam - 7); // Finish mastery 1 week before exam day
+            const requiredDailyReviews = Math.max(15, Math.ceil(workloadInfo.totalWorkUnits / safeRunwayDays));
+            const paceMarginPerDay = effectiveQuota - requiredDailyReviews;
+
+            const trajectoryPct = total > 0
+                ? Math.min(100, (daysLeftToExam / Math.max(1, projectedDaysToL5)) * 100)
+                : 0;
+
+            // --- Composite Score (0–100%) ---
+            const score = (0.45 * masteryPct) + (0.25 * sharpnessPct) + (0.15 * leechControlPct) + (0.15 * trajectoryPct);
+
+            // --- Tier ---
+            let tier = { label: 'Building Base', color: 'text-slate-700', bg: 'bg-slate-100 border-slate-200', icon: '🧱' };
+            if (score >= 92) tier = { label: 'Top 1–3 Contender', color: 'text-amber-700', bg: 'bg-amber-100 border-amber-300', icon: '👑' };
+            else if (score >= 88) tier = { label: 'Top 10 Territory', color: 'text-emerald-700', bg: 'bg-emerald-100 border-emerald-300', icon: '🏆' };
+            else if (score >= 80) tier = { label: 'Strong Contender', color: 'text-blue-700', bg: 'bg-blue-100 border-blue-300', icon: '🔥' };
+            else if (score >= 70) tier = { label: 'Passer Zone', color: 'text-teal-700', bg: 'bg-teal-100 border-teal-300', icon: '✅' };
+
+            // --- 3 Hard Gates ---
+            const coveragePct = total > 0 ? (reviewedCards / total) * 100 : 0;
+            const gate1Pass = isPrcWeighted
+                ? mappedSubjects.every(s => subjectStats[s].pct >= 80)
+                : masteryPct >= 80;
+            const gate2Pass = coveragePct >= 85;
+            const gate3Pass = sharpnessPct >= 85;
+            const gatesPassedCount = [gate1Pass, gate2Pass, gate3Pass].filter(Boolean).length;
+
+            // --- Projected Feb 2027 Standing (Incorporating projected future card bank!) ---
+            const progressRatio = Math.min(1, daysLeftToExam / Math.max(1, projectedDaysToL5));
+            // Effective mastery diluted if incoming cards exceed daily burn capacity
+            const currentMasteryOnFutureBank = projectedExamBankSize > 0 ? (masteryPct * (total / projectedExamBankSize)) : masteryPct;
+            const projMastery = Math.min(97, currentMasteryOnFutureBank + (96.5 - currentMasteryOnFutureBank) * progressRatio * 0.90);
+            const projLeech = Math.min(98, leechControlPct + (96 - leechControlPct) * progressRatio * 0.78);
+            const projScore = (0.45 * projMastery) + (0.25 * Math.max(sharpnessPct, 78)) + (0.15 * projLeech) + (0.15 * trajectoryPct);
+            let projStandingLabel = 'Building Base';
+            if (projScore >= 92) projStandingLabel = '👑 Top 1–3 Contender';
+            else if (projScore >= 88) projStandingLabel = '🏆 Top 10 Territory';
+            else if (projScore >= 80) projStandingLabel = '🔥 Strong Contender';
+            else if (projScore >= 70) projStandingLabel = '✅ Passer Zone';
+
+            // --- Biggest Drag 1-Line Mission Callout ---
+            const drags = [
+                {
+                    key: 'mastery',
+                    loss: (100 - masteryPct) * 0.45,
+                    msg: `Exam-Day Mastery (${masteryPct.toFixed(1)}%) — "${weakestTarget.name}" is lagging at ${weakestTarget.pct.toFixed(1)}%. Click Daily Order #1 below to promote its L1–L2 cards!`
+                },
+                {
+                    key: 'sharpness',
+                    loss: (100 - sharpnessPct) * 0.25,
+                    msg: `14-Day Sharpness (${sharpnessPct.toFixed(1)}%) — Slow down past 4s/card and target 85%+ accuracy to clear Gate 3.`
+                },
+                {
+                    key: 'leech',
+                    loss: (100 - leechControlPct) * 0.15,
+                    msg: `Leech Control (${activeLeeches} active leeches) — Click Daily Order #2 below to tame repeat-miss cards to Level 3.`
+                },
+                {
+                    key: 'trajectory',
+                    loss: (100 - trajectoryPct) * 0.15,
+                    msg: `Feb 2027 Trajectory (${projectedDaysToL5}d vs ${daysLeftToExam}d left, incl. +${scopedIntakeRate}/d card intake) — Need ~${requiredDailyReviews} reviews/day vs your ${effectiveQuota}/day pace!`
+                }
+            ].sort((a, b) => b.loss - a.loss);
+            const biggestDrag = drags[0];
+
+            // Locked-In for Feb 2027 metrics
+            const lockedCount = scopedTerms.filter(isLockedForFeb2027).length;
+            const lockedPct = total > 0 ? Math.round((lockedCount / total) * 100) : 0;
+
+            return {
+                scope,
+                scopeFallback,
+                score,
+                tier,
+                total,
+                reviewedCards,
+                coveragePct,
+                lockedCount,
+                lockedPct,
+                activeLeeches,
+                activeLeechesList,
+                daysLeftToExam,
+                safeRunwayDays,
+                projectedDaysToL5,
+                effectiveQuota,
+                requiredDailyReviews,
+                paceMarginPerDay,
+                intakeInfo: {
+                    ...intakeInfo,
+                    scopedIntakeRate,
+                    intakeWindowDays,
+                    projectedFutureCards,
+                    projectedExamBankSize
+                },
+                workloadInfo,
+                isPrcWeighted,
+                subjectStats,
+                weakestTarget,
+                pillars: {
+                    mastery: masteryPct,
+                    sharpness: sharpnessPct,
+                    sharpnessObj,
+                    leech: leechControlPct,
+                    trajectory: trajectoryPct
+                },
+                gates: {
+                    subjects80: { pass: gate1Pass, label: isPrcWeighted ? 'All PRC Subjects ≥80%' : 'Mastery ≥80%' },
+                    coverage85: { pass: gate2Pass, label: `Scope Coverage ≥85% (${coveragePct.toFixed(0)}%)` },
+                    sharpness85: { pass: gate3Pass, label: `14d Sharpness ≥85% (${sharpnessPct.toFixed(0)}%)` },
+                    passedCount: gatesPassedCount
+                },
+                projectedFeb2027: { score: projScore, label: projStandingLabel },
+                biggestDrag
+            };
+        }
+
+        function formatTop1Score(val, decimals = 2) {
+            const num = Number(val) || 0;
+            return state.topnotcherDisplayUnit === 'rp'
+                ? `${num.toFixed(decimals)} RP`
+                : `${num.toFixed(decimals)}%`;
+        }
+
+        function formatTop1Delta(delta) {
+            const sign = delta >= 0 ? '+' : '';
+            const suffix = state.topnotcherDisplayUnit === 'rp' ? ' RP' : '%';
+            return `${sign}${delta.toFixed(3)}${suffix}`;
+        }
+
+        // Exact Counterfactual Top 1 Impact Simulator for a single card (Instant <1ms!)
+        function simulateCardTop1Stakes(card) {
+            if (!card) return { gainCorrect: 0, gainPerfect: 0, lossWrong: 0, baseScore: 0 };
+            const base = computeTopnotcherIndex();
+            const todayStart = getTodayStart();
+            const isIntake = state.sessionData && state.sessionData.type === 'intake';
+            const todayKey = getTodayDateKey();
+            const hrKey = String(new Date().getHours());
+
+            const simOutcome = (answerType) => {
+                const clonedTerms = state.terms.map(t => {
+                    if (t.id !== card.id) return t;
+                    const copy = { ...t };
+                    if (isIntake) {
+                        if (answerType === 'perfect') {
+                            copy.isNew = false; copy.level = 4; copy.nextReviewDate = todayStart + INTERVALS[4] * MS_PER_DAY; copy.correct = (copy.correct || 0) + 1;
+                        } else if (answerType === 'correct') {
+                            copy.isNew = false; copy.level = 1; copy.nextReviewDate = todayStart + MS_PER_DAY; copy.correct = (copy.correct || 0) + 1;
+                        } else {
+                            copy.incorrect = (copy.incorrect || 0) + 1;
+                        }
+                    } else {
+                        if (answerType === 'perfect') {
+                            const nl = Math.min((copy.level || 1) + 3, 6);
+                            copy.isNew = false; copy.level = nl; copy.nextReviewDate = todayStart + INTERVALS[nl] * MS_PER_DAY; copy.correct = (copy.correct || 0) + 1;
+                        } else if (answerType === 'correct') {
+                            const nl = Math.min((copy.level || 1) + 1, 6);
+                            copy.isNew = false; copy.level = nl; copy.nextReviewDate = todayStart + INTERVALS[nl] * MS_PER_DAY; copy.correct = (copy.correct || 0) + 1;
+                        } else {
+                            copy.isNew = false; copy.level = 1; copy.nextReviewDate = todayStart + INTERVALS[1] * MS_PER_DAY; copy.incorrect = (copy.incorrect || 0) + 1;
+                        }
+                    }
+                    return copy;
+                });
+
+                // Simulate 1 answer in activityLog too
+                const simLog = { ...(state.activityLog || {}) };
+                const dayCopy = { ...(simLog[todayKey] || {}) };
+                const hrCopy = { ...(dayCopy[hrKey] || { c: 0, w: 0, s: 0 }) };
+                if (answerType === 'wrong') hrCopy.w += 1;
+                else hrCopy.c += 1;
+                dayCopy[hrKey] = hrCopy;
+                simLog[todayKey] = dayCopy;
+
+                return computeTopnotcherIndex(clonedTerms, state.topnotcherScope, simLog).score - base.score;
+            };
+
+            return {
+                baseScore: base.score,
+                gainCorrect: simOutcome('correct'),
+                gainPerfect: simOutcome('perfect'),
+                lossWrong: simOutcome('wrong')
+            };
+        }
+
+        // Feature 2: Trigger Game-Style Visual Animation + Safe Haptics on Answer
+        function triggerTop1FeedbackFX(fxType, deltaVal, extraLabel = '') {
+            lastFeedbackAnim = { type: fxType, ts: Date.now() };
+            // Floating delta pill
+            const floater = document.createElement('div');
+            let bgClass = 'bg-emerald-600 text-white shadow-emerald-300/60';
+            let prefix = '▲ ';
+            if (fxType === 'gold') {
+                bgClass = 'bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-500 text-amber-950 ring-2 ring-amber-200 shadow-amber-300/70';
+                prefix = '⚡ CRIT ';
+                safeHaptic([35, 45, 70]);
+            } else if (fxType === 'emerald') {
+                safeHaptic(22);
+            } else if (fxType === 'crit_miss') {
+                bgClass = 'bg-rose-700 text-white ring-2 ring-rose-300 shadow-rose-400/70';
+                prefix = '💥 ';
+                safeHaptic([60, 40, 60]);
+                // Brief crimson edge vignette pulse
+                const vig = document.createElement('div');
+                vig.className = 'top1-vignette-crimson';
+                document.body.appendChild(vig);
+                setTimeout(() => vig.remove(), 700);
+            } else if (fxType === 'rushed') {
+                bgClass = 'bg-amber-500 text-white ring-2 ring-amber-200 shadow-amber-300/60';
+                prefix = '⚡ RUSHED ';
+                safeHaptic([45, 35]);
+            } else {
+                bgClass = 'bg-rose-500 text-white shadow-rose-300/60';
+                prefix = '▼ ';
+                safeHaptic(35);
+            }
+            floater.className = `top1-float-delta px-4 py-1.5 rounded-full font-mono font-black text-sm shadow-xl ${bgClass}`;
+            floater.textContent = `${prefix}${formatTop1Delta(deltaVal)}${extraLabel ? ' • ' + extraLabel : ''}`;
+            document.body.appendChild(floater);
+            setTimeout(() => floater.remove(), 1200);
+        }
+
+        // Feature 3: Smart Queue Builder (Warm-Up 3 Normal Cards + Interleaved Leeches capped at 5 per 25-card window)
+        function buildSmartInterleavedQueue(cards) {
+            const normals = cards.filter(c => !isActiveLeechCard(c));
+            const leeches = cards.filter(c => isActiveLeechCard(c));
+            shuffleArray(normals);
+            shuffleArray(leeches);
+            // Prioritize L1 & L2 weak normal cards earlier while keeping variety
+            normals.sort((a, b) => ((a.level <= 2 ? 1 : 2) - (b.level <= 2 ? 1 : 2)));
+            leeches.sort((a, b) => (b.incorrect || 0) - (a.incorrect || 0));
+
+            if (leeches.length === 0 || normals.length === 0) return [...normals, ...leeches];
+
+            const result = [];
+            let nIdx = 0;
+            let lIdx = 0;
+
+            // Warm-Up: First 3 cards are non-leech cards for momentum
+            for (let i = 0; i < 3 && nIdx < normals.length; i++) {
+                result.push(normals[nIdx++]);
+            }
+
+            // From Card 4 onward: inject 1 Active Leech every 3–4 normal cards (max 5 leeches per 25-card window)
+            let windowSize = result.length;
+            let leechesInWindow = 0;
+            let normalsSinceLeech = 0;
+
+            while (nIdx < normals.length || lIdx < leeches.length) {
+                if (windowSize >= 25) {
+                    windowSize = 0;
+                    leechesInWindow = 0;
+                }
+                const spacing = (leechesInWindow % 2 === 0) ? 3 : 4;
+                const canInjectLeech = lIdx < leeches.length && leechesInWindow < 5 && (normalsSinceLeech >= spacing || nIdx >= normals.length);
+
+                if (canInjectLeech) {
+                    result.push(leeches[lIdx++]);
+                    leechesInWindow++;
+                    normalsSinceLeech = 0;
+                    windowSize++;
+                } else if (nIdx < normals.length) {
+                    result.push(normals[nIdx++]);
+                    normalsSinceLeech++;
+                    windowSize++;
+                } else {
+                    result.push(leeches[lIdx++]);
+                    windowSize++;
+                }
+            }
+            return result;
+        }
+
+        // Feature 11: Practical "Topnotcher Daily Orders" Generator & Auto-Throttle (Zero Extra Firestore Writes!)
+        function evaluateDailyOrderThrottle() {
+            const todayKey = getTodayDateKey();
+            if (!state.orderThrottle) {
+                state.orderThrottle = { masteryScale: 1.0, leechScale: 1.0, sharpnessScale: 1.0, consecutiveAllClear: 0, missedStreak: { mastery: 0, leech: 0, sharpness: 0 }, lastEvaluatedDate: null };
+            }
+            if (state.orderThrottle.lastEvaluatedDate === todayKey) return;
+
+            const yKey = getYesterdayDateKey();
+            const yTel = state.dailyTelemetry && state.dailyTelemetry[yKey];
+            if (yTel && yTel.ordersSnapshot && Array.isArray(yTel.ordersSnapshot.orders)) {
+                const flags = yTel.ordersClearedFlags || {};
+                const cats = ['mastery', 'leech', 'sharpness'];
+                let clearedCount = 0;
+                cats.forEach(cat => {
+                    if (flags[cat]) {
+                        clearedCount++;
+                        state.orderThrottle.missedStreak[cat] = 0;
+                    } else {
+                        state.orderThrottle.missedStreak[cat] = (state.orderThrottle.missedStreak[cat] || 0) + 1;
+                        if (state.orderThrottle.missedStreak[cat] >= 2) {
+                            // Auto-throttle down by 15% if missed 2 days in a row
+                            const scaleKey = cat + 'Scale';
+                            state.orderThrottle[scaleKey] = Math.max(0.50, Math.round((state.orderThrottle[scaleKey] || 1) * 0.85 * 100) / 100);
+                            state.orderThrottle.missedStreak[cat] = 0;
+                        }
+                    }
+                });
+                if (clearedCount === 3) {
+                    state.orderThrottle.consecutiveAllClear = (state.orderThrottle.consecutiveAllClear || 0) + 1;
+                    if (state.orderThrottle.consecutiveAllClear >= 3) {
+                        // Gentle +10% scale-up after 3 consecutive 3/3 days
+                        ['masteryScale', 'leechScale', 'sharpnessScale'].forEach(sk => {
+                            state.orderThrottle[sk] = Math.min(1.50, Math.round((state.orderThrottle[sk] || 1) * 1.10 * 100) / 100);
+                        });
+                        state.orderThrottle.consecutiveAllClear = 0;
+                    }
+                } else {
+                    state.orderThrottle.consecutiveAllClear = 0;
+                }
+            }
+            state.orderThrottle.lastEvaluatedDate = todayKey;
+            saveLocalTelemetryOnly();
+        }
+
+        // Compact, fast right-edge pop-up whenever a card advances (or overachieves!) any Daily Objective
+        function triggerObjectiveSidePopup(orderObj, delta, prevProg, newProg) {
+            if (!orderObj || delta <= 0) return;
+            try {
+                let stack = document.getElementById('objective-side-toast-stack');
+                if (!stack) {
+                    stack = document.createElement('div');
+                    stack.id = 'objective-side-toast-stack';
+                    stack.className = 'fixed right-2.5 sm:right-4 top-20 z-[75] pointer-events-none flex flex-col gap-1.5 items-end max-w-[240px]';
+                    document.body.appendChild(stack);
+                }
+
+                const target = Math.max(1, orderObj.target || 1);
+                const justCleared = prevProg < target && newProg >= target;
+                const isOverdrive = prevProg >= target && newProg > target;
+                const bonus = Math.max(0, newProg - target);
+                const isBeast = newProg >= target * 2;
+                const isMilestone = isOverdrive && (newProg === target * 2 || (bonus > 0 && bonus % 5 === 0));
+                const shortCat = orderObj.cat === 'mastery'
+                    ? 'Mastery'
+                    : orderObj.cat === 'leech'
+                        ? 'Leech'
+                        : (orderObj.mode === 'coverage' ? 'Coverage' : 'Sharpness');
+
+                const pill = document.createElement('div');
+                const fillPct = Math.min(100, Math.round((newProg / target) * 100));
+
+                if (justCleared) {
+                    pill.className = 'obj-side-popup-long bg-gradient-to-r from-emerald-600 to-teal-500 text-white px-3 py-2 rounded-2xl shadow-xl ring-2 ring-emerald-200/80 text-xs font-black flex items-center gap-2';
+                    pill.innerHTML = `
+                        <span class="text-sm leading-none">✅</span>
+                        <div class="leading-tight">
+                            <div class="flex items-center gap-1.5">
+                                <span class="uppercase tracking-wider text-[10px]">${shortCat} Cleared!</span>
+                                <span class="font-mono bg-white/20 px-1.5 py-0.5 rounded text-[10px]">${newProg}/${target}</span>
+                            </div>
+                            <div class="text-[10px] text-emerald-100 font-bold">+${(orderObj.estGain || 0).toFixed(2)}% Top 1 • Push for Bonus! 🔥</div>
+                        </div>
+                    `;
+                    safeHaptic([30, 35, 60]);
+                } else if (isOverdrive) {
+                    pill.className = `${isMilestone ? 'obj-side-popup-long' : 'obj-side-popup'} bg-gradient-to-r from-amber-500 via-orange-500 to-amber-500 text-white px-3 py-1.5 rounded-2xl shadow-xl ring-2 ring-amber-200 text-xs font-black flex items-center gap-2`;
+                    pill.innerHTML = `
+                        <span class="text-sm leading-none">${isBeast ? '👑' : '🔥'}</span>
+                        <div class="leading-tight">
+                            <div class="flex items-center gap-1.5">
+                                <span class="text-[10px] uppercase tracking-wider">${isBeast ? '2× BEAST!' : `${shortCat} +${delta}`}</span>
+                                <span class="font-mono bg-black/20 px-1.5 py-0.5 rounded text-[10px]">${newProg}/${target}</span>
+                            </div>
+                            <div class="text-[10px] text-amber-100 font-extrabold">+${bonus} BONUS beyond quota!</div>
+                        </div>
+                    `;
+                    safeHaptic(isMilestone ? [30, 30, 50, 30, 60] : [20, 25]);
+                } else {
+                    pill.className = 'obj-side-popup bg-slate-900/95 text-white px-3 py-1.5 rounded-2xl shadow-lg border border-slate-700/80 text-xs font-bold flex flex-col gap-1 min-w-[155px]';
+                    pill.innerHTML = `
+                        <div class="flex items-center justify-between gap-2">
+                            <span class="flex items-center gap-1 text-[11px] font-black text-emerald-300"><span>🎯</span> ${shortCat} +${delta}</span>
+                            <span class="font-mono font-black text-[11px] text-white">${newProg}/${target}</span>
+                        </div>
+                        <div class="w-full h-1 bg-white/15 rounded-full overflow-hidden">
+                            <div class="h-full bg-emerald-400 rounded-full" style="width: ${fillPct}%"></div>
+                        </div>
+                    `;
+                }
+
+                stack.appendChild(pill);
+                // Keep stack tidy (max 3 visible pills)
+                while (stack.children.length > 3) stack.removeChild(stack.firstChild);
+                setTimeout(() => { try { pill.remove(); } catch (e) {} }, (justCleared || isMilestone) ? 2950 : 2200);
+            } catch (e) {}
+        }
+
+        // Returns the EXACT cards that advance a given Daily Objective when clicked!
+        function getObjectiveCandidateCards(cat, topData = null) {
+            const td = topData || computeTopnotcherIndex();
+            const todayStart = getTodayStart();
+            const scoped = getTopnotcherScopedTerms(state.terms, state.topnotcherScope).terms;
+            const tel = ensureDailyTelemetry();
+            const snap = tel.ordersSnapshot || {};
+            const ord = (snap.orders || []).find(o => o.cat === cat) || null;
+
+            if (cat === 'mastery') {
+                const wf = snap.weakestFolderIds || td.weakestTarget.folderIds;
+                const sortL12 = (arr) => arr.sort((a, b) => {
+                    const dueA = (a.nextReviewDate || 0) <= todayStart ? 0 : 1;
+                    const dueB = (b.nextReviewDate || 0) <= todayStart ? 0 : 1;
+                    if (dueA !== dueB) return dueA - dueB;
+                    if ((a.level || 1) !== (b.level || 1)) return (a.level || 1) - (b.level || 1);
+                    return (b.incorrect || 0) - (a.incorrect || 0);
+                });
+                const primary = sortL12(scoped.filter(t => !t.isNew && (t.level || 0) <= 2 && (!wf || wf.includes(t.folderId))));
+                const secondary = wf ? sortL12(scoped.filter(t => !t.isNew && (t.level || 0) <= 2 && !wf.includes(t.folderId))) : [];
+                const combined = [...primary, ...secondary];
+                const duePrimary = primary.filter(t => (t.nextReviewDate || 0) <= todayStart).length;
+                const subjName = snap.weakestName || td.weakestTarget.name;
+                return {
+                    cards: combined,
+                    sessionType: 'review',
+                    hint: primary.length > 0
+                        ? `${primary.length} L1–L2 cards in "${subjName}" (${duePrimary} due now) • Every Tama/Perfect = +1`
+                        : `${combined.length} L1–L2 cards left in scope • Every Tama/Perfect = +1`
+                };
+            }
+
+            if (cat === 'leech') {
+                const leeches = scoped.filter(isActiveLeechCard);
+                const l2Leeches = leeches.filter(t => (t.level || 1) === 2).sort((a, b) => (b.incorrect || 0) - (a.incorrect || 0));
+                const l1Leeches = leeches.filter(t => (t.level || 1) <= 1).sort((a, b) => (b.incorrect || 0) - (a.incorrect || 0));
+                const orderedLeeches = [...l2Leeches, ...l1Leeches];
+                if (orderedLeeches.length > 0) {
+                    return {
+                        cards: orderedLeeches,
+                        sessionType: 'leech_surgery',
+                        hint: `${l2Leeches.length} L2 leech${l2Leeches.length === 1 ? '' : 'es'} (1 Tama = Tamed!) • ${l1Leeches.length} L1 leech${l1Leeches.length === 1 ? '' : 'es'} (re-queues until L3!)`
+                    };
+                }
+                // Fallback when 0 active leeches exist: play steady review cards keeping 0 new leeches
+                const fallbackReview = scoped
+                    .filter(t => !t.isNew)
+                    .sort((a, b) => ((a.nextReviewDate || 0) <= todayStart ? 0 : 1) - ((b.nextReviewDate || 0) <= todayStart ? 0 : 1) || (a.level || 1) - (b.level || 1));
+                return {
+                    cards: fallbackReview,
+                    sessionType: 'review',
+                    hint: `0 Active Leeches! Play ${Math.min(15, fallbackReview.length)} review cards cleanly to keep Leech Control at 100%`
+                };
+            }
+
+            // Order #3: Sharpness (Coverage New Unlock OR Deliberate Accurate Reviews >=4s)
+            if (ord && ord.mode === 'coverage') {
+                const wf = snap.weakestFolderIds || td.weakestTarget.folderIds;
+                const newWeak = scoped.filter(t => t.isNew && wf && wf.includes(t.folderId));
+                const newOther = scoped.filter(t => t.isNew && (!wf || !wf.includes(t.folderId)));
+                shuffleArray(newWeak);
+                shuffleArray(newOther);
+                const newPool = [...newWeak, ...newOther];
+                return {
+                    cards: newPool,
+                    sessionType: 'intake',
+                    hint: `${newPool.length} New cards ready (weakest subject prioritized) • Every graduated card = +1`
+                };
+            }
+
+            // Deliberate Sharpness Reviews (>=4s/card + accurate)
+            const dueRev = scoped.filter(t => !t.isNew && (t.nextReviewDate || 0) <= todayStart);
+            const futureRev = scoped.filter(t => !t.isNew && (t.nextReviewDate || 0) > todayStart).sort((a, b) => (a.level || 1) - (b.level || 1));
+            const smartDue = state.queueMode === 'smart' ? buildSmartInterleavedQueue(dueRev) : [...dueRev];
+            const pool = [...smartDue, ...futureRev];
+            return {
+                cards: pool,
+                sessionType: 'review',
+                hint: `${dueRev.length} due (${pool.length} total reviewable) • Take ≥4s & answer accurately = +1 each + Clean Block`
+            };
+        }
+
+        function getOrGenerateDailyOrders(topData = null) {
+            evaluateDailyOrderThrottle();
+            const td = topData || computeTopnotcherIndex();
+            const todayKey = getTodayDateKey();
+            const tel = ensureDailyTelemetry(todayKey);
+            const todayTarget = getTodayAdaptiveTarget();
+            const weeklyAvgQuota = Math.round(Object.values(state.weeklyTargets || {}).reduce((a, v) => a + (Number(v) || 80), 0) / 7) || 80;
+            const dayWeight = Math.max(0.6, Math.min(1.5, todayTarget / Math.max(20, weeklyAvgQuota)));
+            const median7d = get7DayMedianDailyCards();
+            const dailyCap = Math.min(260, Math.max(20, Math.round(median7d * 0.4 + todayTarget * 0.6)));
+            // Exact daily reviews mathematically needed today (factoring card addition rate!) to hit Topnotcher by Feb 15, 2027
+            const sureTopnotcherTodayQuota = Math.max(20, Math.round(td.requiredDailyReviews * dayWeight));
+            const intakeTag = `${state.intakeRateMode}_${td.intakeInfo.effectiveRate}`;
+
+            // Freeze today's order targets once generated for the active scope & intake rate so goals don't jitter mid-day
+            if (!tel.ordersSnapshot || tel.ordersSnapshot.scope !== td.scope || tel.ordersSnapshot.intakeTag !== intakeTag || tel.ordersSnapshot.version !== 2) {
+                const th = state.orderThrottle || { masteryScale: 1, leechScale: 1, sharpnessScale: 1 };
+                const totalCards = Math.max(1, td.total);
+                const effectivePaceBase = Math.max(dailyCap, Math.min(dailyCap * 1.45, sureTopnotcherTodayQuota));
+
+                // 1. Mastery / Weakest Subject Order — sized to clear L1–L2 backlog + incoming additions before Feb 2027
+                const rawMasteryTarget = Math.max(5, Math.min(40, Math.round(effectivePaceBase * 0.28 * (th.masteryScale || 1))));
+                const availL12Scope = getTopnotcherScopedTerms(state.terms, td.scope).terms.filter(t => !t.isNew && (t.level || 0) <= 2).length;
+                const availWeak = availL12Scope > 0 ? Math.min(rawMasteryTarget, Math.max(4, td.weakestTarget.l12Count || availL12Scope)) : rawMasteryTarget;
+                const estMasteryGain = Math.min(3.5, Math.max(0.06, (availWeak * 0.22 / totalCards) * 45));
+
+                // 2. Leech / Blind-Spot Order — sized to wipe out all active leeches well before Feb 2027 (capped 3–6/day)
+                const hasLeeches = td.activeLeeches > 0;
+                const leechPaceNeed = Math.ceil(td.activeLeeches / Math.max(5, Math.min(18, td.safeRunwayDays * 0.30)));
+                const leechTarget = hasLeeches
+                    ? Math.max(3, Math.min(6, Math.min(td.activeLeeches, Math.round(Math.max(3, leechPaceNeed) * (th.leechScale || 1)))))
+                    : 10;
+                const estLeechGain = hasLeeches
+                    ? Math.min(2.5, Math.max(0.08, ((leechTarget / Math.max(1, td.reviewedCards)) * 200 * 0.15) + (leechTarget * 0.22 / totalCards) * 45))
+                    : 0.14;
+
+                // 3. Sharpness / Coverage Order — unlocks New cards if Coverage <85% OR new cards piling up from intake rate; otherwise deliberate >=4s accurate reviews
+                const newAvail = Math.max(0, td.total - td.reviewedCards);
+                const needsCoverage = newAvail > 0 && (!td.gates.coverage85.pass || (td.intakeInfo.scopedIntakeRate >= 5 && newAvail >= 10));
+                let sharpOrder;
+                if (needsCoverage) {
+                    const reqNewPace = Math.ceil((newAvail / Math.max(7, td.safeRunwayDays - 21)) + td.intakeInfo.scopedIntakeRate * 0.75);
+                    const newTarget = Math.max(5, Math.min(35, Math.min(newAvail, Math.round(Math.max(reqNewPace, effectivePaceBase * 0.22) * (th.sharpnessScale || 1)))));
+                    const estCovGain = Math.min(2.5, Math.max(0.08, (newTarget * 0.30 / totalCards) * 45));
+                    sharpOrder = {
+                        cat: 'sharpness',
+                        mode: 'coverage',
+                        title: `Unlock ${newTarget} New cards (keeps Coverage & +${td.intakeInfo.scopedIntakeRate}/d intake on Feb 2027 pace)`,
+                        target: newTarget,
+                        estGain: Number(estCovGain.toFixed(2))
+                    };
+                } else {
+                    const delibTarget = Math.max(15, Math.min(45, Math.round(effectivePaceBase * 0.34 * (th.sharpnessScale || 1))));
+                    sharpOrder = {
+                        cat: 'sharpness',
+                        mode: 'deliberate',
+                        title: `Hit ${delibTarget} deliberate accurate reviews (≥4s/card • builds Clean Blocks)`,
+                        target: delibTarget,
+                        estGain: Number(Math.min(1.8, Math.max(0.16, delibTarget * 0.011)).toFixed(2))
+                    };
+                }
+
+                tel.ordersSnapshot = {
+                    version: 2,
+                    scope: td.scope,
+                    intakeTag,
+                    dailyCap,
+                    sureTopnotcherTodayQuota,
+                    weakestName: td.weakestTarget.name,
+                    weakestFolderIds: td.weakestTarget.folderIds,
+                    orders: [
+                        {
+                            cat: 'mastery',
+                            title: `Promote ${availWeak} L1–L2 cards in "${td.weakestTarget.name}"`,
+                            target: availWeak,
+                            estGain: Number(estMasteryGain.toFixed(2))
+                        },
+                        {
+                            cat: 'leech',
+                            title: hasLeeches
+                                ? `Tame ${leechTarget} Active Leech${leechTarget > 1 ? 'es' : ''} to Level 3`
+                                : `Answer 10 review cards cleanly (keep 0 new leeches)`,
+                            target: leechTarget,
+                            hasLeeches,
+                            estGain: Number(estLeechGain.toFixed(2))
+                        },
+                        sharpOrder
+                    ]
+                };
+                saveLocalTelemetryOnly();
+            }
+
+            // Compute live uncapped progress (for Overdrive / Bonus tracking!) for each of the 3 frozen orders
+            const snap = tel.ordersSnapshot;
+            const currentHour = new Date().getHours();
+            const isLateDay = currentHour >= 18;
+            let newlyCleared = false;
+
+            const enriched = snap.orders.map(ord => {
+                let rawProgress = 0;
+                if (ord.cat === 'mastery') {
+                    rawProgress = Math.max(tel.promotedWeakSubjectCards || 0, (tel.levelUps['1->2'] || 0) + (tel.levelUps['2->3'] || 0));
+                } else if (ord.cat === 'leech') {
+                    if (ord.hasLeeches) {
+                        rawProgress = (tel.leechesTamed || 0);
+                        if ((tel.leechSurgeriesDone || 0) > 0 && rawProgress < ord.target) {
+                            rawProgress = Math.max(rawProgress, ord.target);
+                        }
+                    } else {
+                        rawProgress = tel.clearedToday || 0;
+                    }
+                } else if (ord.cat === 'sharpness') {
+                    if (ord.mode === 'coverage') rawProgress = tel.newCardsUnlocked || 0;
+                    else rawProgress = tel.deliberateAccurateToday || 0;
+                }
+                const cleared = rawProgress >= ord.target;
+                const bonus = Math.max(0, rawProgress - ord.target);
+                const isOverdrive = bonus > 0;
+                const isBeastMode = rawProgress >= ord.target * 2;
+                const pctReal = Math.round((rawProgress / Math.max(1, ord.target)) * 100);
+                const bonusEstGain = Number((ord.estGain * (Math.max(rawProgress, ord.target) / Math.max(1, ord.target))).toFixed(2));
+                if (cleared && !tel.ordersClearedFlags[ord.cat]) {
+                    tel.ordersClearedFlags[ord.cat] = true;
+                    newlyCleared = true;
+                }
+                const status = isOverdrive ? 'overdrive' : cleared ? 'cleared' : (isLateDay && rawProgress > 0 ? 'partial_late' : isLateDay ? 'late_warn' : 'in_progress');
+                const cand = getObjectiveCandidateCards(ord.cat, td);
+                return {
+                    ...ord,
+                    progress: Math.min(rawProgress, ord.target),
+                    rawProgress,
+                    bonus,
+                    isOverdrive,
+                    isBeastMode,
+                    pctReal,
+                    bonusEstGain,
+                    cleared,
+                    status,
+                    eligibleCount: cand.cards.length,
+                    actionHint: cand.hint
+                };
+            });
+
+            if (newlyCleared) {
+                safeHaptic([30, 40, 50]);
+                saveLocalTelemetryOnly();
+            }
+
+            // Yesterday recap (if exists)
+            const yKey = getYesterdayDateKey();
+            const yTel = state.dailyTelemetry && state.dailyTelemetry[yKey];
+            let yesterdayRecap = null;
+            if (yTel && yTel.ordersSnapshot && Array.isArray(yTel.ordersSnapshot.orders)) {
+                const yFlags = yTel.ordersClearedFlags || {};
+                const yItems = yTel.ordersSnapshot.orders.map(o => ({
+                    ...o,
+                    cleared: Boolean(yFlags[o.cat])
+                }));
+                yesterdayRecap = {
+                    date: yKey,
+                    clearedCount: yItems.filter(x => x.cleared).length,
+                    total: yItems.length,
+                    items: yItems
+                };
+            }
+
+            const totalBonusCards = enriched.reduce((s, o) => s + o.bonus, 0);
+            const daysAheadEarned = td.requiredDailyReviews > 0 ? +(totalBonusCards / td.requiredDailyReviews).toFixed(2) : 0;
+
+            return {
+                dailyCap: snap.dailyCap,
+                sureTopnotcherTodayQuota: snap.sureTopnotcherTodayQuota || td.requiredDailyReviews,
+                orders: enriched,
+                clearedCount: enriched.filter(o => o.cleared).length,
+                overdriveCount: enriched.filter(o => o.isOverdrive).length,
+                totalBonusCards,
+                daysAheadEarned,
+                yesterdayRecap
+            };
+        }
+
+        // Launch the EXACT card queue for a clicked Daily Objective!
+        window.startObjectiveSession = (cat) => {
+            const td = computeTopnotcherIndex();
+            const ordInfo = getOrGenerateDailyOrders(td);
+            const ord = ordInfo.orders.find(o => o.cat === cat);
+            if (!ord) return;
+            const cand = getObjectiveCandidateCards(cat, td);
+            if (!cand.cards || cand.cards.length === 0) {
+                showToast("No eligible cards left for this objective right now — awesome work! 🎉");
+                return;
+            }
+            // Queue enough cards to finish remaining target + generous Overdrive bonus cards!
+            const remaining = Math.max(0, ord.target - ord.rawProgress);
+            const desiredCount = Math.min(cand.cards.length, Math.max(remaining + 12, Math.min(35, ord.target * 2)));
+            const queue = cand.cards.slice(0, desiredCount);
+
+            const startTopScore = td.score;
+            sessionCardDurations = [];
+            state.sessionLastImpact = null;
+            if (cand.sessionType === 'leech_surgery') {
+                state.timerEnabled = false; // Zero timer pressure for Leech taming!
+            }
+            state.sessionData = {
+                type: cand.sessionType,
+                queue,
+                initialQueueLength: queue.length,
+                startTopScore,
+                tamedInSession: 0,
+                answeredInSession: 0,
+                objectiveCat: cat,
+                objectiveTitle: ord.title
+            };
+            state.currentCardIndex = 0;
+            state.timeLeft = state.timePerCard;
+            initCardSessionState();
+            window.setView('session');
+            manageTimer();
+            manageEtaInterval();
+            const label = ord.cleared ? `🔥 Overdrive Mission started (${queue.length} bonus cards)` : `🎯 Objective Mission started (${queue.length} targeted cards)`;
+            showToast(label);
+        };
+
+        // UI Action Helpers for Topnotcher, Intake Rate, Queue, Break Bank & Weekly Targets
+        window.setTopnotcherScope = (scope) => {
+            state.topnotcherScope = scope;
+            saveLocalTelemetryOnly();
+            renderApp();
+        };
+        window.setIntakeRateMode = (mode) => {
+            state.intakeRateMode = mode === 'custom' ? 'custom' : 'auto';
+            const tel = ensureDailyTelemetry();
+            tel.ordersSnapshot = null;
+            saveLocalTelemetryOnly();
+            renderApp();
+            showToast(mode === 'auto' ? "Card Intake Rate set to Auto (from History) 📈" : "Custom Card Intake Rate active");
+        };
+        window.setCustomIntakeRate = (val) => {
+            state.intakeRateMode = 'custom';
+            state.customIntakeRate = Math.max(0, Math.min(200, Number(val) || 0));
+            const tel = ensureDailyTelemetry();
+            tel.ordersSnapshot = null;
+            saveLocalTelemetryOnly();
+            renderApp();
+            showToast(`Card Intake Rate set to +${state.customIntakeRate} cards/day 📈`);
+        };
+        window.toggleTopnotcherDisplayUnit = (event) => {
+            if (event) event.stopPropagation();
+            state.topnotcherDisplayUnit = state.topnotcherDisplayUnit === 'rp' ? 'pct' : 'rp';
+            saveLocalTelemetryOnly();
+            renderApp();
+        };
+        window.toggleHudStakesMode = (event) => {
+            if (event) event.stopPropagation();
+            state.hudStakesMode = state.hudStakesMode === 'stakes' ? 'clean' : 'stakes';
+            saveLocalTelemetryOnly();
+            renderApp();
+        };
+        window.setQueueMode = (mode) => {
+            state.queueMode = mode;
+            saveLocalTelemetryOnly();
+            renderApp();
+            showToast(mode === 'smart' ? "Smart Queue: Warm-Up + Interleaved Leeches 🎯" : "Queue: Classic Random Order");
+        };
+        window.toggleWeeklyTargetEditor = () => {
+            state.showWeeklyTargetEditor = !state.showWeeklyTargetEditor;
+            renderApp();
+        };
+        window.updateWeeklyTargetDay = (dow, val) => {
+            const num = Math.max(10, Math.min(500, parseInt(val, 10) || 50));
+            state.weeklyTargets[dow] = num;
+            // Reset today's frozen order cap if user changes today's target
+            const tel = ensureDailyTelemetry();
+            tel.ordersSnapshot = null;
+            saveLocalTelemetryOnly();
+            renderApp();
+        };
+        window.toggleYesterdayOrders = () => {
+            state.showYesterdayOrders = !state.showYesterdayOrders;
+            renderApp();
+        };
+        window.claimBreakBank = () => {
+            const tel = ensureDailyTelemetry();
+            const available = Math.max(0, (tel.cleanBlocksEarned || 0) - (tel.breakBankClaimed || 0));
+            if (available <= 0) return showToast("Finish a 15-min Clean Block (≥75% acc) to earn a Break!", "error");
+            tel.breakBankClaimed = (tel.breakBankClaimed || 0) + 1;
+            saveLocalTelemetryOnly();
+            safeHaptic([40, 30, 40]);
+            showToast("☕ Claimed 1 Clean Break! Stretch, hydrate, then come back sharp!");
+            renderApp();
+        };
+        window.closeSessionSummaryModal = () => {
+            state.sessionSummaryModal = null;
+            renderApp();
+        };
+
+        // Feature 4: 5-Card Leech Surgery Mode (No timer pressure, top 5 active leeches!)
+        window.startLeechSurgery = () => {
+            const leeches = state.terms
+                .filter(isActiveLeechCard)
+                .sort((a, b) => (b.incorrect || 0) - (a.incorrect || 0))
+                .slice(0, 5);
+            if (leeches.length === 0) {
+                showToast("Zero Active Leeches right now! Keep up the clean accuracy! 🎉");
+                return;
+            }
+            const startTop = computeTopnotcherIndex().score;
+            sessionCardDurations = [];
+            state.sessionLastImpact = null;
+            state.timerEnabled = false; // Zero timer pressure for deep dissection!
+            state.sessionData = {
+                type: 'leech_surgery',
+                queue: leeches,
+                initialQueueLength: leeches.length,
+                startTopScore: startTop,
+                tamedInSession: 0,
+                answeredInSession: 0
+            };
+            state.currentCardIndex = 0;
+            state.timeLeft = state.timePerCard;
+            initCardSessionState();
+            window.setView('session');
+            manageTimer();
+            manageEtaInterval();
+            showToast(`🩺 Leech Surgery started (${leeches.length} cards • Timer OFF for deep dissection)`);
+        };
+
         // --- SESSION LOGIC ---
         window.startSession = (type) => {
             const todayStart = getTodayStart();
@@ -1089,15 +2349,18 @@
                 queue = newCards.slice(0, state.intakeSize);
             } else if (type === 'review') {
                 let dueCards = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate <= todayStart);
-                shuffleArray(dueCards);
-                
-                // Sort to prioritize L1 & L2 weak cards
-                dueCards.sort((a, b) => {
-                    let weightA = (a.level <= 2) ? 1 : 2;
-                    let weightB = (b.level <= 2) ? 1 : 2;
-                    return weightA - weightB;
-                });
-                queue = dueCards;
+                if (state.queueMode === 'smart') {
+                    // Feature 3: Warm-Up (first 3 non-leech) + Interleaved Leeches (max 5 per 25-card window)
+                    queue = buildSmartInterleavedQueue(dueCards);
+                } else {
+                    shuffleArray(dueCards);
+                    dueCards.sort((a, b) => {
+                        let weightA = (a.level <= 2) ? 1 : 2;
+                        let weightB = (b.level <= 2) ? 1 : 2;
+                        return weightA - weightB;
+                    });
+                    queue = dueCards;
+                }
             } else if (type === 'review_ahead') {
                 let futureCards = activeStudyTerms.filter(t => !t.isNew && t.nextReviewDate > todayStart && t.nextReviewDate <= todayStart + (state.lookAheadDays * MS_PER_DAY));
                 shuffleArray(futureCards);
@@ -1117,8 +2380,17 @@
                 return;
             }
 
+            const startTopScore = computeTopnotcherIndex().score;
             sessionCardDurations = [];
-            state.sessionData = { type, queue, initialQueueLength: queue.length };
+            state.sessionLastImpact = null;
+            state.sessionData = {
+                type,
+                queue,
+                initialQueueLength: queue.length,
+                startTopScore,
+                tamedInSession: 0,
+                answeredInSession: 0
+            };
             state.currentCardIndex = 0;
             state.timeLeft = state.timePerCard;
             initCardSessionState();
@@ -1127,14 +2399,37 @@
             manageEtaInterval();
         };
 
-        window.endSession = () => {
+        window.endSession = (completedNaturally = false) => {
             window.stopTTS(true);
+            const finishedSession = state.sessionData;
+            if (finishedSession && (finishedSession.type === 'leech_surgery' || (finishedSession.objectiveCat && (finishedSession.answeredInSession || 0) >= 1) || (completedNaturally && (finishedSession.answeredInSession || 0) >= 3))) {
+                const endTopScore = computeTopnotcherIndex().score;
+                const tel = ensureDailyTelemetry();
+                if (finishedSession.type === 'leech_surgery' && completedNaturally) {
+                    tel.leechSurgeriesDone = (tel.leechSurgeriesDone || 0) + 1;
+                    saveLocalTelemetryOnly();
+                }
+                state.sessionSummaryModal = {
+                    type: finishedSession.type,
+                    answered: finishedSession.answeredInSession || 0,
+                    tamed: finishedSession.tamedInSession || 0,
+                    topDelta: endTopScore - (finishedSession.startTopScore ?? endTopScore),
+                    endTopScore,
+                    netLevelUpsToday: tel.levelUps?.net || 0,
+                    leechesTamedToday: tel.leechesTamed || 0,
+                    cleanBlocksToday: tel.cleanBlocksEarned || 0
+                };
+            }
             state.sessionData = null;
+            state.sessionLastImpact = null;
             sessionCardDurations = [];
             clearInterval(timerInterval);
             clearInterval(etaRefreshInterval);
             window.logDailyStats();
-            window.setView('dashboard');
+            const returnView = finishedSession && finishedSession.objectiveCat
+                ? 'topnotcher'
+                : (finishedSession && finishedSession.type === 'leech_surgery' ? 'analytics' : 'dashboard');
+            window.setView(returnView);
         };
 
         function recordActivityEvent(answerType, durationSec) {
@@ -1154,49 +2449,65 @@
 
         window.handleAnswer = (answerType) => {
             window.stopTTS(true);
-            // Record active card pace (clamped 1.5s–45s so reading AI notes or breaks won't blow up ETA)
-            let clampedSec = 10;
+            const rawSec = currentCardStartTs > 0 ? (Date.now() - currentCardStartTs) / 1000 : 10;
+            const clampedSec = Math.min(45, Math.max(1.5, rawSec));
             if (currentCardStartTs > 0) {
-                const rawSec = (Date.now() - currentCardStartTs) / 1000;
-                clampedSec = Math.min(45, Math.max(1.5, rawSec));
                 sessionCardDurations.push(clampedSec);
                 if (sessionCardDurations.length > 8) sessionCardDurations.shift();
             }
-            recordActivityEvent(answerType, clampedSec);
 
             const currentCard = state.sessionData.queue[state.currentCardIndex];
             const currentCorrect = currentCard.correct || 0;
             const currentIncorrect = currentCard.incorrect || 0;
             const todayStart = getTodayStart();
 
+            // Snapshot BEFORE state for Top 1 counterfactuals, Daily Objectives diff, Leech clear & Locked-In detection
+            const wasNew = Boolean(currentCard.isNew);
+            const prevLevel = wasNew ? 0 : (currentCard.level || 1);
+            const wasLeech = isActiveLeechCard(currentCard);
+            const wasLocked = isLockedForFeb2027(currentCard);
+            const stakes = simulateCardTop1Stakes(currentCard);
+            const topBefore = stakes.baseScore;
+            const ordersBeforeMap = {};
+            getOrGenerateDailyOrders().orders.forEach(o => { ordersBeforeMap[o.cat] = o.rawProgress; });
+
+            recordActivityEvent(answerType, clampedSec);
+
+            // Compute next level / nextReviewDate
             let nextQueue = [...state.sessionData.queue];
+            let newLevel = prevLevel;
+            let newNextReview = currentCard.nextReviewDate || 0;
+            let sessionFinishedNow = false;
 
             if (state.sessionData.type === 'intake') {
                 if (answerType === 'perfect') {
-                    // PERFECT (+3 or Rekta Lvl 4 from Intake)
+                    newLevel = 4;
+                    newNextReview = todayStart + (INTERVALS[4] * MS_PER_DAY);
                     updateTerm(currentCard.id, {
                         isNew: false,
                         level: 4,
-                        nextReviewDate: todayStart + (INTERVALS[4] * MS_PER_DAY),
+                        nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
                         graduatedDate: currentCard.graduatedDate || Date.now(),
                         correct: currentCorrect + 1
                     });
                     nextQueue.splice(state.currentCardIndex, 1);
-                    if (nextQueue.length === 0) return endSession();
+                    if (nextQueue.length === 0) sessionFinishedNow = true;
                 } else if (answerType === 'correct') {
-                    // Graduate to Level 1
+                    newLevel = 1;
+                    newNextReview = todayStart + MS_PER_DAY;
                     updateTerm(currentCard.id, {
                         isNew: false,
                         level: 1,
-                        nextReviewDate: todayStart + MS_PER_DAY,
+                        nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
                         graduatedDate: currentCard.graduatedDate || Date.now(),
                         correct: currentCorrect + 1
                     });
                     nextQueue.splice(state.currentCardIndex, 1);
-                    if (nextQueue.length === 0) return endSession();
+                    if (nextQueue.length === 0) sessionFinishedNow = true;
                 } else {
+                    newLevel = 0;
                     updateTerm(currentCard.id, { incorrect: currentIncorrect + 1 });
                     const cardToMove = nextQueue.splice(state.currentCardIndex, 1)[0];
                     nextQueue.push(cardToMove);
@@ -1204,30 +2515,34 @@
                 state.sessionData.queue = nextQueue;
             } else {
                 if (answerType === 'perfect') {
-                    const nextLevel = Math.min((currentCard.level || 1) + 3, 6);
+                    newLevel = Math.min((currentCard.level || 1) + 3, 6);
+                    newNextReview = todayStart + (INTERVALS[newLevel] * MS_PER_DAY);
                     updateTerm(currentCard.id, {
                         isNew: false,
-                        level: nextLevel,
-                        nextReviewDate: todayStart + (INTERVALS[nextLevel] * MS_PER_DAY),
+                        level: newLevel,
+                        nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
                         graduatedDate: currentCard.graduatedDate || Date.now(),
                         correct: currentCorrect + 1
                     });
                 } else if (answerType === 'correct') {
-                    const nextLevel = Math.min((currentCard.level || 1) + 1, 6);
+                    newLevel = Math.min((currentCard.level || 1) + 1, 6);
+                    newNextReview = todayStart + (INTERVALS[newLevel] * MS_PER_DAY);
                     updateTerm(currentCard.id, {
                         isNew: false,
-                        level: nextLevel,
-                        nextReviewDate: todayStart + (INTERVALS[nextLevel] * MS_PER_DAY),
+                        level: newLevel,
+                        nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
                         graduatedDate: currentCard.graduatedDate || Date.now(),
                         correct: currentCorrect + 1
                     });
                 } else {
+                    newLevel = 1;
+                    newNextReview = todayStart + (INTERVALS[1] * MS_PER_DAY);
                     updateTerm(currentCard.id, {
                         isNew: false,
                         level: 1,
-                        nextReviewDate: todayStart + (INTERVALS[1] * MS_PER_DAY),
+                        nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
                         graduatedDate: currentCard.graduatedDate || Date.now(),
                         incorrect: currentIncorrect + 1
@@ -1237,8 +2552,148 @@
                 if (state.currentCardIndex + 1 < state.sessionData.queue.length) {
                     state.currentCardIndex++;
                 } else {
-                    return endSession();
+                    sessionFinishedNow = true;
                 }
+            }
+
+            // --- Record Local Daily Telemetry (Features 5, 6, 7, 8, 9, 11 — Zero Extra Firestore Writes!) ---
+            const tel = ensureDailyTelemetry();
+            state.sessionData.answeredInSession = (state.sessionData.answeredInSession || 0) + 1;
+
+            // Pace Bracket (<4s, 4-8s, 8-15s, >15s)
+            const bKey = rawSec < 4 ? 'b1' : rawSec < 8 ? 'b2' : rawSec <= 15 ? 'b3' : 'b4';
+            if (answerType === 'wrong') tel.paceBrackets[bKey].w = (tel.paceBrackets[bKey].w || 0) + 1;
+            else tel.paceBrackets[bKey].c = (tel.paceBrackets[bKey].c || 0) + 1;
+
+            // Queue Efficiency (forward vs loopback into L1-L2) & Deliberate Sharpness (>=4s accurate)
+            if (answerType !== 'wrong') {
+                tel.forwardAns = (tel.forwardAns || 0) + 1;
+                tel.clearedToday = (tel.clearedToday || 0) + 1;
+                if (rawSec >= 4) {
+                    tel.deliberateAccurateToday = (tel.deliberateAccurateToday || 0) + 1;
+                }
+            } else {
+                tel.loopbackAns = (tel.loopbackAns || 0) + 1;
+            }
+
+            // Smart Leech Objective Re-Queue: if L1 leech was promoted to L2 inside Order #2, re-queue 2 cards ahead so you can finish taming it to L3!
+            if (state.sessionData.objectiveCat === 'leech' && wasLeech && prevLevel === 1 && answerType === 'correct' && newLevel === 2) {
+                const updatedL2 = state.terms.find(t => t.id === currentCard.id);
+                if (updatedL2) {
+                    const insertAt = Math.min(state.sessionData.queue.length, state.currentCardIndex + 2);
+                    state.sessionData.queue.splice(insertAt, 0, { ...updatedL2 });
+                    sessionFinishedNow = false;
+                    showToast("🎯 L1→L2! Re-queued in 2 cards — 1 more Tama to Tame to L3!");
+                }
+            }
+
+            // Micro-Wins: Level-Ups & Breakdown
+            if (answerType !== 'wrong' && newLevel > prevLevel) {
+                tel.levelUps.net = (tel.levelUps.net || 0) + (newLevel - prevLevel);
+                const transKey = `${prevLevel}->${Math.min(prevLevel + 1, 6)}`;
+                if (tel.levelUps[transKey] !== undefined) tel.levelUps[transKey]++;
+                if (wasNew) tel.newCardsUnlocked = (tel.newCardsUnlocked || 0) + 1;
+                // Track promotion of weakest subject/folder L1-L2 cards for Daily Order #1
+                if (prevLevel >= 1 && prevLevel <= 2) {
+                    const wf = tel.ordersSnapshot && tel.ordersSnapshot.weakestFolderIds;
+                    if (!wf || wf.includes(currentCard.folderId)) {
+                        tel.promotedWeakSubjectCards = (tel.promotedWeakSubjectCards || 0) + 1;
+                    }
+                }
+            } else if (answerType === 'wrong' && prevLevel > 1) {
+                tel.levelUps.net = (tel.levelUps.net || 0) - (prevLevel - 1);
+            }
+
+            // Leech Tamed & Post-Feb 2027 Locked-In checks
+            const updatedCardObj = state.terms.find(t => t.id === currentCard.id);
+            const nowLeech = isActiveLeechCard(updatedCardObj);
+            const nowLocked = isLockedForFeb2027(updatedCardObj);
+            const leechClearedToL3 = wasLeech && answerType !== 'wrong' && newLevel >= 3;
+            const newlyLocked = !wasLocked && nowLocked;
+
+            if (leechClearedToL3) {
+                tel.leechesTamed = (tel.leechesTamed || 0) + 1;
+                state.sessionData.tamedInSession = (state.sessionData.tamedInSession || 0) + 1;
+            }
+            if (newlyLocked) {
+                tel.lockedToday = (tel.lockedToday || 0) + 1;
+            }
+
+            // Feature 7: 15-Minute Clean Block -> Break Bank (900 active clamped seconds @ >=75% acc)
+            tel.cleanBlockSec = Math.round(((tel.cleanBlockSec || 0) + clampedSec) * 10) / 10;
+            if (answerType === 'wrong') tel.cleanBlockW = (tel.cleanBlockW || 0) + 1;
+            else tel.cleanBlockC = (tel.cleanBlockC || 0) + 1;
+            if (tel.cleanBlockSec >= 900) {
+                const blkTot = (tel.cleanBlockC || 0) + (tel.cleanBlockW || 0);
+                const blkAcc = blkTot > 0 ? (tel.cleanBlockC / blkTot) * 100 : 100;
+                if (blkAcc >= 75) {
+                    tel.cleanBlocksEarned = (tel.cleanBlocksEarned || 0) + 1;
+                    showToast(`🧱 +1 Clean Block Earned (${Math.round(blkAcc)}% acc)! Break Bank +1 ☕`);
+                    safeHaptic([40, 30, 55]);
+                } else {
+                    showToast(`15m block ended at ${Math.round(blkAcc)}% acc (need ≥75% for Break Bank). Fresh block started!`, "error");
+                }
+                tel.cleanBlockSec = 0;
+                tel.cleanBlockC = 0;
+                tel.cleanBlockW = 0;
+            }
+
+            // Evaluate Daily Orders progress & trigger sleek compact right-side popups for every objective that moved up (+1 / Cleared / Overdrive!)
+            const ordersAfterInfo = getOrGenerateDailyOrders();
+            ordersAfterInfo.orders.forEach(ord => {
+                const beforeVal = ordersBeforeMap[ord.cat] || 0;
+                if (ord.rawProgress > beforeVal) {
+                    triggerObjectiveSidePopup(ord, ord.rawProgress - beforeVal, beforeVal, ord.rawProgress);
+                }
+            });
+            saveLocalTelemetryOnly();
+
+            // --- Feature 2: Live Top 1 Impact Delta + Game Animations & Haptics ---
+            const topAfter = computeTopnotcherIndex().score;
+            const actualDelta = topAfter - topBefore;
+            const isRushedMiss = answerType === 'wrong' && rawSec < 3.5;
+
+            let fxType = 'emerald';
+            let extraLabel = '';
+            if (answerType !== 'wrong') {
+                if (leechClearedToL3) {
+                    fxType = 'gold';
+                    extraLabel = 'NEMESIS CLEARED!';
+                    showToast("⚡ NEMESIS CLEARED! Active Leech graduated to Level 3! 🏆");
+                } else if (newlyLocked) {
+                    fxType = 'gold';
+                    extraLabel = 'LOCKED FEB 2027!';
+                    showToast("🔒 LOCKED IN FOR FEB 2027! Card mastered past exam date!");
+                } else {
+                    fxType = 'emerald';
+                }
+            } else {
+                if (isRushedMiss) {
+                    fxType = 'rushed';
+                    extraLabel = '<3.5s Slow down!';
+                } else if (wasLeech || nowLeech) {
+                    fxType = 'crit_miss';
+                    extraLabel = 'LEECH ACTIVE';
+                } else {
+                    fxType = 'miss';
+                }
+            }
+
+            const counterfactualVal = answerType !== 'wrong' ? stakes.lossWrong : stakes.gainCorrect;
+            state.sessionLastImpact = {
+                delta: actualDelta,
+                counterfactual: counterfactualVal,
+                isCorrect: answerType !== 'wrong',
+                isRushed: isRushedMiss,
+                fxType,
+                extraLabel,
+                sessionTotalDelta: topAfter - (state.sessionData.startTopScore ?? topAfter)
+            };
+
+            triggerTop1FeedbackFX(fxType, actualDelta, extraLabel);
+
+            if (sessionFinishedNow) {
+                return window.endSession(true);
             }
 
             state.timeLeft = state.timePerCard;
@@ -2852,6 +4307,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 question: q, answer: a,
                 level: 0, nextReviewDate: 0, isNew: true, lastReviewedDate: 0, correct: 0, incorrect: 0
             });
+            const telAdd = ensureDailyTelemetry();
+            telAdd.addedToday = (telAdd.addedToday || 0) + 1;
             saveData();
             qInput.value = '';
             aInput.value = '';
@@ -3342,6 +4799,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
             if (newCards.length > 0) {
                 state.terms = [...state.terms, ...newCards];
+                const telImp = ensureDailyTelemetry();
+                telImp.addedToday = (telImp.addedToday || 0) + newCards.length;
                 saveData();
                 state.showBulk = false;
                 renderApp();
@@ -3401,6 +4860,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             <button onclick="window.setView('add')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'add' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}">
                                 <i class="ph-fill ph-folder text-lg"></i> <span class="hidden md:inline">Database</span>
                                 ${parkedCount > 0 ? `<span class="bg-amber-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">${parkedCount}</span>` : ''}
+                            </button>
+                            <button onclick="window.setView('topnotcher')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'topnotcher' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}" title="Are You a Topnotcher? (MELE Feb 2027)">
+                                <i class="ph-fill ph-crown text-lg"></i> <span class="hidden md:inline">Topnotcher</span>
                             </button>
                             <button onclick="window.setView('stats')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'stats' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}">
                                 <i class="ph-fill ph-users text-lg"></i> <span class="hidden md:inline">Stats</span>
@@ -3569,7 +5031,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         <div class="flex items-center gap-2 px-3 md:px-4 py-2 bg-slate-700/50 rounded-xl m-1">
                             <i class="ph-fill ph-check-circle text-green-400 text-lg"></i> 
                             <span class="text-white">Total:</span> 
-                            <span class="text-green-400 text-lg">${totalFinishedToday}</span>
+                            <span class="text-green-400 text-lg tabular-nums">${totalFinishedToday} <span class="text-xs text-slate-400 font-bold">/ ${getTodayAdaptiveTarget()}</span></span>
                         </div>
                     </div>
                 </div>
@@ -3605,9 +5067,13 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 <h3 class="font-bold text-slate-800">Fast-Track Review</h3>
                             </div>
                             <p class="text-xs text-slate-500 mb-4 h-8">Spaced repetition. Terms scheduled for today.</p>
-                            <div class="mb-6">
+                            <div class="mb-4">
                                 <span class="text-4xl font-black ${dueTerms.length > 0 ? 'text-red-500' : 'text-slate-800'}">${dueTerms.length}</span>
                                 <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Due Today</span>
+                            </div>
+                            <div class="mb-3 flex bg-slate-100 p-1 rounded-xl text-[11px] font-bold">
+                                <button type="button" onclick="window.setQueueMode('smart')" class="flex-1 py-1.5 px-2 rounded-lg transition-all ${state.queueMode === 'smart' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}" title="3 warm-up cards, then 1 leech every 3-4 normal cards (max 5/25)">🎯 Smart Queue</button>
+                                <button type="button" onclick="window.setQueueMode('random')" class="flex-1 py-1.5 px-2 rounded-lg transition-all ${state.queueMode === 'random' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}" title="Classic shuffled order">🔀 Random</button>
                             </div>
                         </div>
                         <button onclick="window.startSession('review')" ${dueTerms.length === 0 ? 'disabled' : ''} class="w-full bg-red-500 hover:bg-red-600 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Start Review</button>
@@ -4203,6 +5669,15 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     <div class="inline-block p-3 bg-amber-100 text-amber-600 rounded-full mb-2"><i class="ph-fill ph-trophy text-4xl"></i></div>
                     <h1 class="text-3xl font-extrabold text-slate-800">Your Local Stats</h1>
                     <p class="text-slate-500">Offline Mode: Rankings are based on your total Mastery Points.</p>
+                </div>
+
+                <!-- MELE Feb 2027 Topnotcher & Daily Telemetry Suite -->
+                <div class="space-y-6 mb-8">
+                    ${renderLockedInFeb2027Widget()}
+                    ${renderMicroWinsAndBreakBankWidgets()}
+                    ${renderIntakeVsBurnGaugeWidget()}
+                    ${renderAdaptiveWeeklyTargetWidget()}
+                    ${renderDailyOrdersCardHtml()}
                 </div>
 
                 <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 mb-8 flex gap-4 items-start shadow-sm">
@@ -5185,7 +6660,28 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             let heatmapBodyHtml = '';
             if (activeRange === 'today') {
                 const todayRow = heatmapRows[0];
-                const maxHr = Math.max(5, ...todayRow.hours.map(c => c.count));
+                // Compute 7-Day Ghost Pace average per hour from the 7 calendar days prior to today
+                const ghostSums = Array(24).fill(0);
+                let ghostActiveDays = 0;
+                for (let back = 1; back <= 7; back++) {
+                    const pastDt = new Date(nowDateObj.getTime() - back * MS_PER_DAY);
+                    const pastKey = toLocalDateKey(pastDt);
+                    const dayRec = mergedLog[pastKey];
+                    if (dayRec) {
+                        let dayHasActivity = false;
+                        for (let h = 0; h < 24; h++) {
+                            const cnt = (dayRec[String(h)] && dayRec[String(h)].count) ? Number(dayRec[String(h)].count) : 0;
+                            if (cnt > 0) {
+                                ghostSums[h] += cnt;
+                                dayHasActivity = true;
+                            }
+                        }
+                        if (dayHasActivity) ghostActiveDays++;
+                    }
+                }
+                const ghostAvg = ghostSums.map(s => ghostActiveDays > 0 ? +(s / ghostActiveDays).toFixed(1) : 0);
+                const hasGhostPace = ghostActiveDays > 0 && ghostAvg.some(v => v > 0);
+                const maxHr = Math.max(5, ...todayRow.hours.map(c => c.count), ...(hasGhostPace ? ghostAvg : [0]));
                 const hSvgW = 720;
                 const hSvgH = 185;
                 const hPadL = 12;
@@ -5204,10 +6700,11 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     const isSel = state.analyticsSelectedSlot === slotKey;
                     const liveTot = cell.c + cell.w;
                     const accTxt = liveTot > 0 ? ` • ${Math.round((cell.c / liveTot) * 100)}% acc` : '';
+                    const ghostTxt = hasGhostPace ? ` • 7d Avg: ${ghostAvg[h]}` : '';
                     const fill = isSel ? '#0284c7' : cell.count > 0 ? '#10b981' : '#e2e8f0';
                     return `
                         <g class="cursor-pointer" onclick="window.selectAnalyticsHeatmapSlot('${slotKey}')">
-                            <title>${formatHourFull(h)}: ${cell.count} cards${accTxt}</title>
+                            <title>${formatHourFull(h)}: ${cell.count} cards${accTxt}${ghostTxt}</title>
                             <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bW.toFixed(1)}" height="${bh.toFixed(1)}" rx="5" fill="${fill}" />
                             ${cell.count > 0 ? `<text x="${(x + bW / 2).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#065f46">${cell.count}</text>` : ''}
                             ${h % 2 === 0 ? `<text x="${(x + bW / 2).toFixed(1)}" y="${hSvgH - 9}" text-anchor="middle" font-size="9" font-weight="700" fill="#64748b">${formatHourShort(h)}</text>` : ''}
@@ -5215,11 +6712,37 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     `;
                 }).join('');
 
+                // Faint dotted 7-day average Ghost Pace overlay
+                let ghostPaceSvg = '';
+                if (hasGhostPace) {
+                    const ghostPts = ghostAvg.map((val, h) => {
+                        const cx = hPadL + h * colW + colW / 2;
+                        const cy = hPadT + hPlotH - (val > 0 ? (val / maxHr) * hPlotH : 1.5);
+                        return { cx, cy, val, h };
+                    });
+                    const polyStr = ghostPts.map(p => `${p.cx.toFixed(1)},${p.cy.toFixed(1)}`).join(' ');
+                    const dotsSvg = ghostPts.filter(p => p.val > 0).map(p =>
+                        `<circle cx="${p.cx.toFixed(1)}" cy="${p.cy.toFixed(1)}" r="2.6" fill="#6366f1" opacity="0.72"><title>7-Day Ghost Pace (${formatHourShort(p.h)}): ${p.val} cards avg</title></circle>`
+                    ).join('');
+                    ghostPaceSvg = `
+                        <polyline points="${polyStr}" fill="none" stroke="#6366f1" stroke-width="2" stroke-dasharray="4 4" stroke-linecap="round" stroke-linejoin="round" opacity="0.65" pointer-events="none" />
+                        ${dotsSvg}
+                    `;
+                }
+
                 heatmapBodyHtml = `
                     <div class="w-full overflow-x-auto">
+                        <div class="flex items-center justify-end gap-3 text-[10px] font-bold text-slate-500 mb-1 pr-1">
+                            <span class="flex items-center gap-1"><span class="w-3 h-2 rounded-sm bg-emerald-500 inline-block"></span> Today</span>
+                            ${hasGhostPace
+                                ? `<span class="flex items-center gap-1 text-indigo-600"><span class="w-4 border-t-2 border-dashed border-indigo-500 inline-block"></span> 7-Day Ghost Pace (${ghostActiveDays}d avg)</span>`
+                                : `<span class="text-slate-400">7-Day Ghost Pace appears after 1+ prior logged day</span>`
+                            }
+                        </div>
                         <svg viewBox="0 0 ${hSvgW} ${hSvgH}" class="w-full min-w-[540px] h-auto select-none">
                             <line x1="${hPadL}" y1="${hPadT + hPlotH}" x2="${hSvgW - hPadR}" y2="${hPadT + hPlotH}" stroke="#e2e8f0" stroke-width="1.5" />
                             ${todayBarsSvg}
+                            ${ghostPaceSvg}
                         </svg>
                     </div>
                 `;
@@ -5348,6 +6871,144 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             <span>More</span>
                         </div>
                     </div>
+
+                    ${(() => {
+                        // Feature #8: Optimal Pace Zone (Anti-Sprint) & Daily Queue Efficiency
+                        const todayTel = ensureDailyTelemetry();
+                        const telKeys = Object.keys(state.dailyTelemetry || {}).sort().slice(-14);
+                        const aggPace = {
+                            b1: { label: '< 4s', sub: 'Sprint / Risk', c: 0, w: 0, deliberate: false },
+                            b2: { label: '4 – 8s', sub: 'Crisp Recall', c: 0, w: 0, deliberate: true },
+                            b3: { label: '8 – 15s', sub: 'Deliberate', c: 0, w: 0, deliberate: true },
+                            b4: { label: '> 15s', sub: 'Deep Solve', c: 0, w: 0, deliberate: true }
+                        };
+                        let aggFwd = 0, aggLoop = 0;
+                        telKeys.forEach(dk => {
+                            const d = state.dailyTelemetry[dk];
+                            if (!d) return;
+                            ['b1', 'b2', 'b3', 'b4'].forEach(k => {
+                                const pb = d.paceBrackets || d.pace;
+                                if (pb && pb[k]) {
+                                    aggPace[k].c += Number(pb[k].c) || 0;
+                                    aggPace[k].w += Number(pb[k].w) || 0;
+                                }
+                            });
+                            aggFwd += Number(d.forwardAns) || 0;
+                            aggLoop += Number(d.loopbackAns) || 0;
+                        });
+                        const paceList = ['b1', 'b2', 'b3', 'b4'].map(k => {
+                            const b = aggPace[k];
+                            const tot = b.c + b.w;
+                            const acc = tot > 0 ? Math.round((b.c / tot) * 100) : null;
+                            return { key: k, ...b, tot, acc };
+                        });
+                        const totalPaceSamples = paceList.reduce((s, p) => s + p.tot, 0);
+                        // Highlight highest-accuracy deliberate pace zone (4-8s, 8-15s, >15s) with >= 3 attempts (or >=1 fallback)
+                        const deliberateCandidates = paceList.filter(p => p.deliberate && p.tot >= 3);
+                        const fallbackCandidates = paceList.filter(p => p.deliberate && p.tot > 0);
+                        const bestPool = deliberateCandidates.length > 0 ? deliberateCandidates : fallbackCandidates;
+                        const optimalZone = bestPool.length > 0
+                            ? bestPool.reduce((best, cur) => (cur.acc > best.acc || (cur.acc === best.acc && cur.tot > best.tot)) ? cur : best, bestPool[0])
+                            : null;
+                        const sprintBracket = paceList[0];
+                        const sprintWarning = (sprintBracket.tot >= 3 && optimalZone && sprintBracket.acc !== null && sprintBracket.acc < optimalZone.acc - 10);
+
+                        const todayFwd = Number(todayTel.forwardAns) || 0;
+                        const todayLoop = Number(todayTel.loopbackAns) || 0;
+                        const todayQTotal = todayFwd + todayLoop;
+                        const useTodayQ = todayQTotal > 0;
+                        const qFwd = useTodayQ ? todayFwd : aggFwd;
+                        const qLoop = useTodayQ ? todayLoop : aggLoop;
+                        const qTotal = qFwd + qLoop;
+                        const qEffPct = qTotal > 0 ? Math.round((qFwd / qTotal) * 100) : null;
+
+                        return `
+                        <div class="pt-4 mt-2 border-t border-slate-100 grid grid-cols-1 lg:grid-cols-12 gap-4">
+                            <!-- Optimal Pace Zone (Anti-Sprint) -->
+                            <div class="lg:col-span-8 bg-slate-50/80 rounded-2xl p-4 border border-slate-200/80 space-y-3">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <h3 class="text-xs md:text-sm font-black text-slate-800 flex items-center gap-1.5">
+                                            <i class="ph-fill ph-gauge text-amber-500 text-base"></i> Optimal Pace Zone (Anti-Sprint)
+                                        </h3>
+                                        <p class="text-[11px] text-slate-500">Accuracy grouped by card response time (last 14d local telemetry).</p>
+                                    </div>
+                                    ${optimalZone
+                                        ? `<span class="text-[10px] font-black uppercase px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">★ Best Zone: ${optimalZone.label} (${optimalZone.acc}%)</span>`
+                                        : `<span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-500">Answer cards to calibrate</span>`
+                                    }
+                                </div>
+                                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                    ${paceList.map(p => {
+                                        const isOpt = optimalZone && optimalZone.key === p.key;
+                                        const isSprintRisk = p.key === 'b1' && p.tot >= 3 && p.acc !== null && p.acc < 70;
+                                        const cardCls = isOpt
+                                            ? 'bg-emerald-50 border-emerald-400 ring-2 ring-emerald-200/80'
+                                            : isSprintRisk
+                                                ? 'bg-amber-50 border-amber-300'
+                                                : 'bg-white border-slate-200';
+                                        const accColor = p.acc === null ? 'text-slate-400' : p.acc >= 85 ? 'text-emerald-600' : p.acc >= 70 ? 'text-blue-600' : 'text-rose-600';
+                                        return `
+                                            <div class="p-2.5 rounded-xl border ${cardCls} flex flex-col justify-between">
+                                                <div class="flex items-center justify-between">
+                                                    <span class="text-[11px] font-black text-slate-700 font-mono">${p.label}</span>
+                                                    ${isOpt ? `<span class="text-[9px] font-black text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-full">★ BEST</span>` : ''}
+                                                    ${isSprintRisk ? `<span class="text-[9px] font-black text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded-full">SPRINT</span>` : ''}
+                                                </div>
+                                                <div class="text-lg font-black tabular-nums mt-1 ${accColor}">${p.acc !== null ? p.acc + '%' : '--'}</div>
+                                                <div class="text-[10px] font-bold text-slate-400 flex items-center justify-between mt-0.5">
+                                                    <span>${p.sub}</span>
+                                                    <span class="tabular-nums">${p.tot}x</span>
+                                                </div>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>
+                                ${sprintWarning ? `
+                                    <div class="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-1.5 flex items-center gap-2">
+                                        <i class="ph-fill ph-warning text-amber-500 text-sm shrink-0"></i>
+                                        <span>Anti-Sprint Alert: Answers under 4s drop to <b>${sprintBracket.acc}%</b> vs <b>${optimalZone.acc}%</b> in your ${optimalZone.label} sweet spot. Slow down 2 seconds!</span>
+                                    </div>
+                                ` : totalPaceSamples === 0 ? `
+                                    <div class="text-[11px] text-slate-400 font-medium">Review a few cards to populate your live speed-vs-accuracy brackets.</div>
+                                ` : ''}
+                            </div>
+
+                            <!-- Queue Efficiency -->
+                            <div class="lg:col-span-4 bg-slate-50/80 rounded-2xl p-4 border border-slate-200/80 flex flex-col justify-between space-y-3">
+                                <div>
+                                    <div class="flex items-center justify-between gap-2">
+                                        <h3 class="text-xs md:text-sm font-black text-slate-800 flex items-center gap-1.5">
+                                            <i class="ph-fill ph-git-branch text-indigo-500 text-base"></i> Queue Efficiency
+                                        </h3>
+                                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white border border-slate-200 text-slate-500">${useTodayQ ? 'Today' : '14d Avg'}</span>
+                                    </div>
+                                    <p class="text-[11px] text-slate-500 mt-0.5">Answers moving forward vs. looping back into L1–L2.</p>
+                                </div>
+                                <div>
+                                    <div class="flex items-baseline justify-between mb-1.5">
+                                        <span class="text-2xl font-black tabular-nums ${qEffPct === null ? 'text-slate-400' : qEffPct >= 80 ? 'text-emerald-600' : qEffPct >= 65 ? 'text-amber-600' : 'text-rose-600'}">
+                                            ${qEffPct !== null ? qEffPct + '%' : '--'}
+                                        </span>
+                                        <span class="text-[11px] font-bold text-slate-500 tabular-nums">
+                                            <span class="text-emerald-600">▲ ${qFwd} fwd</span> · <span class="text-rose-500">↻ ${qLoop} loop</span>
+                                        </span>
+                                    </div>
+                                    <div class="w-full h-3 rounded-full overflow-hidden flex bg-slate-200">
+                                        ${qTotal === 0
+                                            ? `<div class="w-full h-full bg-slate-200"></div>`
+                                            : `<div style="width: ${qEffPct}%" class="bg-emerald-500 h-full transition-all duration-500"></div>
+                                               <div style="width: ${100 - qEffPct}%" class="bg-rose-400 h-full transition-all duration-500"></div>`
+                                        }
+                                    </div>
+                                    <div class="text-[10px] font-bold text-slate-400 mt-1.5">
+                                        ${qTotal === 0 ? 'Tracks automatically during Review & Intake.' : qEffPct >= 85 ? 'Clean forward pipeline — minimal card recycling!' : qEffPct >= 70 ? 'Solid flow — tame active leeches to cut L1–L2 loops.' : 'High L1–L2 churn — run a 5-Card Leech Surgery below.'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        `;
+                    })()}
                 </div>
             `;
 
@@ -5508,16 +7169,33 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
                     <!-- Top Most-Missed / Weakest Cards -->
                     <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col">
-                        <div class="mb-4">
-                            <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
-                                <i class="ph-fill ph-crosshair text-rose-500 text-xl"></i> Most-Missed Cards (Leech Radar)
-                            </h2>
-                            <p class="text-xs text-slate-500">Top cards where you make the most mistakes — park them for focused review.</p>
+                        <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                                    <i class="ph-fill ph-crosshair text-rose-500 text-xl"></i> Most-Missed Cards (Leech Radar)
+                                </h2>
+                                <p class="text-xs text-slate-500">Top cards where you make the most mistakes — park or dissect them.</p>
+                            </div>
+                            ${(() => {
+                                const activeLeechesCount = scopedTerms.filter(t => isActiveLeechCard(t)).length;
+                                return `
+                                <button type="button" onclick="window.startLeechSurgery()" ${activeLeechesCount === 0 ? 'disabled' : ''} class="px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 shadow-sm transition-all ${activeLeechesCount > 0 ? 'bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-700 hover:to-amber-700 text-white active:scale-95' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}">
+                                    <span>🩺 Leech Surgery (5 Cards)</span>
+                                    <span class="px-1.5 py-0.5 rounded-md text-[10px] ${activeLeechesCount > 0 ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-500'}">${activeLeechesCount}</span>
+                                </button>
+                                `;
+                            })()}
                         </div>
                         <div class="space-y-2.5 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar">
                             ${weakCardsHtml}
                         </div>
                     </div>
+                </div>
+
+                <!-- Intake vs. Burn Rate Gauge & Adaptive Mon-Sun Targets -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    ${renderIntakeVsBurnGaugeWidget()}
+                    ${renderAdaptiveWeeklyTargetWidget()}
                 </div>
             </div>
             `;
@@ -5637,6 +7315,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     <h1 class="text-3xl font-extrabold text-slate-800">Actual Forecast & Workload</h1>
                     <p class="text-slate-500 text-sm max-w-2xl mx-auto">Simulate your journey until all cards reach Level 5 Mastery (capped at 1 year). This visualizer assumes a <span class="font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded">Dynamic Level-Weighted Pass Rate</span> (60% to 90%) on your daily reviews.</p>
                 </div>
+
+                ${renderLockedInFeb2027Widget()}
 
                 ${modeToggleHtml}
 
@@ -5920,7 +7600,62 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         ? 'Parking Lot'
                         : state.sessionData.type === 'erroneous'
                             ? 'Erroneous'
-                            : 'Review';
+                            : state.sessionData.type === 'leech_surgery'
+                                ? '🩺 Leech Surgery'
+                                : 'Review';
+
+            // Feature 2 & 7: Live Top 1 Impact HUD + Stakes + Clean Block progress
+            const liveTopInfo = computeTopnotcherIndex();
+            const liveTopBarPct = Math.min(100, Math.max(0, (liveTopInfo.score / 92) * 100));
+            const liveStakes = simulateCardTop1Stakes(currentCard);
+            const liveTel = ensureDailyTelemetry();
+            const cleanBlockMins = Math.floor((liveTel.cleanBlockSec || 0) / 60);
+            const cleanBlockPct = Math.min(100, Math.round(((liveTel.cleanBlockSec || 0) / 900) * 100));
+            const cleanBlockAttempts = (liveTel.cleanBlockC || 0) + (liveTel.cleanBlockW || 0);
+            const cleanBlockAcc = cleanBlockAttempts > 0 ? Math.round((liveTel.cleanBlockC / cleanBlockAttempts) * 100) : 100;
+            const sessionNetDelta = liveTopInfo.score - (state.sessionData.startTopScore ?? liveTopInfo.score);
+            const isRecentFx = lastFeedbackAnim && (Date.now() - lastFeedbackAnim.ts < 900);
+            const cardAnimClass = isRecentFx
+                ? (lastFeedbackAnim.type === 'gold' ? 'top1-shimmer-gold'
+                    : lastFeedbackAnim.type === 'emerald' ? 'top1-flash-emerald'
+                    : (lastFeedbackAnim.type === 'miss' || lastFeedbackAnim.type === 'crit_miss' || lastFeedbackAnim.type === 'rushed') ? 'top1-shake'
+                    : '')
+                : '';
+            const showPreStakes = state.hudStakesMode === 'stakes';
+            const currentCardIsLeech = isActiveLeechCard(currentCard);
+
+            // Build Thumb-Zone 1-Line Impact Note
+            let thumbImpactHtml = '';
+            if (state.sessionLastImpact && state.sessionLastImpact.isRushed) {
+                const imp = state.sessionLastImpact;
+                thumbImpactHtml = `
+                <div class="top1-amber-slide w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2 shadow-sm">
+                    <span>⚡ Rushed Miss (&lt;3.5s) — Slow down! ▼ Top 1: <span class="font-mono font-black">${formatTop1Delta(imp.delta)}</span> (Missed ${formatTop1Delta(imp.counterfactual)})</span>
+                    <span class="font-mono font-black shrink-0">Sess: ${formatTop1Delta(imp.sessionTotalDelta)}</span>
+                </div>`;
+            } else if (state.sessionLastImpact) {
+                const imp = state.sessionLastImpact;
+                const isPos = imp.isCorrect;
+                const cls = imp.fxType === 'gold'
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : isPos
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-rose-50 border-rose-200 text-rose-800';
+                const counterTxt = isPos
+                    ? `Dodged ${formatTop1Delta(imp.counterfactual)}`
+                    : `Missed ${formatTop1Delta(imp.counterfactual)}`;
+                thumbImpactHtml = `
+                <div class="w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl border text-[11px] md:text-xs font-bold flex items-center justify-between gap-2 shadow-sm ${cls}">
+                    <span class="truncate">${isPos ? '▲' : '▼'} Top 1: <span class="font-mono font-black">${formatTop1Delta(imp.delta)}</span> (${counterTxt})${imp.extraLabel ? ` • <b>${imp.extraLabel}</b>` : ''}</span>
+                    <span class="font-mono font-black shrink-0">Sess: ${formatTop1Delta(imp.sessionTotalDelta)}</span>
+                </div>`;
+            } else if (showPreStakes) {
+                thumbImpactHtml = `
+                <div class="w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl bg-slate-100/90 border border-slate-200 text-slate-600 text-[11px] md:text-xs font-bold flex items-center justify-between gap-2">
+                    <span>⚡ Card Stakes: <span class="text-emerald-700 font-mono font-black">${formatTop1Delta(liveStakes.gainCorrect)}</span> if right • <span class="text-rose-600 font-mono font-black">${formatTop1Delta(liveStakes.lossWrong)}</span> if missed</span>
+                    <span class="font-mono font-bold text-slate-400 shrink-0">Target: 92%</span>
+                </div>`;
+            }
 
             const quickChoicePillsHtml = (state.currentShuffledChoices && state.currentShuffledChoices.options)
                 ? state.currentShuffledChoices.options.map(opt => `
@@ -6080,6 +7815,69 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
             return `
             <div class="max-w-2xl mx-auto p-3 md:p-4 flex flex-col min-h-[90vh]">
+                <!-- Feature 2: Compact Sticky Live Top 1 Impact HUD -->
+                <div class="sticky top-0 z-20 -mx-3 md:-mx-4 px-3 md:px-4 pt-2 pb-2.5 mb-3 bg-slate-50/95 backdrop-blur-md border-b border-slate-200/80 shadow-sm">
+                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <div class="flex items-center gap-2">
+                            <button type="button" onclick="window.toggleTopnotcherDisplayUnit(event)" class="px-2.5 py-1 rounded-xl bg-slate-900 text-white font-mono tabular-nums font-black text-xs md:text-sm flex items-center gap-1.5 shadow-sm active:scale-95 transition-transform" title="Tap to switch % vs RP display">
+                                <span class="text-amber-400">TOP 1:</span>
+                                <span>${formatTop1Score(liveTopInfo.score, 2)}</span>
+                            </button>
+                            <span class="font-mono tabular-nums text-[11px] font-black px-2 py-0.5 rounded-lg ${sessionNetDelta >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}">
+                                ${sessionNetDelta >= 0 ? '+' : ''}${sessionNetDelta.toFixed(2)}${state.topnotcherDisplayUnit === 'rp' ? ' RP' : '%'}
+                            </span>
+                            <span class="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold border ${cleanBlockAcc >= 75 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}" title="15-Min Clean Block progress (≥75% acc earns +1 Break Bank)">
+                                🧱 ${cleanBlockMins}m/15m (${cleanBlockAcc}%)
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            ${showPreStakes && !state.showAnswer ? `
+                            <span class="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-slate-200 font-mono text-[10px] font-bold">
+                                <span class="text-emerald-600">${formatTop1Delta(liveStakes.gainCorrect)}</span> / <span class="text-rose-500">${formatTop1Delta(liveStakes.lossWrong)}</span>
+                            </span>
+                            ` : ''}
+                            <button type="button" onclick="window.toggleHudStakesMode(event)" class="px-2 py-1 rounded-lg text-[10px] font-extrabold border transition-colors ${showPreStakes ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'}" title="Toggle Pre-Answer Stakes vs Clean Exam Mode (Post-Reveal Only)">
+                                ${showPreStakes ? '⚡ Stakes ON' : '🎯 Clean Exam'}
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Thin progress bar toward 92% Top 1-3 Contender -->
+                    <div class="mt-2 flex items-center gap-2">
+                        <div class="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                            <div class="h-full rounded-full transition-all duration-500 ${liveTopInfo.score >= 92 ? 'bg-amber-400' : liveTopInfo.score >= 88 ? 'bg-emerald-500' : 'bg-blue-500'}" style="width: ${liveTopBarPct.toFixed(1)}%"></div>
+                        </div>
+                        <span class="text-[9px] font-mono font-bold text-slate-400 shrink-0">${liveTopInfo.tier.icon} 92% Goal</span>
+                    </div>
+                    ${(() => {
+                        if (!state.sessionData.objectiveCat) return '';
+                        const activeOrd = getOrGenerateDailyOrders(liveTopInfo).orders.find(o => o.cat === state.sessionData.objectiveCat);
+                        if (!activeOrd) return '';
+                        const barW = Math.min(100, Math.round((activeOrd.rawProgress / Math.max(1, activeOrd.target)) * 100));
+                        if (activeOrd.isOverdrive) {
+                            return `
+                            <div class="mt-2 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/15 via-orange-500/15 to-amber-500/15 border border-amber-400/60 flex items-center justify-between gap-2 text-[11px] font-black text-amber-900">
+                                <span class="truncate">${activeOrd.isBeastMode ? '👑 2× BEAST OVERDRIVE' : '🔥 OVERDRIVE BONUS'}: ${escapeHTML(activeOrd.title)}</span>
+                                <span class="font-mono shrink-0 bg-amber-500 text-white px-2 py-0.5 rounded-lg">${activeOrd.rawProgress}/${activeOrd.target} (+${activeOrd.bonus})</span>
+                            </div>`;
+                        }
+                        if (activeOrd.cleared) {
+                            return `
+                            <div class="mt-2 px-2.5 py-1.5 rounded-xl bg-emerald-50 border border-emerald-300 flex items-center justify-between gap-2 text-[11px] font-black text-emerald-800">
+                                <span class="truncate">✅ ORDER CLEARED! Keep going to enter 🔥 OVERDRIVE!</span>
+                                <span class="font-mono shrink-0 bg-emerald-600 text-white px-2 py-0.5 rounded-lg">${activeOrd.rawProgress}/${activeOrd.target}</span>
+                            </div>`;
+                        }
+                        return `
+                        <div class="mt-2 px-2.5 py-1.5 rounded-xl bg-indigo-50/90 border border-indigo-200 flex items-center justify-between gap-2 text-[11px] font-bold text-indigo-900">
+                            <span class="truncate">🎯 MISSION: ${escapeHTML(activeOrd.title)}</span>
+                            <div class="flex items-center gap-1.5 shrink-0">
+                                <div class="w-14 h-1.5 bg-indigo-200 rounded-full overflow-hidden"><div class="h-full bg-indigo-600 rounded-full" style="width: ${barW}%"></div></div>
+                                <span class="font-mono font-black text-indigo-700">${activeOrd.rawProgress}/${activeOrd.target}</span>
+                            </div>
+                        </div>`;
+                    })()}
+                </div>
+
                 <div class="flex flex-wrap items-center justify-between mb-4 gap-2.5">
                     <button onclick="window.endSession()" class="text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center gap-1 transition-colors"><i class="ph-bold ph-arrow-left"></i> Exit Session</button>
                     <div class="flex items-center gap-2">
@@ -6116,7 +7914,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                     ` : ''}
                     
-                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 ${state.showAnswer && currentCard.isErroneous ? 'border-rose-300' : state.showTaglishSimplified ? 'border-teal-300' : 'border-slate-200'} flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
+                    <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 ${state.showAnswer && currentCard.isErroneous ? 'border-rose-300' : state.showTaglishSimplified ? 'border-teal-300' : 'border-slate-200'} ${cardAnimClass} flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
                         <!-- Card Top Bar: Deck Path + Taglish Toggle + Parking Lot + Erroneous Tracker (Post-Reveal Only) + Live OCR Edit -->
                         <div class="flex items-center justify-between gap-2 w-full mb-4 pb-3 border-b border-slate-100 flex-wrap">
                             <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[180px] sm:max-w-[240px]" title="${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}">
@@ -6175,6 +7973,24 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 </div>
                                 ` : ''}
                             </div>
+
+                            ${currentCardIsLeech ? `
+                            <!-- Feature 3: Post-Reveal Leech Badge (Hidden before answering to avoid exam spoilers!) -->
+                            <div class="px-3.5 py-2.5 bg-amber-50 border-2 border-amber-300 rounded-2xl flex flex-wrap items-center justify-between gap-2 fade-in">
+                                <span class="text-xs font-black text-amber-900 flex items-center gap-1.5">
+                                    🎯 LEECH (${currentCard.incorrect || 0}× missed • Lvl ${currentCard.level || 1})
+                                    <span class="text-[10px] font-bold text-amber-700 hidden sm:inline">— Reach Lvl 3 for Gold Crit!</span>
+                                </span>
+                                <div class="flex items-center gap-1.5">
+                                    <button type="button" onclick="window.toggleParkingLot('${currentCard.id}', event)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${currentCard.parkingLot ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-amber-800 border-amber-300 hover:bg-amber-100'}">
+                                        🚩 ${currentCard.parkingLot ? 'Parked' : 'Park'}
+                                    </button>
+                                    <button type="button" onclick="window.toggleErroneous('${currentCard.id}', event)" class="px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors ${currentCard.isErroneous ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-rose-700 border-rose-200 hover:bg-rose-50'}">
+                                        ⚠️ ${currentCard.isErroneous ? 'Erroneous' : 'Flag Err'}
+                                    </button>
+                                </div>
+                            </div>
+                            ` : ''}
 
                             ${currentCard.isErroneous ? `
                             <div class="p-4 bg-rose-50/90 border-2 border-rose-200 rounded-2xl text-left space-y-2.5 fade-in shadow-sm">
@@ -6326,19 +8142,567 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                 </div>
 
-                <div class="h-28 flex items-center justify-center gap-3 mt-4 w-full max-w-xl mx-auto">
+                ${thumbImpactHtml}
+
+                <div class="h-28 flex items-center justify-center gap-3 mt-3 w-full max-w-xl mx-auto">
                     ${state.showAnswer ? `
                     <button onclick="window.handleAnswer('wrong')" class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm">
-                        <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MALI</span><span class="text-[10px] opacity-60">[1] Reset</span>
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MALI</span><span class="text-[10px] opacity-70 font-mono">[1] ${formatTop1Delta(liveStakes.lossWrong)}</span>
                     </button>
                     <button onclick="window.handleAnswer('correct')" class="flex-1 bg-green-500 hover:bg-green-600 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-green-200">
-                        <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> TAMA</span><span class="text-[10px] opacity-80">[2] +1 Lvl</span>
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> TAMA</span><span class="text-[10px] opacity-90 font-mono">[2] ${formatTop1Delta(liveStakes.gainCorrect)}</span>
                     </button>
                     <button onclick="window.handleAnswer('perfect')" class="flex-1 bg-amber-400 hover:bg-amber-500 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-amber-200">
-                        <span class="flex items-center gap-1"><i class="ph-fill ph-shooting-star text-xl"></i> PERFECT</span><span class="text-[10px] opacity-80">[3] +3 Lvl</span>
+                        <span class="flex items-center gap-1"><i class="ph-fill ph-shooting-star text-xl"></i> PERFECT</span><span class="text-[10px] opacity-90 font-mono">[3] ${formatTop1Delta(liveStakes.gainPerfect)}</span>
                     </button>
                     ` : ''}
                 </div>
+            </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:Topnotcher & MELE 2027 Reusable Widgets ---
+        function renderLockedInFeb2027Widget() {
+            const activeCards = state.terms.filter(t => !t.isErroneous);
+            const total = activeCards.length;
+            const lockedCount = activeCards.filter(isLockedForFeb2027).length;
+            const lockedPct = total > 0 ? Math.round((lockedCount / total) * 100) : 0;
+            const tel = ensureDailyTelemetry();
+            const lockedToday = tel.lockedToday || 0;
+            return `
+                <div class="bg-gradient-to-r from-indigo-900 via-slate-900 to-emerald-950 text-white p-5 rounded-3xl shadow-md border border-indigo-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div class="flex items-center gap-3.5">
+                        <div class="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shrink-0">
+                            <i class="ph-fill ph-lock-key text-2xl"></i>
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <h3 class="text-sm md:text-base font-black tracking-tight">Locked-In for Feb 2027 MELE</h3>
+                                <span class="px-2 py-0.5 rounded-full text-[11px] font-black ${lockedToday > 0 ? 'bg-emerald-400 text-emerald-950' : 'bg-white/10 text-slate-300'}">+${lockedToday} locked in today</span>
+                            </div>
+                            <p class="text-xs text-slate-300 mt-0.5">Cards at Level 6 or scheduled past Feb 2027 (exam-day vault).</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-4 shrink-0">
+                        <div class="text-right">
+                            <div class="text-2xl md:text-3xl font-black font-mono tabular-nums text-amber-300 leading-none">${lockedCount.toLocaleString()} <span class="text-sm text-slate-400 font-bold">/ ${total.toLocaleString()}</span></div>
+                            <div class="text-[11px] font-extrabold text-emerald-300 mt-1">${lockedPct}% Exam-Vault Locked</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderMicroWinsAndBreakBankWidgets() {
+            const tel = ensureDailyTelemetry();
+            const lu = tel.levelUps || {};
+            const netUps = lu.net || 0;
+            const leechesTamed = tel.leechesTamed || 0;
+            const breakdownPills = ['0->1', '1->2', '2->3', '3->4', '4->5', '5->6']
+                .filter(k => (lu[k] || 0) > 0)
+                .map(k => `<span class="px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 text-[10px] font-black font-mono">L${k.replace('->', '→L')}: ${lu[k]}</span>`)
+                .join('');
+
+            const secInBlock = tel.cleanBlockSec || 0;
+            const blockPct = Math.min(100, Math.round((secInBlock / 900) * 100));
+            const minsInBlock = Math.floor(secInBlock / 60);
+            const secsRem = Math.floor(secInBlock % 60);
+            const blkAtt = (tel.cleanBlockC || 0) + (tel.cleanBlockW || 0);
+            const blkAcc = blkAtt > 0 ? Math.round((tel.cleanBlockC / blkAtt) * 100) : 100;
+            const availableBreaks = Math.max(0, (tel.cleanBlocksEarned || 0) - (tel.breakBankClaimed || 0));
+
+            return `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- Feature 6: Daily Micro-Wins Pill -->
+                    <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-3">
+                        <div class="flex items-center justify-between gap-2">
+                            <span class="text-xs font-black uppercase tracking-wider text-emerald-700 flex items-center gap-1.5">
+                                <i class="ph-fill ph-sparkle text-base text-emerald-500"></i> Daily Micro-Wins (Resets Midnight)
+                            </span>
+                            <span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-amber-100 text-amber-800">🎯 ${leechesTamed} Leeches Tamed</span>
+                        </div>
+                        <div class="flex items-baseline gap-2">
+                            <span class="text-3xl font-black font-mono tabular-nums ${netUps >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${netUps >= 0 ? '+' : ''}${netUps}</span>
+                            <span class="text-xs font-bold text-slate-500">Net Level-Ups Today</span>
+                        </div>
+                        <div class="flex flex-wrap gap-1.5">
+                            ${breakdownPills || '<span class="text-[11px] font-semibold text-slate-400">Answer cards today to stack level-up micro-wins!</span>'}
+                        </div>
+                    </div>
+
+                    <!-- Feature 7: 15-Minute Clean Block -> Break Bank -->
+                    <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-3">
+                        <div class="flex items-center justify-between gap-2">
+                            <span class="text-xs font-black uppercase tracking-wider text-indigo-700 flex items-center gap-1.5">
+                                <i class="ph-fill ph-coffee text-base text-indigo-500"></i> 15-Min Clean Block → Break Bank
+                            </span>
+                            <span class="px-2.5 py-0.5 rounded-full text-[11px] font-black ${availableBreaks > 0 ? 'bg-emerald-500 text-white shadow-sm' : 'bg-slate-100 text-slate-500'}">☕ ${availableBreaks} Break${availableBreaks === 1 ? '' : 's'} Ready</span>
+                        </div>
+                        <div class="space-y-1.5">
+                            <div class="flex items-center justify-between text-xs font-bold">
+                                <span class="text-slate-700 font-mono tabular-nums">${minsInBlock}m ${secsRem}s / 15m 0s</span>
+                                <span class="${blkAcc >= 75 ? 'text-emerald-600' : 'text-rose-600'}">${blkAcc}% block acc (need ≥75%)</span>
+                            </div>
+                            <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                                <div class="h-full ${blkAcc >= 75 ? 'bg-indigo-500' : 'bg-amber-400'} rounded-full transition-all duration-500" style="width: ${blockPct}%"></div>
+                            </div>
+                        </div>
+                        <div class="flex items-center justify-between gap-2 pt-0.5">
+                            <span class="text-[11px] font-semibold text-slate-400">${tel.cleanBlocksEarned || 0} blocks earned today</span>
+                            <button type="button" onclick="window.claimBreakBank()" ${availableBreaks <= 0 ? 'disabled' : ''} class="px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all ${availableBreaks > 0 ? 'bg-indigo-600 hover:bg-indigo-700 text-white active:scale-95 shadow-sm' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}">
+                                Claim 5-Min Break ☕
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderIntakeVsBurnGaugeWidget() {
+            const tel = ensureDailyTelemetry();
+            const added = tel.addedToday || 0;
+            const cleared = tel.clearedToday || 0;
+            const netFlow = added - cleared; // negative = backlog shrinking (great!), positive = backlog growing
+            const totalFlow = Math.max(1, added + cleared);
+            const addedPct = Math.round((added / totalFlow) * 100);
+            const clearedPct = 100 - addedPct;
+            const flowBadge = netFlow < 0
+                ? `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-700">🔥 ${netFlow} Net Backlog (Shrinking!)</span>`
+                : netFlow > 0
+                    ? `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-rose-100 text-rose-700">+${netFlow} Net Backlog (Growing)</span>`
+                    : `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-slate-100 text-slate-600">⚖️ 0 Net Balanced</span>`;
+
+            return `
+                <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-3">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <h3 class="text-sm md:text-base font-extrabold text-slate-800 flex items-center gap-2">
+                            <i class="ph-fill ph-scales text-blue-500 text-xl"></i> Intake vs. Burn Rate Gauge (Today)
+                        </h3>
+                        ${flowBadge}
+                    </div>
+                    <div class="flex items-center justify-between text-xs font-bold">
+                        <span class="text-amber-700">📥 Added Today: <b class="font-mono text-sm">${added}</b></span>
+                        <span class="text-emerald-700">🔥 Cleared / Promoted: <b class="font-mono text-sm">${cleared}</b></span>
+                    </div>
+                    <div class="w-full h-3.5 bg-slate-100 rounded-full overflow-hidden flex border border-slate-200">
+                        ${added + cleared === 0
+                            ? `<div class="w-full h-full bg-slate-200"></div>`
+                            : `<div style="width: ${addedPct}%" class="bg-amber-400 h-full transition-all duration-500" title="Added Today: ${added}"></div>
+                               <div style="width: ${clearedPct}%" class="bg-emerald-500 h-full transition-all duration-500" title="Cleared/Promoted Today: ${cleared}"></div>`
+                        }
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAdaptiveWeeklyTargetWidget() {
+            const dowNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            const todayDow = new Date().getDay();
+            const todayKey = getTodayDateKey();
+            const todayLog = (state.activityLog && state.activityLog[todayKey]) || {};
+            let todayDone = 0;
+            Object.keys(todayLog).forEach(h => { todayDone += (Number(todayLog[h]?.c) || 0) + (Number(todayLog[h]?.w) || 0); });
+            if (todayDone === 0) {
+                todayDone = state.terms.filter(t => (t.lastReviewedDate || 0) >= getTodayStart()).length;
+            }
+            const todayTarget = getTodayAdaptiveTarget();
+            const ringPct = Math.min(100, Math.round((todayDone / Math.max(1, todayTarget)) * 100));
+            const r = 24;
+            const circ = 2 * Math.PI * r;
+            const dash = (ringPct / 100) * circ;
+
+            // Compute Adaptive Quota Streak (consecutive days meeting that day-of-week's target)
+            const getDailyTotalForKey = (dKey) => {
+                const dayObj = state.activityLog && state.activityLog[dKey];
+                let sum = 0;
+                if (dayObj && typeof dayObj === 'object') {
+                    Object.keys(dayObj).forEach(h => { sum += (Number(dayObj[h]?.c) || 0) + (Number(dayObj[h]?.w) || 0); });
+                }
+                if (sum === 0 && dKey === todayKey) return todayDone;
+                return sum;
+            };
+            let quotaStreak = 0;
+            const baseMid = new Date();
+            baseMid.setHours(0, 0, 0, 0);
+            const todayMet = todayDone >= todayTarget;
+            for (let back = todayMet ? 0 : 1; back < 60; back++) {
+                const dt = new Date(baseMid.getTime() - back * MS_PER_DAY);
+                const dKey = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+                const dayTarget = Number(state.weeklyTargets && state.weeklyTargets[dt.getDay()]) || 80;
+                const count = getDailyTotalForKey(dKey);
+                if (count >= dayTarget) quotaStreak++;
+                else break;
+            }
+
+            const dayInputsHtml = [1, 2, 3, 4, 5, 6, 0].map(dow => `
+                <div class="flex flex-col items-center p-2 rounded-xl border ${dow === todayDow ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-50 border-slate-200'}">
+                    <span class="text-[10px] font-black uppercase ${dow === todayDow ? 'text-emerald-700' : 'text-slate-500'}">${dowNames[dow]}</span>
+                    <input type="number" min="10" max="500" value="${state.weeklyTargets[dow] || 80}" onchange="window.updateWeeklyTargetDay(${dow}, this.value)" class="w-12 mt-1 text-center text-xs font-black font-mono bg-white border border-slate-200 rounded-lg py-1 outline-none focus:ring-2 focus:ring-emerald-400" />
+                </div>
+            `).join('');
+
+            return `
+                <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-3">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <div class="relative w-14 h-14 shrink-0">
+                                <svg viewBox="0 0 60 60" class="w-full h-full">
+                                    <circle cx="30" cy="30" r="${r}" fill="none" stroke="#e2e8f0" stroke-width="6" />
+                                    <circle cx="30" cy="30" r="${r}" fill="none" stroke="${ringPct >= 100 ? '#10b981' : '#3b82f6'}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${dash.toFixed(1)} ${(circ - dash).toFixed(1)}" transform="rotate(-90 30 30)" />
+                                </svg>
+                                <div class="absolute inset-0 flex items-center justify-center text-[11px] font-black font-mono text-slate-800">${ringPct}%</div>
+                            </div>
+                            <div>
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <h3 class="text-sm md:text-base font-extrabold text-slate-800">Adaptive ${dowNames[todayDow]} Target: <span class="text-emerald-600 font-mono">${todayDone} / ${todayTarget}</span></h3>
+                                    <span class="text-[10px] font-black px-2 py-0.5 rounded-full ${quotaStreak > 0 ? 'bg-amber-100 text-amber-800 border border-amber-200' : 'bg-slate-100 text-slate-500'}">🔥 ${quotaStreak}d Quota Streak</span>
+                                </div>
+                                <p class="text-xs text-slate-500">Custom Mon–Sun daily quotas (lighter Sat, heavier Sun) synced to Daily Orders, Streak & Ghost Pace.</p>
+                            </div>
+                        </div>
+                        <button type="button" onclick="window.toggleWeeklyTargetEditor()" class="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center gap-1 transition-colors">
+                            <i class="ph-bold ph-sliders-horizontal"></i> ${state.showWeeklyTargetEditor ? 'Hide Schedule' : 'Edit Mon–Sun'}
+                        </button>
+                    </div>
+                    ${state.showWeeklyTargetEditor ? `
+                    <div class="grid grid-cols-7 gap-1.5 pt-2 border-t border-slate-100 fade-in">
+                        ${dayInputsHtml}
+                    </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        function renderDailyOrdersCardHtml(topData) {
+            const td = topData || computeTopnotcherIndex();
+            const ordInfo = getOrGenerateDailyOrders(td);
+            const th = state.orderThrottle || { masteryScale: 1, leechScale: 1, sharpnessScale: 1 };
+            const avgScale = Math.round(((th.masteryScale + th.leechScale + th.sharpnessScale) / 3) * 100);
+
+            const orderRowsHtml = ordInfo.orders.map(o => {
+                const pct = Math.min(100, Math.round((o.rawProgress / Math.max(1, o.target)) * 100));
+                const left = Math.max(0, o.target - o.rawProgress);
+                const canPlay = o.eligibleCount > 0;
+
+                if (o.isOverdrive) {
+                    return `
+                    <div onclick="${canPlay ? `window.startObjectiveSession('${o.cat}')` : ''}" class="p-3.5 rounded-2xl bg-gradient-to-r from-amber-50 via-yellow-50/90 to-emerald-50/80 border-2 border-amber-400 overdrive-card-glow space-y-2 transition-all ${canPlay ? 'cursor-pointer hover:scale-[1.01] active:scale-[0.99]' : ''}">
+                        <div class="flex items-start justify-between gap-2.5">
+                            <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                                <span class="w-6 h-6 rounded-full bg-gradient-to-br from-amber-500 to-orange-500 text-white flex items-center justify-center shrink-0 mt-0.5 text-xs font-black shadow-sm">${o.isBeastMode ? '👑' : '🔥'}</span>
+                                <div class="min-w-0">
+                                    <p class="text-xs md:text-sm font-extrabold text-amber-950 line-through decoration-2 decoration-amber-500">${escapeHTML(o.title)}</p>
+                                    <div class="flex flex-wrap items-center gap-1.5 mt-1">
+                                        <span class="px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 text-white text-[10px] font-black tracking-wide shadow-sm">
+                                            ${o.isBeastMode ? '👑 2× BEAST MODE!' : '🔥 OVERDRIVE'} ${o.rawProgress}/${o.target} (+${o.bonus} BONUS • ${o.pctReal}%)
+                                        </span>
+                                        <span class="text-[10px] font-mono font-black text-emerald-700">+${o.bonusEstGain.toFixed(2)}% Top 1 earned!</span>
+                                    </div>
+                                </div>
+                            </div>
+                            ${canPlay ? `
+                            <button type="button" onclick="event.stopPropagation(); window.startObjectiveSession('${o.cat}')" class="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-black text-[11px] shrink-0 shadow-sm flex items-center gap-1 transition-all active:scale-95">
+                                <span>🔥 Push More</span>
+                            </button>` : ''}
+                        </div>
+                        <div class="text-[11px] font-semibold text-amber-900/80 pl-8">${escapeHTML(o.actionHint)}</div>
+                    </div>`;
+                }
+
+                if (o.cleared) {
+                    return `
+                    <div onclick="${canPlay ? `window.startObjectiveSession('${o.cat}')` : ''}" class="p-3.5 rounded-2xl bg-emerald-50/90 border border-emerald-300 space-y-2 transition-all ${canPlay ? 'cursor-pointer hover:border-amber-400 hover:bg-emerald-50' : ''}">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                                <span class="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center shrink-0 mt-0.5 text-xs font-black">✓</span>
+                                <div class="min-w-0">
+                                    <p class="text-xs md:text-sm font-bold text-emerald-900 line-through decoration-2 decoration-emerald-600">${escapeHTML(o.title)}</p>
+                                    <span class="text-[10px] font-black text-emerald-700 uppercase tracking-wider">✓ CLEARED (${o.rawProgress}/${o.target}) • Claimed +${o.estGain.toFixed(2)}%</span>
+                                </div>
+                            </div>
+                            ${canPlay ? `
+                            <button type="button" onclick="event.stopPropagation(); window.startObjectiveSession('${o.cat}')" class="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-black text-[11px] shrink-0 shadow-sm flex items-center gap-1 transition-all active:scale-95" title="Go beyond 100% into Overdrive Bonus!">
+                                <span>🔥 Overdrive</span>
+                            </button>` : `<span class="px-2.5 py-1 rounded-xl bg-emerald-600 text-white font-mono font-black text-[11px] shrink-0 shadow-sm">Claimed +${o.estGain.toFixed(2)}%</span>`}
+                        </div>
+                    </div>`;
+                }
+
+                if (o.status === 'partial_late' || o.status === 'late_warn') {
+                    return `
+                    <div onclick="${canPlay ? `window.startObjectiveSession('${o.cat}')` : ''}" class="p-3.5 rounded-2xl bg-amber-50/85 border-2 border-amber-300 space-y-2 transition-all ${canPlay ? 'cursor-pointer hover:border-amber-500 hover:shadow-md active:scale-[0.99]' : ''}">
+                        <div class="flex items-start justify-between gap-2">
+                            <div class="min-w-0 flex-1">
+                                <p class="text-xs md:text-sm font-extrabold text-slate-900">${escapeHTML(o.title)}</p>
+                                <p class="text-[11px] font-semibold text-amber-800/90 mt-0.5">${escapeHTML(o.actionHint)}</p>
+                            </div>
+                            <div class="flex flex-col items-end gap-1 shrink-0">
+                                <span class="px-2 py-0.5 rounded-lg bg-amber-200/90 text-amber-900 text-[10px] font-black">⚠ ${o.rawProgress}/${o.target} (${left} left)</span>
+                                ${canPlay ? `<button type="button" onclick="event.stopPropagation(); window.startObjectiveSession('${o.cat}')" class="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-black flex items-center gap-1 shadow-sm"><i class="ph-fill ph-play text-xs"></i> Finish Now</button>` : ''}
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="flex-1 h-2 bg-amber-100 rounded-full overflow-hidden">
+                                <div class="h-full bg-amber-500 rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+                            </div>
+                            <span class="text-[10px] font-mono font-bold text-amber-800 shrink-0">Est. +${o.estGain.toFixed(2)}%</span>
+                        </div>
+                    </div>`;
+                }
+
+                return `
+                <div onclick="${canPlay ? `window.startObjectiveSession('${o.cat}')` : ''}" class="p-3.5 rounded-2xl bg-slate-50/90 border border-slate-200 space-y-2 transition-all ${canPlay ? 'cursor-pointer hover:bg-white hover:border-blue-400 hover:shadow-md active:scale-[0.99] group' : ''}">
+                    <div class="flex items-start justify-between gap-2.5">
+                        <div class="min-w-0 flex-1">
+                            <p class="text-xs md:text-sm font-extrabold text-slate-800 group-hover:text-blue-700 transition-colors">${escapeHTML(o.title)}</p>
+                            <p class="text-[11px] font-semibold text-slate-500 mt-0.5">${escapeHTML(o.actionHint)}</p>
+                        </div>
+                        <div class="flex flex-col items-end gap-1 shrink-0">
+                            <span class="px-2 py-0.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-100 text-[10px] font-mono font-black">${o.rawProgress}/${o.target}</span>
+                            ${canPlay ? `<button type="button" onclick="event.stopPropagation(); window.startObjectiveSession('${o.cat}')" class="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-black flex items-center gap-1 shadow-sm transition-colors"><i class="ph-fill ph-play text-xs"></i> Start Cards</button>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div class="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+                            <div class="h-full bg-blue-500 rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+                        </div>
+                        <span class="text-[10px] font-mono font-extrabold text-emerald-700 shrink-0">Est. +${o.estGain.toFixed(2)}% Top 1</span>
+                    </div>
+                </div>`;
+            }).join('');
+
+            // Overachiever Surplus Celebration Banner (when you go beyond today's Topnotcher targets!)
+            const surplusBannerHtml = ordInfo.totalBonusCards > 0 ? `
+                <div class="p-3.5 rounded-2xl bg-gradient-to-r from-amber-500 via-orange-500 to-emerald-500 text-white shadow-md flex flex-wrap items-center justify-between gap-2">
+                    <div class="flex items-center gap-2.5">
+                        <span class="text-2xl leading-none">${ordInfo.clearedCount === 3 ? '👑' : '🚀'}</span>
+                        <div>
+                            <div class="text-xs md:text-sm font-black tracking-tight">OVERACHIEVER SURPLUS: +${ordInfo.totalBonusCards} Bonus Card${ordInfo.totalBonusCards === 1 ? '' : 's'} Beyond Today's Quota!</div>
+                            <div class="text-[11px] font-bold text-amber-50">You're pulling ~+${ordInfo.daysAheadEarned} day${ordInfo.daysAheadEarned === 1 ? '' : 's'} further ahead of your Feb 2027 Topnotcher pace!</div>
+                        </div>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-xl bg-black/20 font-mono font-black text-xs shrink-0">🔥 TOP 1 MOMENTUM</span>
+                </div>
+            ` : (ordInfo.clearedCount === 3 ? `
+                <div class="p-3 rounded-2xl bg-emerald-600 text-white shadow-sm flex items-center justify-between gap-2 text-xs font-black">
+                    <span>🏆 ALL 3/3 FEB 2027 ORDERS CLEARED! Tap any "🔥 Overdrive" button to bank bonus cards!</span>
+                </div>
+            ` : '');
+
+            // Collapsible "Yesterday: X/3" Recap Strip with Distinct Dashed Coral/Amber Outline for Missed (NO strikethrough!)
+            let yesterdayHtml = '';
+            if (ordInfo.yesterdayRecap) {
+                const yr = ordInfo.yesterdayRecap;
+                yesterdayHtml = `
+                <div class="pt-2 border-t border-slate-100">
+                    <button type="button" onclick="window.toggleYesterdayOrders()" class="w-full flex items-center justify-between text-xs font-bold text-slate-500 hover:text-slate-800 py-1">
+                        <span>📅 Yesterday (${yr.date}): <b>${yr.clearedCount}/${yr.total} cleared</b></span>
+                        <i class="ph-bold ${state.showYesterdayOrders ? 'ph-caret-up' : 'ph-caret-down'}"></i>
+                    </button>
+                    ${state.showYesterdayOrders ? `
+                    <div class="mt-2 space-y-1.5 fade-in">
+                        ${yr.items.map(yi => yi.cleared
+                            ? `<div class="px-3 py-2 rounded-xl bg-emerald-50/70 border border-emerald-200 flex items-center justify-between gap-2 text-xs">
+                                   <span class="text-emerald-800 font-bold line-through">${escapeHTML(yi.title)}</span>
+                                   <span class="text-[10px] font-black text-emerald-700 shrink-0">✓ Cleared</span>
+                               </div>`
+                            : `<div class="px-3 py-2 rounded-xl bg-rose-50/50 border-2 border-dashed border-rose-300 flex items-center justify-between gap-2 text-xs">
+                                   <span class="text-rose-900 font-bold">${escapeHTML(yi.title)}</span>
+                                   <span class="text-[10px] font-black text-rose-700 bg-rose-100 px-2 py-0.5 rounded shrink-0">✗ Missed / ↻ Unfinished</span>
+                               </div>`
+                        ).join('')}
+                    </div>` : ''}
+                </div>`;
+            }
+
+            return `
+                <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                            <h2 class="text-base md:text-lg font-extrabold text-slate-900 flex items-center gap-2">
+                                <i class="ph-fill ph-clipboard-text text-amber-500 text-xl"></i> Topnotcher Daily Orders
+                            </h2>
+                            <p class="text-xs text-slate-500">Tap any order to launch its exact cards • Calibrated for <b>Feb 2027 Topnotcher</b> (~${ordInfo.sureTopnotcherTodayQuota}/day incl. +${td.intakeInfo.scopedIntakeRate}/d intake • Throttle ${avgScale}%).</p>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            ${ordInfo.totalBonusCards > 0 ? `<span class="px-2.5 py-1 rounded-full text-xs font-black bg-amber-100 text-amber-800 border border-amber-300">🔥 +${ordInfo.totalBonusCards} Bonus</span>` : ''}
+                            <span class="px-3 py-1 rounded-full text-xs font-black ${ordInfo.clearedCount === 3 ? 'bg-emerald-500 text-white shadow-sm' : 'bg-amber-100 text-amber-800'}">
+                                ${ordInfo.clearedCount} / 3 Cleared
+                            </span>
+                        </div>
+                    </div>
+                    ${surplusBannerHtml}
+                    <div class="space-y-2.5">
+                        ${orderRowsHtml}
+                    </div>
+                    ${yesterdayHtml}
+                </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:Feature 1 — "Are You a Topnotcher?" Dedicated Tab ---
+        function renderTopnotcher() {
+            const td = computeTopnotcherIndex();
+            const scorePctBar = Math.min(100, Math.max(0, td.score));
+
+            const pillarRows = [
+                { name: 'Exam-Day Mastery', weight: '45%', val: td.pillars.mastery, color: 'bg-emerald-500', note: td.isPrcWeighted ? 'PRC 35/35/30 weighted' : 'Unweighted (single/unmapped bank)' },
+                { name: '14-Day Rolling Sharpness', weight: '25%', val: td.pillars.sharpness, color: 'bg-blue-500', note: td.pillars.sharpnessObj.isFallback ? 'Seeded from deck history (live tracks next)' : `${td.pillars.sharpnessObj.c}✓ / ${td.pillars.sharpnessObj.w}✗ (${td.pillars.sharpnessObj.daysUsed}d)` },
+                { name: 'Leech Control', weight: '15%', val: td.pillars.leech, color: 'bg-amber-500', note: `${td.activeLeeches} active leech${td.activeLeeches === 1 ? '' : 'es'} / ${td.reviewedCards} reviewed` },
+                { name: 'Feb 2027 Trajectory', weight: '15%', val: td.pillars.trajectory, color: 'bg-purple-500', note: `${td.daysLeftToExam}d left vs ~${td.projectedDaysToL5}d to L5 (incl. +${td.intakeInfo.scopedIntakeRate}/d card intake -> ~${td.intakeInfo.projectedExamBankSize.toLocaleString()} cards)` }
+            ];
+
+            const tiersList = [
+                { range: '<70%', label: 'Building Base', active: td.score < 70 },
+                { range: '70–79.9%', label: 'Passer Zone', active: td.score >= 70 && td.score < 80 },
+                { range: '80–87.9%', label: 'Strong Contender', active: td.score >= 80 && td.score < 88 },
+                { range: '88–91.9%', label: 'Top 10 Territory', active: td.score >= 88 && td.score < 92 },
+                { range: '≥92%', label: 'Top 1–3 Contender', active: td.score >= 92 }
+            ];
+
+            const prcSubjectPills = Object.keys(td.subjectStats).length > 0
+                ? Object.keys(td.subjectStats).map(subj => {
+                    const s = td.subjectStats[subj];
+                    return `
+                        <div class="px-3 py-2 rounded-xl border ${s.pct >= 80 ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-slate-50 border-slate-200 text-slate-700'} flex items-center justify-between gap-2 text-xs font-bold">
+                            <span>${subj} (${Math.round(s.weight * 100)}%)</span>
+                            <span class="font-mono font-black">${s.pct.toFixed(1)}% <span class="text-[10px] opacity-70">(${s.count})</span></span>
+                        </div>
+                    `;
+                }).join('')
+                : `<span class="text-xs text-slate-400 font-semibold">Folders not mapped to PIPE/MDSP/MESL — using unweighted full-bank mastery cleanly.</span>`;
+
+            return `
+            <div class="max-w-5xl mx-auto p-4 md:p-6 space-y-6 fade-in">
+                <!-- Hero Card: Are You a Topnotcher? -->
+                <div class="bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950 text-white rounded-3xl p-5 md:p-7 shadow-xl border border-slate-700/80 space-y-5">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <div class="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-2xl shrink-0">${td.tier.icon}</div>
+                            <div>
+                                <h1 class="text-xl md:text-2xl font-black tracking-tight">Are You a Topnotcher? <span class="text-amber-400 text-sm font-extrabold">MELE Feb 2027</span></h1>
+                                <p class="text-xs text-slate-300">4-Pillar Composite Index • Excludes Erroneous Cards • ${td.daysLeftToExam} days to Feb 2027</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <div class="flex bg-white/10 p-1 rounded-xl text-xs font-bold">
+                                <button type="button" onclick="window.setTopnotcherScope('prime')" class="px-3 py-1.5 rounded-lg transition-all ${state.topnotcherScope === 'prime' ? 'bg-amber-400 text-slate-950 shadow-sm' : 'text-slate-300 hover:text-white'}">Prime Phase</button>
+                                <button type="button" onclick="window.setTopnotcherScope('full')" class="px-3 py-1.5 rounded-lg transition-all ${state.topnotcherScope === 'full' ? 'bg-amber-400 text-slate-950 shadow-sm' : 'text-slate-300 hover:text-white'}">Full Bank</button>
+                            </div>
+                            <button type="button" onclick="window.toggleTopnotcherDisplayUnit(event)" class="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-mono font-bold text-amber-300 border border-white/10">
+                                ${state.topnotcherDisplayUnit === 'rp' ? 'Unit: RP' : 'Unit: %'}
+                            </button>
+                        </div>
+                    </div>
+
+                    ${td.scopeFallback ? `<div class="text-[11px] font-bold text-amber-300 bg-amber-500/15 border border-amber-400/30 px-3 py-1.5 rounded-xl">No "Prime" folder matched yet — showing Full Bank cleanly.</div>` : ''}
+
+                    <div class="grid grid-cols-1 md:grid-cols-12 gap-5 items-center">
+                        <div class="md:col-span-5 text-center md:text-left space-y-2">
+                            <div class="text-5xl md:text-6xl font-black font-mono tabular-nums tracking-tight text-white leading-none">${formatTop1Score(td.score, 2)}</div>
+                            <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black border ${td.tier.bg} ${td.tier.color}">
+                                ${td.tier.icon} ${td.tier.label}
+                            </div>
+                            <div class="text-xs text-slate-300 font-semibold pt-1">
+                                Projected Feb 2027 Standing: <b class="text-amber-300">${td.projectedFeb2027.label} (${formatTop1Score(td.projectedFeb2027.score, 1)})</b>
+                            </div>
+                        </div>
+
+                        <div class="md:col-span-7 space-y-3">
+                            ${pillarRows.map(p => `
+                            <div class="space-y-1">
+                                <div class="flex items-center justify-between text-xs font-bold">
+                                    <span class="text-slate-200">${p.name} <span class="text-slate-400 font-mono">(${p.weight})</span></span>
+                                    <span class="font-mono font-black text-white">${p.val.toFixed(1)}%</span>
+                                </div>
+                                <div class="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                                    <div class="h-full ${p.color} rounded-full transition-all duration-700" style="width: ${Math.min(100, p.val).toFixed(1)}%"></div>
+                                </div>
+                                <div class="text-[10px] text-slate-400">${p.note}</div>
+                            </div>
+                            `).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Tier Ladder -->
+                    <div class="flex items-center gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
+                        ${tiersList.map(tr => `
+                            <div class="px-2.5 py-1.5 rounded-xl text-[10px] font-extrabold border whitespace-nowrap ${tr.active ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-sm' : 'bg-white/5 text-slate-400 border-white/10'}">
+                                ${tr.label} <span class="font-mono opacity-80">(${tr.range})</span>
+                            </div>
+                        `).join('')}
+                    </div>
+
+                    <!-- 3 Hard Gates -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        ${[td.gates.subjects80, td.gates.coverage85, td.gates.sharpness85].map(g => `
+                            <div class="px-3 py-2.5 rounded-2xl border flex items-center gap-2 text-xs font-extrabold ${g.pass ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200' : 'bg-rose-500/15 border-rose-400/40 text-rose-200'}">
+                                <i class="ph-fill ${g.pass ? 'ph-check-circle text-emerald-400' : 'ph-x-circle text-rose-400'} text-lg shrink-0"></i>
+                                <span>${g.label}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+
+                    <!-- Biggest Drag 1-Line Mission Callout -->
+                    <div class="p-3.5 rounded-2xl bg-amber-400/15 border border-amber-400/40 text-amber-100 text-xs md:text-sm font-bold flex items-start gap-2.5">
+                        <span class="text-base leading-none mt-0.5">🎯</span>
+                        <div><span class="text-amber-300 uppercase tracking-wider text-[10px] font-black mr-1.5">Biggest Drag:</span> ${escapeHTML(td.biggestDrag.msg)}</div>
+                    </div>
+
+                    <!-- Card Addition Rate & Feb 2027 Topnotcher Pace Reality Check -->
+                    <div class="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-2.5">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <div class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                                <i class="ph-fill ph-trend-up text-cyan-400 text-base"></i>
+                                <span>Card Addition Rate Impact:</span>
+                                <span class="font-mono font-black text-cyan-300">+${td.intakeInfo.effectiveRate}/day</span>
+                                <span class="text-[10px] text-slate-400">(${td.intakeInfo.mode === 'auto' ? `Auto from history • +${td.intakeInfo.addedLast7d} in 7d` : 'Custom rate'})</span>
+                            </div>
+                            <div class="flex items-center gap-1 flex-wrap text-[10px] font-black">
+                                <button type="button" onclick="window.setIntakeRateMode('auto')" class="px-2 py-1 rounded-lg transition-all ${state.intakeRateMode === 'auto' ? 'bg-cyan-400 text-slate-950' : 'bg-white/10 text-slate-300 hover:bg-white/20'}">Auto (${td.intakeInfo.steadyAutoRate}/d)</button>
+                                ${[0, 10, 20, 35].map(r => `
+                                    <button type="button" onclick="window.setCustomIntakeRate(${r})" class="px-2 py-1 rounded-lg transition-all ${state.intakeRateMode === 'custom' && Number(state.customIntakeRate) === r ? 'bg-cyan-400 text-slate-950' : 'bg-white/10 text-slate-300 hover:bg-white/20'}">+${r}/d</button>
+                                `).join('')}
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                            <div class="px-3 py-2 rounded-xl bg-black/25 border border-white/10">
+                                <div class="text-slate-400 font-bold text-[10px] uppercase">Projected Feb 2027 Bank</div>
+                                <div class="font-mono font-black text-white mt-0.5">${td.intakeInfo.projectedExamBankSize.toLocaleString()} cards <span class="text-cyan-300 font-bold text-[10px]">(+${td.intakeInfo.projectedFutureCards.toLocaleString()} new)</span></div>
+                            </div>
+                            <div class="px-3 py-2 rounded-xl bg-black/25 border border-white/10">
+                                <div class="text-slate-400 font-bold text-[10px] uppercase">Required Daily Pace (Top 1)</div>
+                                <div class="font-mono font-black text-amber-300 mt-0.5">${td.requiredDailyReviews} reviews / day <span class="text-slate-400 font-bold text-[10px]">(${td.safeRunwayDays}d runway)</span></div>
+                            </div>
+                            <div class="px-3 py-2 rounded-xl bg-black/25 border border-white/10">
+                                <div class="text-slate-400 font-bold text-[10px] uppercase">Your Pace vs Required</div>
+                                <div class="font-mono font-black mt-0.5 ${td.paceMarginPerDay >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
+                                    ${td.effectiveQuota}/day (${td.paceMarginPerDay >= 0 ? `+${td.paceMarginPerDay} ahead ✅` : `${td.paceMarginPerDay} behind ⚠`})
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- PRC Subject Weight Breakdown -->
+                <div class="bg-white p-4 md:p-5 rounded-3xl border border-slate-200 shadow-sm space-y-2.5">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-black uppercase tracking-wider text-slate-500">PRC Subject Weighting (35% PIPE • 35% MDSP • 30% MESL)</span>
+                        <span class="text-[11px] font-bold text-slate-400">${td.total} active cards</span>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        ${prcSubjectPills}
+                    </div>
+                </div>
+
+                <!-- Feature 11: Practical Topnotcher Daily Orders -->
+                ${renderDailyOrdersCardHtml(td)}
+
+                <!-- Feature 5 + 10: Locked-In Feb 2027 + Adaptive Weekly Targets -->
+                ${renderLockedInFeb2027Widget()}
+                ${renderAdaptiveWeeklyTargetWidget()}
+                ${renderMicroWinsAndBreakBankWidgets()}
+                ${renderIntakeVsBurnGaugeWidget()}
             </div>
             `;
         }
@@ -6396,11 +8760,50 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             content += `<main class="flex-1">`;
             if (state.currentView === 'dashboard') content += renderDashboard();
             else if (state.currentView === 'add') content += renderDatabase();
+            else if (state.currentView === 'topnotcher') content += renderTopnotcher();
             else if (state.currentView === 'stats') content += renderStats();
             else if (state.currentView === 'analytics') content += renderAnalytics();
             else if (state.currentView === 'forecast') content += renderForecast();
             else if (state.currentView === 'session') content += renderSession();
             content += `</main>`;
+
+            // Feature 4 & 6: Session Summary Modal (Leech Surgery + Completed Sessions)
+            if (state.sessionSummaryModal) {
+                const sm = state.sessionSummaryModal;
+                content += `
+                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeSessionSummaryModal()">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in text-center space-y-4 border border-slate-100" onclick="event.stopPropagation()">
+                        <div class="w-16 h-16 rounded-2xl ${sm.type === 'leech_surgery' ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'} flex items-center justify-center mx-auto text-3xl">
+                            ${sm.type === 'leech_surgery' ? '🩺' : '🏆'}
+                        </div>
+                        <div>
+                            <h3 class="text-xl font-black text-slate-900">${sm.type === 'leech_surgery' ? 'Leech Surgery Complete!' : 'Session Complete!'}</h3>
+                            <p class="text-xs text-slate-500 mt-1">${sm.answered} cards completed</p>
+                        </div>
+                        <div class="p-4 rounded-2xl bg-slate-900 text-white space-y-1">
+                            <span class="text-[10px] font-black uppercase tracking-widest text-amber-400">Topnotcher Index Change</span>
+                            <div class="text-3xl font-black font-mono tabular-nums ${sm.topDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${sm.topDelta >= 0 ? '+' : ''}${sm.topDelta.toFixed(3)}${state.topnotcherDisplayUnit === 'rp' ? ' RP' : '%'}</div>
+                            <div class="text-xs font-bold text-slate-300">Current Standing: <span class="font-mono text-white">${formatTop1Score(sm.endTopScore, 2)}</span></div>
+                        </div>
+                        <div class="grid grid-cols-3 gap-2 text-xs">
+                            <div class="p-2.5 rounded-xl bg-emerald-50 border border-emerald-100">
+                                <div class="font-black text-emerald-700 font-mono text-base">${sm.netLevelUpsToday >= 0 ? '+' : ''}${sm.netLevelUpsToday}</div>
+                                <div class="text-[10px] font-bold text-slate-500">Net Lvl-Ups</div>
+                            </div>
+                            <div class="p-2.5 rounded-xl bg-amber-50 border border-amber-100">
+                                <div class="font-black text-amber-700 font-mono text-base">${sm.tamed} / ${sm.leechesTamedToday}</div>
+                                <div class="text-[10px] font-bold text-slate-500">Leeches Tamed</div>
+                            </div>
+                            <div class="p-2.5 rounded-xl bg-indigo-50 border border-indigo-100">
+                                <div class="font-black text-indigo-700 font-mono text-base">${sm.cleanBlocksToday}</div>
+                                <div class="text-[10px] font-bold text-slate-500">Clean Blocks</div>
+                            </div>
+                        </div>
+                        <button type="button" onclick="window.closeSessionSummaryModal()" class="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-sm transition-colors">Continue</button>
+                    </div>
+                </div>
+                `;
+            }
             
             // --- STREAMING_CHUNK:Edit Term Modal Overlay (Live OCR Card Editor) ---
             if (state.editingTermId) {
