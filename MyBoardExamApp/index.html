@@ -180,6 +180,8 @@
             shareDeckFolderId: null,
             editingSharedDeckId: null,
             previewSharedDeckId: null,
+            expandedSharedDecks: [],
+            expandedSharedSubpaths: [],
             folders: [],
             terms: [],
             history: {}, 
@@ -3132,16 +3134,87 @@
             }
         };
 
-        // READ-ONLY TRY MODE: Classmates can practice shared flashcards immediately without editing/mutating the author's deck!
-        window.startTrySharedDeck = (deckId) => {
+        function matchesSharedSubPath(cardSubPath, filterPrefix) {
+            const p = String(cardSubPath || '').trim();
+            if (!filterPrefix) return true;
+            if (filterPrefix === '__ROOT__') return p === '';
+            return p === filterPrefix || p.startsWith(filterPrefix + ' / ');
+        }
+
+        function buildSharedDeckFolderTree(cards) {
+            const root = { name: '', fullPath: '', directCount: 0, totalCount: 0, children: {} };
+            let subfolderCount = 0;
+            const seenSubfolders = new Set();
+
+            (cards || []).forEach(c => {
+                root.totalCount++;
+                const rawPath = String(c.subPath || '').trim();
+                if (!rawPath) {
+                    root.directCount++;
+                    return;
+                }
+                const parts = rawPath.split(' / ').map(s => s.trim()).filter(Boolean);
+                let node = root;
+                let accum = '';
+                parts.forEach((part, idx) => {
+                    accum = accum ? `${accum} / ${part}` : part;
+                    if (!node.children[part]) {
+                        node.children[part] = { name: part, fullPath: accum, directCount: 0, totalCount: 0, children: {} };
+                        if (!seenSubfolders.has(accum)) {
+                            seenSubfolders.add(accum);
+                            subfolderCount++;
+                        }
+                    }
+                    node = node.children[part];
+                    node.totalCount++;
+                    if (idx === parts.length - 1) node.directCount++;
+                });
+            });
+            return {
+                root,
+                subfolderCount,
+                topLevelNames: Object.keys(root.children).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+            };
+        }
+
+        window.toggleSharedDeckExpand = (deckId) => {
+            if (!Array.isArray(state.expandedSharedDecks)) state.expandedSharedDecks = [];
+            if (state.expandedSharedDecks.includes(deckId)) {
+                state.expandedSharedDecks = state.expandedSharedDecks.filter(id => id !== deckId);
+            } else {
+                state.expandedSharedDecks = [...state.expandedSharedDecks, deckId];
+            }
+            renderApp();
+        };
+
+        window.toggleSharedSubpathExpand = (key) => {
+            if (!Array.isArray(state.expandedSharedSubpaths)) state.expandedSharedSubpaths = [];
+            if (state.expandedSharedSubpaths.includes(key)) {
+                state.expandedSharedSubpaths = state.expandedSharedSubpaths.filter(k => k !== key);
+            } else {
+                state.expandedSharedSubpaths = [...state.expandedSharedSubpaths, key];
+            }
+            renderApp();
+        };
+
+        // READ-ONLY TRY MODE: Classmates can practice a whole shared head deck OR any specific subfolder without modifying the author's deck!
+        window.startTrySharedDeck = (deckId, subPathPrefix = '') => {
             const deck = (state.sharedDecks || []).find(d => d.id === deckId);
             if (!deck || !Array.isArray(deck.cards) || deck.cards.length === 0) {
                 return showToast("No cards available in this shared deck.", "error");
             }
-            const queue = deck.cards.map((c, idx) => ({
+            const matchingCards = deck.cards.filter(c => matchesSharedSubPath(c.subPath || '', subPathPrefix));
+            if (matchingCards.length === 0) {
+                return showToast("Walang cards sa napiling subfolder.", "error");
+            }
+            const displayScopeTitle = subPathPrefix
+                ? (subPathPrefix === '__ROOT__' ? `${deck.title} › General Cards` : `${deck.title} › ${subPathPrefix}`)
+                : deck.title;
+
+            const queue = matchingCards.map((c, idx) => ({
                 id: `try_${deckId}_${idx}`,
                 folderId: '__community_try__',
-                subPath: c.subPath || deck.title,
+                subPath: c.subPath ? `${deck.title} / ${c.subPath}` : deck.title,
                 question: c.question,
                 answer: c.answer,
                 explanation: c.explanation || '',
@@ -3168,7 +3241,8 @@
                 queue,
                 initialQueueLength: queue.length,
                 sharedDeckId: deckId,
-                sharedDeckTitle: deck.title,
+                sharedSubPath: subPathPrefix || '',
+                sharedDeckTitle: displayScopeTitle,
                 sharedDeckAuthor: deck.authorName,
                 tryCorrect: 0,
                 tryWrong: 0,
@@ -3180,16 +3254,20 @@
             window.setView('session');
             manageTimer();
             manageEtaInterval();
-            showToast(`▶ Trying "${deck.title}" (${queue.length} cards • Read-Only Practice)`);
+            showToast(`▶ Trying "${displayScopeTitle}" (${queue.length} cards • Read-Only Practice)`);
         };
 
-        // CLONE / PULL COPY TO OWN VAULT: Creates an independent personal copy with fresh SRS (never modifies author's shared deck!)
-        window.cloneSharedDeckToVault = (deckId) => {
+        // CLONE / PULL COPY TO OWN VAULT: Supports whole head deck OR a specific subfolder, preserving exact nested subfolder structure!
+        window.cloneSharedDeckToVault = (deckId, subPathPrefix = '') => {
             const deck = (state.sharedDecks || []).find(d => d.id === deckId);
             if (!deck || !Array.isArray(deck.cards) || deck.cards.length === 0) {
                 return showToast("Walang cards sa shared deck na ito.", "error");
             }
-            // Reuse existing cloned root folder if already cloned before (lets classmates pull new cards without resetting SRS!)
+            const sourceCards = deck.cards.filter(c => matchesSharedSubPath(c.subPath || '', subPathPrefix));
+            if (sourceCards.length === 0) {
+                return showToast("Walang cards sa napiling subfolder.", "error");
+            }
+            // Reuse existing cloned root folder if already cloned before (lets classmates pull individual subfolders or updates cleanly!)
             let rootFolder = state.folders.find(f => f.clonedFromDeckId === deckId);
             if (!rootFolder) {
                 rootFolder = {
@@ -3222,7 +3300,7 @@
 
             let addedCount = 0;
             let skippedDup = 0;
-            deck.cards.forEach(c => {
+            sourceCards.forEach(c => {
                 const norm = String(c.question || '').replace(/\s+/g, '').toLowerCase();
                 if (!norm || existingNormQs.has(norm)) {
                     skippedDup++;
@@ -3251,6 +3329,7 @@
                 addedCount++;
             });
 
+            const scopeLabel = subPathPrefix && subPathPrefix !== '__ROOT__' ? `"${subPathPrefix}"` : `"${deck.title}"`;
             if (addedCount > 0) {
                 const tel = ensureDailyTelemetry();
                 tel.addedToday = (tel.addedToday || 0) + addedCount;
@@ -3261,9 +3340,9 @@
                     setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), { cloneCount: nextClone }, { merge: true }).catch(() => {});
                 }
                 renderApp();
-                showToast(`📥 Saved ${addedCount} cards to your vault${skippedDup > 0 ? ` (${skippedDup} duplicates skipped)` : ''}!`);
+                showToast(`📥 Saved ${addedCount} cards from ${scopeLabel}${skippedDup > 0 ? ` (${skippedDup} duplicates skipped)` : ''}!`);
             } else {
-                showToast(`All ${skippedDup} cards from "${deck.title}" are already in your vault! ✅`);
+                showToast(`All ${skippedDup} cards from ${scopeLabel} are already in your vault! ✅`);
             }
         };
 
@@ -3369,6 +3448,7 @@
                     state.sessionSummaryModal = {
                         type: 'community_try',
                         sharedDeckId: finishedSession.sharedDeckId,
+                        sharedSubPath: finishedSession.sharedSubPath || '',
                         sharedDeckTitle: finishedSession.sharedDeckTitle,
                         sharedDeckAuthor: finishedSession.sharedDeckAuthor,
                         answered: finishedSession.answeredInSession || 0,
@@ -7074,7 +7154,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 if (state.libraryFilter === 'mine' && d.authorUid !== userId) return false;
                 if (!['all', 'mine'].includes(state.libraryFilter) && d.subjectTag !== state.libraryFilter) return false;
                 if (q) {
-                    const hay = `${d.title} ${d.description} ${d.authorName} ${d.subjectTag}`.toLowerCase();
+                    const subNames = Array.from(new Set((d.cards || []).map(c => c.subPath || '').filter(Boolean))).join(' ');
+                    const hay = `${d.title} ${d.description} ${d.authorName} ${d.subjectTag} ${subNames}`.toLowerCase();
                     if (!hay.includes(q)) return false;
                 }
                 return true;
@@ -7087,42 +7168,123 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 General: 'bg-slate-100 text-slate-700 border-slate-200'
             };
 
+            const renderSharedSubTreeHtml = (deckId, node, depth = 0) => {
+                const childKeys = Object.keys(node.children || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+                let out = '';
+                // If root head folder also has loose cards outside subfolders, show them cleanly
+                if (depth === 0 && node.directCount > 0 && childKeys.length > 0) {
+                    out += `
+                    <div class="flex items-center justify-between gap-2 py-2 px-2.5 rounded-xl bg-white border border-slate-200/80 text-xs">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <i class="ph-fill ph-files text-slate-400 text-base shrink-0"></i>
+                            <span class="font-bold text-slate-700 truncate">General / Root Cards</span>
+                            <span class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-black font-mono shrink-0">${node.directCount}</span>
+                        </div>
+                        <div class="flex items-center gap-1 shrink-0">
+                            <button type="button" onclick="window.startTrySharedDeck('${deckId}', '__ROOT__')" class="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-black transition-colors" title="Try only root cards">▶ Try</button>
+                            <button type="button" onclick="window.cloneSharedDeckToVault('${deckId}', '__ROOT__')" class="px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-black transition-colors" title="Save only root cards">📥 Save</button>
+                        </div>
+                    </div>`;
+                }
+                childKeys.forEach(key => {
+                    const child = node.children[key];
+                    const hasGrandkids = Object.keys(child.children || {}).length > 0;
+                    const expandKey = `${deckId}::${child.fullPath}`;
+                    const isSubOpen = Array.isArray(state.expandedSharedSubpaths) && state.expandedSharedSubpaths.includes(expandKey);
+                    const safePathArg = child.fullPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\r?\n/g, ' ');
+                    const safeKeyArg = expandKey.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\r?\n/g, ' ');
+                    const padLeft = depth * 14;
+                    out += `
+                    <div style="margin-left: ${padLeft}px" class="space-y-1">
+                        <div class="flex items-center justify-between gap-2 py-2 px-2.5 rounded-xl bg-white hover:bg-indigo-50/40 border border-slate-200/80 transition-colors text-xs">
+                            <div class="flex items-center gap-1.5 min-w-0 flex-1 ${hasGrandkids ? 'cursor-pointer' : ''}" ${hasGrandkids ? `onclick="window.toggleSharedSubpathExpand('${safeKeyArg}')"` : ''}>
+                                ${hasGrandkids
+                                    ? `<button type="button" class="p-0.5 text-slate-400 hover:text-indigo-600 shrink-0"><i class="ph-bold ${isSubOpen ? 'ph-caret-down' : 'ph-caret-right'} text-xs"></i></button>`
+                                    : `<span class="w-3.5 shrink-0"></span>`}
+                                <i class="ph-fill ${hasGrandkids ? (isSubOpen ? 'ph-folder-open text-amber-500' : 'ph-folder text-amber-400') : 'ph-folder-simple text-indigo-400'} text-base shrink-0"></i>
+                                <span class="font-bold text-slate-800 truncate" title="${escapeHTML(child.fullPath)}">${escapeHTML(child.name)}</span>
+                                <span class="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-black font-mono shrink-0">${child.totalCount}</span>
+                            </div>
+                            <div class="flex items-center gap-1 shrink-0">
+                                <button type="button" onclick="window.startTrySharedDeck('${deckId}', '${safePathArg}')" class="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-500 text-emerald-700 hover:text-white border border-emerald-200 text-[10px] font-black transition-colors" title="Try only ${escapeHTML(child.name)}">▶ Try</button>
+                                <button type="button" onclick="window.cloneSharedDeckToVault('${deckId}', '${safePathArg}')" class="px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-500 text-blue-700 hover:text-white border border-blue-200 text-[10px] font-black transition-colors" title="Save only ${escapeHTML(child.name)} to your vault">📥 Save</button>
+                            </div>
+                        </div>
+                        ${hasGrandkids && isSubOpen ? renderSharedSubTreeHtml(deckId, child, depth + 1) : ''}
+                    </div>`;
+                });
+                return out;
+            };
+
             const cardsHtml = filtered.length > 0 ? filtered.map(d => {
                 const isAuthor = Boolean(userId && d.authorUid === userId);
                 const alreadyCloned = state.folders.some(f => f.clonedFromDeckId === d.id);
                 const updatedDate = d.updatedAt ? new Date(d.updatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
                 const tagCls = tagColors[d.subjectTag] || tagColors.General;
+                const treeInfo = buildSharedDeckFolderTree(d.cards || []);
+                const hasSubfolders = treeInfo.subfolderCount > 0;
+                const isDeckExpanded = Array.isArray(state.expandedSharedDecks) && state.expandedSharedDecks.includes(d.id);
+                const previewPills = treeInfo.topLevelNames.slice(0, 4).map(name => {
+                    const cnt = treeInfo.root.children[name].totalCount;
+                    return `<button type="button" onclick="window.toggleSharedDeckExpand('${d.id}')" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-indigo-100 text-slate-600 hover:text-indigo-700 text-[10px] font-bold transition-colors cursor-pointer"><i class="ph-fill ph-folder text-amber-400"></i> ${escapeHTML(name.length > 22 ? name.slice(0, 22) + '…' : name)} <span class="font-mono text-slate-400">(${cnt})</span></button>`;
+                }).join('');
+                const extraSubsCount = Math.max(0, treeInfo.topLevelNames.length - 4);
+
                 return `
                 <div class="bg-white p-5 rounded-3xl border-2 ${isAuthor ? 'border-indigo-200' : 'border-slate-200'} shadow-sm hover:border-blue-300 transition-all flex flex-col justify-between gap-4">
                     <div class="space-y-2.5">
                         <div class="flex items-start justify-between gap-2">
                             <span class="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${tagCls}">${escapeHTML(d.subjectTag || 'General')}</span>
                             <div class="flex items-center gap-1.5">
+                                ${hasSubfolders ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-200">📂 ${treeInfo.subfolderCount} Subfolder${treeInfo.subfolderCount === 1 ? '' : 's'}</span>` : ''}
                                 ${isAuthor
                                     ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200">✏️ Your Deck</span>`
                                     : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-500">🔒 Read-Only</span>`}
                             </div>
                         </div>
                         <div>
-                            <h3 class="text-base md:text-lg font-extrabold text-slate-900 leading-snug">${escapeHTML(d.title)}</h3>
+                            <h3 class="text-base md:text-lg font-extrabold text-slate-900 leading-snug flex items-center gap-1.5">
+                                <i class="ph-fill ph-folder-open text-amber-500 text-xl shrink-0"></i>
+                                <span>${escapeHTML(d.title)}</span>
+                            </h3>
                             ${d.description ? `<p class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHTML(d.description)}</p>` : ''}
                         </div>
-                        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-bold text-slate-500 pt-1">
+                        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-bold text-slate-500 pt-0.5">
                             <span class="flex items-center gap-1 text-slate-700"><span>${d.authorAvatar || '⚙️'}</span> ${escapeHTML(d.authorName)}</span>
                             <span>• 🃏 <b class="text-slate-800">${d.cardCount}</b> cards</span>
                             <span>• ▶ ${d.tryCount || 0} tries</span>
                             <span>• 📥 ${d.cloneCount || 0} saved</span>
                             ${updatedDate ? `<span>• ${updatedDate}</span>` : ''}
                         </div>
+
+                        ${hasSubfolders ? `
+                        <div class="pt-1 space-y-2">
+                            ${!isDeckExpanded ? `
+                            <div class="flex flex-wrap gap-1.5">
+                                ${previewPills}
+                                ${extraSubsCount > 0 ? `<span class="px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-700 text-[10px] font-black">+${extraSubsCount} more</span>` : ''}
+                            </div>
+                            ` : ''}
+                            <button type="button" onclick="window.toggleSharedDeckExpand('${d.id}')" class="w-full py-2 px-3 rounded-xl bg-slate-50 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 text-xs font-extrabold text-slate-700 hover:text-indigo-700 flex items-center justify-between transition-colors">
+                                <span class="flex items-center gap-1.5"><i class="ph-fill ${isDeckExpanded ? 'ph-folder-open text-amber-500' : 'ph-folders text-indigo-500'} text-base"></i> ${isDeckExpanded ? 'Hide Subfolders' : `Browse ${treeInfo.subfolderCount} Subfolder${treeInfo.subfolderCount === 1 ? '' : 's'} (Try / Save Individually)`}</span>
+                                <i class="ph-bold ${isDeckExpanded ? 'ph-caret-up' : 'ph-caret-down'}"></i>
+                            </button>
+                            ${isDeckExpanded ? `
+                            <div class="p-2.5 rounded-2xl bg-slate-50/90 border border-slate-200 space-y-1.5 max-h-72 overflow-y-auto custom-scrollbar fade-in">
+                                ${renderSharedSubTreeHtml(d.id, treeInfo.root, 0)}
+                            </div>
+                            ` : ''}
+                        </div>
+                        ` : ''}
                     </div>
 
                     <div class="space-y-2 pt-2 border-t border-slate-100">
                         <div class="flex items-center gap-2">
                             <button type="button" onclick="window.startTrySharedDeck('${d.id}')" class="duo-btn flex-1 py-2.5 px-3 bg-emerald-500 hover:bg-emerald-600 border-emerald-700 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5">
-                                <i class="ph-fill ph-play"></i> Try Flashcards
+                                <i class="ph-fill ph-play"></i> ${hasSubfolders ? 'Try All Cards' : 'Try Flashcards'}
                             </button>
-                            <button type="button" onclick="window.cloneSharedDeckToVault('${d.id}')" class="duo-btn flex-1 py-2.5 px-3 ${alreadyCloned ? 'bg-blue-50 hover:bg-blue-100 border-blue-300 text-blue-700' : 'bg-blue-500 hover:bg-blue-600 border-blue-700 text-white'} rounded-xl font-black text-xs flex items-center justify-center gap-1.5" title="${alreadyCloned ? 'Pull any newly added cards into your personal copy without resetting progress' : 'Save a personal copy to your vault to earn Mastery Points & track SRS'}">
-                                <i class="ph-bold ${alreadyCloned ? 'ph-arrows-clockwise' : 'ph-download-simple'}"></i> ${alreadyCloned ? 'Pull Latest' : 'Save Copy'}
+                            <button type="button" onclick="window.cloneSharedDeckToVault('${d.id}')" class="duo-btn flex-1 py-2.5 px-3 ${alreadyCloned ? 'bg-blue-50 hover:bg-blue-100 border-blue-300 text-blue-700' : 'bg-blue-500 hover:bg-blue-600 border-blue-700 text-white'} rounded-xl font-black text-xs flex items-center justify-center gap-1.5" title="${alreadyCloned ? 'Pull any newly added cards into your personal copy without resetting progress' : 'Save entire head folder & subfolders to your vault'}">
+                                <i class="ph-bold ${alreadyCloned ? 'ph-arrows-clockwise' : 'ph-download-simple'}"></i> ${alreadyCloned ? 'Pull Latest' : (hasSubfolders ? 'Save All Folders' : 'Save Copy')}
                             </button>
                         </div>
                         ${isAuthor ? `
@@ -10338,7 +10500,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 <div class="text-xs font-bold text-slate-500"><span class="text-emerald-600">✓ ${sm.tryCorrect || 0} Got It</span> · <span class="text-rose-500">✗ ${sm.tryWrong || 0} Missed</span></div>
                             </div>
                             <div class="space-y-2">
-                                <button type="button" onclick="window.cloneSharedDeckToVault('${sm.sharedDeckId}'); window.closeSessionSummaryModal();" class="duo-btn w-full py-3 bg-blue-500 hover:bg-blue-600 border-blue-700 text-white rounded-2xl font-black text-sm">📥 Save Copy to My Vault</button>
+                                <button type="button" onclick="window.cloneSharedDeckToVault('${sm.sharedDeckId}', '${String(sm.sharedSubPath || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\r?\n/g, ' ')}'); window.closeSessionSummaryModal();" class="duo-btn w-full py-3 bg-blue-500 hover:bg-blue-600 border-blue-700 text-white rounded-2xl font-black text-sm">📥 Save ${sm.sharedSubPath ? 'This Subfolder' : 'Copy'} to My Vault</button>
                                 <button type="button" onclick="window.closeSessionSummaryModal()" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition-colors">Back to Library</button>
                             </div>
                         </div>
