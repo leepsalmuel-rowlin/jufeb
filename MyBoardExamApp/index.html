@@ -126,7 +126,153 @@
         .overdrive-card-glow { animation: overdriveShimmer 2.6s ease-in-out infinite; }
         .duo-btn { border-bottom-width: 4px; transition: transform 0.08s ease, border-bottom-width 0.08s ease, background-color 0.15s ease; }
         .duo-btn:active:not(:disabled) { transform: translateY(2px); border-bottom-width: 2px; }
+
+        /* =========================================================
+           DARK MODE THEME (Eye-Friendly Deep Slate Navy Palette)
+           ========================================================= */
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #0b1120 !important; color: #e2e8f0 !important; }
+        html.dark ::-webkit-scrollbar-thumb { background: #334155; }
+        html.dark ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* Primary & Secondary Surfaces */
+        html.dark .bg-white { background-color: #131c2e !important; }
+        html.dark .bg-white\/95 { background-color: rgba(19, 28, 46, 0.95) !important; }
+        html.dark .bg-white\/90 { background-color: rgba(19, 28, 46, 0.92) !important; }
+        html.dark .bg-white\/60 { background-color: rgba(19, 28, 46, 0.72) !important; }
+        html.dark .bg-slate-50 { background-color: #0f172a !important; }
+        html.dark .bg-slate-50\/95 { background-color: rgba(11, 17, 32, 0.95) !important; }
+        html.dark .bg-slate-50\/90 { background-color: rgba(15, 23, 42, 0.92) !important; }
+        html.dark .bg-slate-50\/80 { background-color: rgba(15, 23, 42, 0.85) !important; }
+        html.dark .bg-slate-100 { background-color: #1c283d !important; }
+        html.dark .bg-slate-200 { background-color: #27354d !important; }
+        html.dark .bg-slate-300 { background-color: #334461 !important; }
+
+        /* Borders & Dividers */
+        html.dark .border-slate-100 { border-color: #1e2a40 !important; }
+        html.dark .border-slate-200,
+        html.dark .border-slate-200\/80,
+        html.dark .border-slate-200\/50 { border-color: #283650 !important; }
+        html.dark .border-slate-300 { border-color: #3a4c6e !important; }
+        html.dark .divide-slate-50 > :not([hidden]) ~ :not([hidden]),
+        html.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
+        html.dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-color: #1f2d45 !important; }
+
+        /* Neutral Text Hierarchy */
+        html.dark .text-slate-950,
+        html.dark .text-slate-900 { color: #f8fafc !important; }
+        html.dark .text-slate-800 { color: #e2e8f0 !important; }
+        html.dark .text-slate-700 { color: #cbd5e1 !important; }
+        html.dark .text-slate-600 { color: #94a3b8 !important; }
+        html.dark .text-slate-500 { color: #94a3b8 !important; }
+        html.dark .text-slate-400 { color: #7c8ea8 !important; }
+
+        /* Tinted Pastel Surfaces (-50 & -100) -> Translucent Dark Accents */
+        html.dark .bg-blue-50, html.dark .bg-blue-50\/80 { background-color: rgba(59, 130, 246, 0.14) !important; }
+        html.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.22) !important; }
+        html.dark .bg-indigo-50, html.dark .bg-indigo-50\/90, html.dark .bg-indigo-50\/40 { background-color: rgba(99, 102, 241, 0.15) !important; }
+        html.dark .bg-indigo-100 { background-color: rgba(99, 102, 241, 0.24) !important; }
+        html.dark .bg-emerald-50, html.dark .bg-emerald-50\/80 { background-color: rgba(16, 185, 129, 0.14) !important; }
+        html.dark .bg-emerald-100 { background-color: rgba(16, 185, 129, 0.22) !important; }
+        html.dark .bg-teal-50, html.dark .bg-teal-50\/40 { background-color: rgba(20, 184, 166, 0.14) !important; }
+        html.dark .bg-teal-100 { background-color: rgba(20, 184, 166, 0.22) !important; }
+        html.dark .bg-amber-50, html.dark .bg-yellow-50 { background-color: rgba(245, 158, 11, 0.14) !important; }
+        html.dark .bg-amber-100, html.dark .bg-yellow-100 { background-color: rgba(245, 158, 11, 0.22) !important; }
+        html.dark .bg-rose-50, html.dark .bg-red-50 { background-color: rgba(244, 63, 94, 0.14) !important; }
+        html.dark .bg-rose-100, html.dark .bg-red-100 { background-color: rgba(244, 63, 94, 0.22) !important; }
+        html.dark .bg-purple-50 { background-color: rgba(168, 85, 247, 0.14) !important; }
+        html.dark .bg-purple-100 { background-color: rgba(168, 85, 247, 0.22) !important; }
+
+        /* Accent Borders in Dark Mode */
+        html.dark .border-blue-100, html.dark .border-blue-200, html.dark .border-blue-300 { border-color: rgba(59, 130, 246, 0.38) !important; }
+        html.dark .border-indigo-100, html.dark .border-indigo-200, html.dark .border-indigo-300 { border-color: rgba(99, 102, 241, 0.38) !important; }
+        html.dark .border-emerald-100, html.dark .border-emerald-200, html.dark .border-emerald-200\/80, html.dark .border-emerald-300 { border-color: rgba(16, 185, 129, 0.38) !important; }
+        html.dark .border-teal-100, html.dark .border-teal-200, html.dark .border-teal-300 { border-color: rgba(20, 184, 166, 0.38) !important; }
+        html.dark .border-amber-100, html.dark .border-amber-200, html.dark .border-amber-300 { border-color: rgba(245, 158, 11, 0.42) !important; }
+        html.dark .border-rose-100, html.dark .border-rose-200, html.dark .border-rose-300, html.dark .border-red-200 { border-color: rgba(244, 63, 94, 0.42) !important; }
+        html.dark .border-purple-100, html.dark .border-purple-200, html.dark .border-purple-300 { border-color: rgba(168, 85, 247, 0.38) !important; }
+
+        /* Accent Texts in Dark Mode (Luminous & High-Contrast) */
+        html.dark .text-blue-600 { color: #60a5fa !important; }
+        html.dark .text-blue-700, html.dark .text-blue-800, html.dark .text-blue-900 { color: #93c5fd !important; }
+        html.dark .text-indigo-600 { color: #818cf8 !important; }
+        html.dark .text-indigo-700, html.dark .text-indigo-800, html.dark .text-indigo-900 { color: #a5b4fc !important; }
+        html.dark .text-emerald-600 { color: #34d399 !important; }
+        html.dark .text-emerald-700, html.dark .text-emerald-800, html.dark .text-emerald-900 { color: #6ee7b7 !important; }
+        html.dark .text-teal-600, html.dark .text-teal-700, html.dark .text-teal-800, html.dark .text-teal-950 { color: #5eead4 !important; }
+        html.dark .text-amber-600 { color: #fbbf24 !important; }
+        html.dark .text-amber-700, html.dark .text-amber-800, html.dark .text-amber-900 { color: #fcd34d !important; }
+        html.dark .text-rose-600, html.dark .text-red-600 { color: #fb7185 !important; }
+        html.dark .text-rose-700, html.dark .text-rose-800, html.dark .text-rose-900, html.dark .text-red-700 { color: #fda4af !important; }
+        html.dark .text-purple-600, html.dark .text-purple-700, html.dark .text-purple-800, html.dark .text-purple-950 { color: #d8b4fe !important; }
+
+        /* Hover Surfaces in Dark Mode */
+        html.dark .hover\:bg-slate-50:hover { background-color: #1a263b !important; }
+        html.dark .hover\:bg-slate-100:hover { background-color: #23324a !important; }
+        html.dark .hover\:bg-slate-200:hover { background-color: #2d3e59 !important; }
+        html.dark .hover\:bg-blue-50:hover, html.dark .hover\:bg-blue-100:hover { background-color: rgba(59, 130, 246, 0.28) !important; }
+        html.dark .hover\:bg-indigo-50:hover, html.dark .hover\:bg-indigo-50\/40:hover, html.dark .hover\:bg-indigo-100:hover { background-color: rgba(99, 102, 241, 0.28) !important; }
+        html.dark .hover\:bg-emerald-50:hover, html.dark .hover\:bg-emerald-100:hover { background-color: rgba(16, 185, 129, 0.28) !important; }
+        html.dark .hover\:bg-amber-50:hover, html.dark .hover\:bg-amber-100:hover { background-color: rgba(245, 158, 11, 0.28) !important; }
+        html.dark .hover\:bg-rose-50:hover, html.dark .hover\:bg-rose-100:hover { background-color: rgba(244, 63, 94, 0.28) !important; }
+        html.dark .hover\:text-slate-700:hover, html.dark .hover\:text-slate-800:hover { color: #f1f5f9 !important; }
+
+        /* Light Gradients -> Rich Dark Gradients */
+        html.dark .from-amber-50 { --tw-gradient-from: rgba(180, 83, 9, 0.24) !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
+        html.dark .from-emerald-50, html.dark .from-emerald-50\/90 { --tw-gradient-from: rgba(6, 95, 70, 0.30) !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
+        html.dark .from-blue-50 { --tw-gradient-from: rgba(30, 64, 175, 0.25) !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
+        html.dark .from-indigo-50 { --tw-gradient-from: rgba(55, 48, 163, 0.25) !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
+        html.dark .from-slate-50 { --tw-gradient-from: #131c2e !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
+        html.dark .via-yellow-50\/80, html.dark .via-yellow-50\/70 { --tw-gradient-via: rgba(161, 98, 7, 0.18) !important; }
+        html.dark .via-teal-50\/60 { --tw-gradient-via: rgba(17, 94, 89, 0.22) !important; }
+        html.dark .to-white { --tw-gradient-to: #131c2e !important; }
+        html.dark .to-emerald-50, html.dark .to-emerald-50\/70 { --tw-gradient-to: rgba(6, 95, 70, 0.24) !important; }
+        html.dark .to-amber-50\/60 { --tw-gradient-to: rgba(180, 83, 9, 0.22) !important; }
+
+        /* Preserve Crisp Contrast on Bright Solid Badges & Solid Primary Buttons */
+        html.dark .bg-amber-400, html.dark .bg-amber-300, html.dark .bg-yellow-400,
+        html.dark .bg-emerald-400, html.dark .bg-emerald-300, html.dark .from-amber-400 {
+            color: #0f172a !important;
+        }
+        html.dark .text-white { color: #ffffff !important; }
+
+        /* Inputs, Selects, Options & Soft Shadows */
+        html.dark input, html.dark textarea, html.dark select { color: #f1f5f9 !important; }
+        html.dark option { background-color: #131c2e; color: #f1f5f9; }
+        html.dark input::placeholder, html.dark textarea::placeholder { color: #64748b !important; }
+        html.dark .shadow-blue-200, html.dark .shadow-rose-200, html.dark .shadow-emerald-200 { --tw-shadow-color: rgba(0, 0, 0, 0.45) !important; }
+
+        /* Dark Mode SVG Charts & Progress Rings */
+        html.dark svg line[stroke="#e2e8f0"],
+        html.dark svg circle[stroke="#e2e8f0"] { stroke: #27354d !important; }
+        html.dark svg text[fill="#64748b"] { fill: #94a3b8 !important; }
+        html.dark svg text[fill="#334155"],
+        html.dark svg text[fill="#1e293b"],
+        html.dark svg text[fill="#0f172a"] { fill: #e2e8f0 !important; }
+
+        /* Dark Mode Review Flash Animations (No Harsh White Flash) */
+        @keyframes top1FlashEmeraldDark {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); background-color: rgba(16, 185, 129, 0.2); }
+            100% { box-shadow: 0 0 0 18px rgba(16, 185, 129, 0); }
+        }
+        html.dark .top1-flash-emerald { animation: top1FlashEmeraldDark 0.55s ease-out; }
+        @keyframes top1ShimmerGoldDark {
+            0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.75); border-color: #f59e0b; }
+            45% { box-shadow: 0 0 28px 6px rgba(251, 191, 36, 0.55); border-color: #eab308; background-color: rgba(245, 158, 11, 0.22); }
+            100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+        }
+        html.dark .top1-shimmer-gold { animation: top1ShimmerGoldDark 0.85s ease-out; }
     </style>
+    <script>
+        (function() {
+            try {
+                var pref = localStorage.getItem('elementVaultDefaultTheme') || 'light';
+                var isDark = pref === 'dark' || (pref === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+                if (isDark) document.documentElement.classList.add('dark');
+                else document.documentElement.classList.remove('dark');
+            } catch (e) {}
+        })();
+    </script>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-blue-200">
 
@@ -162,6 +308,8 @@
         // --- STATE ---
         let state = {
             isLoaded: false,
+            defaultTheme: 'light', // 'light' | 'dark' | 'system' (User's saved startup default)
+            activeTheme: 'light',  // 'light' | 'dark' (Currently displayed theme)
             isOwnerUnlocked: false, // Secret Owner-Only Topnotcher Mode (5-tap logo + PIN; hidden from classmates!)
             showOwnerPinModal: false,
             playerProfile: { displayName: '', avatar: '⚙️', photoURL: '' },
@@ -316,6 +464,92 @@
             }, 3000);
         };
 
+        // --- THEME & DARK MODE MANAGEMENT ---
+        function resolveThemeFromPref(pref) {
+            if (pref === 'dark') return 'dark';
+            if (pref === 'system') {
+                try {
+                    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+                } catch (e) { return 'light'; }
+            }
+            return 'light';
+        }
+
+        function applyActiveTheme(mode) {
+            const clean = mode === 'dark' ? 'dark' : 'light';
+            state.activeTheme = clean;
+            if (document.documentElement && document.documentElement.classList) {
+                document.documentElement.classList.toggle('dark', clean === 'dark');
+            }
+        }
+
+        let activeThemeToastTimer = null;
+        function showThemeToggleToast(newMode) {
+            const prev = document.getElementById('theme-toggle-toast');
+            if (prev) prev.remove();
+            if (activeThemeToastTimer) clearTimeout(activeThemeToastTimer);
+
+            const isAlreadyDefault = state.defaultTheme === newMode;
+            const label = newMode === 'dark' ? '🌙 Dark Mode ON' : '☀️ Light Mode ON';
+            const toast = document.createElement('div');
+            toast.id = 'theme-toggle-toast';
+            toast.className = 'fixed bottom-6 right-6 px-4 py-3 rounded-2xl bg-slate-900 text-white border border-slate-700 font-bold text-xs md:text-sm shadow-2xl slide-up z-50 flex items-center gap-3';
+            toast.innerHTML = `
+                <span>${label}</span>
+                ${isAlreadyDefault
+                    ? `<span class="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-300 text-[11px] font-extrabold">✓ Default</span>`
+                    : `<button type="button" onclick="window.setDefaultTheme('${newMode}', event)" class="px-2.5 py-1 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-black transition-colors shadow-sm">⭐ Set as Default</button>`}
+            `;
+            document.body.appendChild(toast);
+            activeThemeToastTimer = setTimeout(() => {
+                if (toast && toast.classList) toast.classList.add('animate-fade-out-down');
+                setTimeout(() => { if (toast && toast.remove) toast.remove(); }, 300);
+            }, 4600);
+        }
+
+        window.toggleTheme = (e) => {
+            if (e && e.stopPropagation) e.stopPropagation();
+            const next = state.activeTheme === 'dark' ? 'light' : 'dark';
+            applyActiveTheme(next);
+            renderApp();
+            showThemeToggleToast(next);
+        };
+
+        window.setDefaultTheme = (pref, e) => {
+            if (e && e.stopPropagation) e.stopPropagation();
+            const cleanPref = ['light', 'dark', 'system'].includes(pref) ? pref : 'light';
+            state.defaultTheme = cleanPref;
+            try { localStorage.setItem('elementVaultDefaultTheme', cleanPref); } catch (err) {}
+            applyActiveTheme(resolveThemeFromPref(cleanPref));
+
+            const prevToast = document.getElementById('theme-toggle-toast');
+            if (prevToast) prevToast.remove();
+            if (activeThemeToastTimer) clearTimeout(activeThemeToastTimer);
+
+            if (userId) saveData();
+            renderApp();
+            const msg = cleanPref === 'dark'
+                ? '🌙 Dark Mode saved as your Default!'
+                : cleanPref === 'system'
+                ? '💻 Auto (Device Theme) saved as your Default!'
+                : '☀️ Light Mode saved as your Default!';
+            showToast(msg);
+        };
+
+        try {
+            if (window.matchMedia) {
+                const mq = window.matchMedia('(prefers-color-scheme: dark)');
+                const onSysThemeChange = () => {
+                    if (state.defaultTheme === 'system') {
+                        applyActiveTheme(resolveThemeFromPref('system'));
+                        renderApp();
+                    }
+                };
+                if (mq.addEventListener) mq.addEventListener('change', onSysThemeChange);
+                else if (mq.addListener) mq.addListener(onSysThemeChange);
+            }
+        } catch (e) {}
+
         // --- DATA MANAGEMENT & CLOUD SYNC ---
         function ensureValidActiveFolder() {
             if (state.folders.length > 0 && !state.folders.some(f => f.id === state.activeFolderId)) {
@@ -351,6 +585,12 @@
             const savedDailyTel = localStorage.getItem('elementVaultDailyTelemetry');
             const savedThrottle = localStorage.getItem('elementVaultOrderThrottle');
             const savedProfile = localStorage.getItem('elementVaultPlayerProfile');
+            const savedDefaultTheme = localStorage.getItem('elementVaultDefaultTheme');
+
+            if (savedDefaultTheme && ['light', 'dark', 'system'].includes(savedDefaultTheme)) {
+                state.defaultTheme = savedDefaultTheme;
+            }
+            applyActiveTheme(resolveThemeFromPref(state.defaultTheme));
             
             if (savedProfile) {
                 try {
@@ -538,6 +778,9 @@
                             avatar: '⚙️',
                             photoURL: user.photoURL || ''
                         };
+                        state.defaultTheme = 'light';
+                        localStorage.setItem('elementVaultDefaultTheme', 'light');
+                        applyActiveTheme('light');
                     }
                     localStorage.setItem('elementVaultLastUid', user.uid);
                     state.isLoaded = true;
@@ -609,6 +852,11 @@
                         state.isOwnerUnlocked = data.isOwnerUnlocked;
                         localStorage.setItem(`elementVaultOwner_${userId}`, data.isOwnerUnlocked ? 'true' : 'false');
                     }
+                    if (data.defaultTheme && ['light', 'dark', 'system'].includes(data.defaultTheme)) {
+                        state.defaultTheme = data.defaultTheme;
+                        localStorage.setItem('elementVaultDefaultTheme', data.defaultTheme);
+                        applyActiveTheme(resolveThemeFromPref(data.defaultTheme));
+                    }
                     if (data.geminiApiKey) {
                         state.geminiApiKey = data.geminiApiKey;
                         localStorage.setItem('elementVaultGeminiKey', state.geminiApiKey);
@@ -659,6 +907,7 @@
                         activityLog: state.activityLog || {},
                         playerProfile: state.playerProfile || {},
                         isOwnerUnlocked: Boolean(state.isOwnerUnlocked),
+                        defaultTheme: state.defaultTheme || 'light',
                         geminiApiKey: state.geminiApiKey || '',
                         geminiModel: state.geminiModel || 'auto'
                     });
@@ -5974,7 +6223,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 <i class="ph-fill ph-crystal-ball text-lg"></i> <span class="hidden lg:inline">Forecast</span>
                             </button>
                         </div>
-                        <button onclick="window.openProfileModal()" class="px-2.5 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-bold text-slate-700 flex items-center gap-1.5 transition-colors" title="Edit Profile & Avatar">
+                        <button type="button" onclick="window.toggleTheme(event)" class="p-2 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 flex items-center gap-1 transition-colors" title="${state.activeTheme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'} (Default: ${state.defaultTheme})">
+                            <i class="ph-fill ${state.activeTheme === 'dark' ? 'ph-sun text-amber-400' : 'ph-moon-stars text-indigo-500'} text-base"></i>
+                        </button>
+                        <button onclick="window.openProfileModal()" class="px-2.5 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-bold text-slate-700 flex items-center gap-1.5 transition-colors" title="Edit Profile, Avatar & Default Theme">
                             <span class="text-base leading-none">${myAvatar}</span>
                             <span class="hidden xl:inline max-w-[90px] truncate">${escapeHTML(myName)}</span>
                         </button>
@@ -9500,6 +9752,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         <button onclick="window.toggleTimer()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs md:text-sm font-bold transition-colors ${state.timerEnabled ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-500'}">
                             <i class="ph-fill ${state.timerEnabled ? 'ph-toggle-right' : 'ph-toggle-left'} text-lg"></i> ${state.timerEnabled ? 'Timer ON' : 'Timer OFF'}
                         </button>
+                        <button type="button" onclick="window.toggleTheme(event)" class="p-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors" title="${state.activeTheme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}">
+                            <i class="ph-fill ${state.activeTheme === 'dark' ? 'ph-sun text-amber-400' : 'ph-moon-stars text-indigo-500'} text-base"></i>
+                        </button>
                     </div>
                     <div class="flex items-center gap-2 flex-wrap">
                         ${etaInfo ? (state.showEtaPredictor ? `
@@ -10431,7 +10686,11 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             // Authentication View
             if (isFirebaseConfigured && !userId) {
                 appDiv.innerHTML = `
-                    <div class="flex-1 flex items-center justify-center bg-slate-50 p-6">
+                    <div class="flex-1 flex items-center justify-center bg-slate-50 p-6 relative">
+                        <button type="button" onclick="window.toggleTheme(event)" class="fixed top-4 right-4 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-xs font-extrabold text-slate-700 flex items-center gap-1.5 shadow-sm transition-colors">
+                            <i class="ph-fill ${state.activeTheme === 'dark' ? 'ph-sun text-amber-400' : 'ph-moon-stars text-indigo-500'} text-base"></i>
+                            <span>${state.activeTheme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>
+                        </button>
                         <div class="bg-white p-8 md:p-12 rounded-3xl shadow-xl border border-slate-100 max-w-md w-full text-center zoom-in">
                             <div class="w-20 h-20 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-200">
                                 <i class="ph-fill ph-book-open text-white text-4xl"></i>
@@ -10560,13 +10819,18 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 </div>`;
             }
 
-            // Edit Player Profile & Avatar Modal
+            // Edit Player Profile, Avatar & Default Theme Modal
             if (state.showProfileModal) {
+                const themeOpts = [
+                    { id: 'light', icon: '☀️', label: 'Light', desc: 'Clean bright mode' },
+                    { id: 'dark', icon: '🌙', label: 'Dark', desc: 'Night-study dark' },
+                    { id: 'system', icon: '💻', label: 'Auto', desc: 'Follows device' }
+                ];
                 content += `
                 <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeProfileModal()">
-                    <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in space-y-4 border border-slate-200" onclick="event.stopPropagation()">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in space-y-4 border border-slate-200 max-h-[90vh] overflow-y-auto custom-scrollbar" onclick="event.stopPropagation()">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-black text-slate-900">Your Engineer Profile</h3>
+                            <h3 class="text-lg font-black text-slate-900">Profile & Appearance</h3>
                             <button type="button" onclick="window.closeProfileModal()" class="p-1 text-slate-400 hover:text-slate-700"><i class="ph-bold ph-x text-lg"></i></button>
                         </div>
                         <div>
@@ -10579,6 +10843,23 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 ${AVATAR_CHOICES.map(av => `
                                     <button type="button" onclick="window.selectProfileAvatar('${av}')" class="h-11 rounded-xl text-2xl flex items-center justify-center border-2 transition-all ${state.playerProfile.avatar === av ? 'bg-blue-50 border-blue-500 scale-105 shadow-xs' : 'bg-slate-50 border-slate-200 hover:border-blue-300'}">${av}</button>
                                 `).join('')}
+                            </div>
+                        </div>
+                        <div class="pt-2 border-t border-slate-100">
+                            <div class="flex items-center justify-between mb-2">
+                                <label class="text-[11px] font-black uppercase tracking-wider text-slate-500">Default Startup Theme</label>
+                                <span class="text-[10px] font-extrabold text-indigo-600">Synced to Account</span>
+                            </div>
+                            <div class="grid grid-cols-3 gap-2">
+                                ${themeOpts.map(opt => {
+                                    const isDef = state.defaultTheme === opt.id;
+                                    return `
+                                    <button type="button" onclick="window.setDefaultTheme('${opt.id}', event)" class="p-2.5 rounded-2xl border-2 text-center transition-all flex flex-col items-center gap-0.5 ${isDef ? 'bg-indigo-50 border-indigo-500 shadow-xs' : 'bg-slate-50 border-slate-200 hover:border-indigo-300'}">
+                                        <span class="text-xl leading-none">${opt.icon}</span>
+                                        <span class="text-xs font-black ${isDef ? 'text-indigo-700' : 'text-slate-700'}">${opt.label}</span>
+                                        <span class="text-[9px] font-bold ${isDef ? 'text-indigo-600' : 'text-slate-400'}">${isDef ? '✓ Default' : opt.desc}</span>
+                                    </button>`;
+                                }).join('')}
                             </div>
                         </div>
                         <button type="button" onclick="window.savePlayerProfile()" class="duo-btn w-full py-3 bg-blue-500 hover:bg-blue-600 border-blue-700 text-white rounded-2xl font-black text-sm">Save Profile</button>
