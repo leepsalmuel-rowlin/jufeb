@@ -124,6 +124,8 @@
             50% { box-shadow: 0 0 0 2px rgba(234,179,8,0.85), 0 6px 20px -2px rgba(234,179,8,0.45); }
         }
         .overdrive-card-glow { animation: overdriveShimmer 2.6s ease-in-out infinite; }
+        .duo-btn { border-bottom-width: 4px; transition: transform 0.08s ease, border-bottom-width 0.08s ease, background-color 0.15s ease; }
+        .duo-btn:active:not(:disabled) { transform: translateY(2px); border-bottom-width: 2px; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-blue-200">
@@ -135,13 +137,15 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- CONSTANTS ---
         const INTERVALS = { 1: 1, 2: 3, 3: 7, 4: 15, 5: 30, 6: 60 };
         const MS_PER_DAY = 24 * 60 * 60 * 1000;
         const MELE_EXAM_DATE_MS = new Date('2027-02-15T00:00:00').getTime();
         const MELE_POST_EXAM_MS = new Date('2027-02-28T23:59:59').getTime();
+        const OWNER_UNLOCK_PIN = '2027';
+        const AVATAR_CHOICES = ['⚙️', '🔧', '🚀', '⚡', '🔥', '🧠', '🛠️', '🏆', '🦾', '📐', '💡', '🎯'];
 
         const generateId = () => {
             return Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -153,10 +157,29 @@
         let sessionCardDurations = []; // Rolling window of recent card durations (seconds)
         let currentCardStartTs = 0;
         let lastFeedbackAnim = null; // { type: 'emerald'|'gold'|'miss'|'crit_miss'|'rushed', ts }
+        let secretLogoTapTimestamps = []; // Hidden 5-tap unlock tracker (invisible to classmates)
         
         // --- STATE ---
         let state = {
             isLoaded: false,
+            isOwnerUnlocked: false, // Secret Owner-Only Topnotcher Mode (5-tap logo + PIN; hidden from classmates!)
+            showOwnerPinModal: false,
+            playerProfile: { displayName: '', avatar: '⚙️', photoURL: '' },
+            showProfileModal: false,
+            leaderboardEntries: [],
+            leaderboardLoading: false,
+            leaderboardLastFetch: 0,
+            leaderboardSort: 'score', // 'score' | 'today' | 'accuracy' | 'streak'
+            compareRivalUid: null,
+            sharedDecks: [],
+            libraryLoading: false,
+            libraryLastFetch: 0,
+            libraryFilter: 'all', // 'all' | 'PIPE' | 'MDSP' | 'MESL' | 'General' | 'mine'
+            librarySearch: '',
+            showShareDeckModal: false,
+            shareDeckFolderId: null,
+            editingSharedDeckId: null,
+            previewSharedDeckId: null,
             folders: [],
             terms: [],
             history: {}, 
@@ -325,7 +348,14 @@
             const savedTopPrefs = localStorage.getItem('elementVaultTopnotcherPrefs');
             const savedDailyTel = localStorage.getItem('elementVaultDailyTelemetry');
             const savedThrottle = localStorage.getItem('elementVaultOrderThrottle');
+            const savedProfile = localStorage.getItem('elementVaultPlayerProfile');
             
+            if (savedProfile) {
+                try {
+                    const p = JSON.parse(savedProfile);
+                    if (p && typeof p === 'object') state.playerProfile = { ...state.playerProfile, ...p };
+                } catch (e) {}
+            }
             if (savedFolders) state.folders = JSON.parse(savedFolders);
             if (savedHistory) state.history = JSON.parse(savedHistory);
             if (savedActivityLog) {
@@ -412,6 +442,9 @@
             if (state.geminiModel) {
                 localStorage.setItem('elementVaultGeminiModel', state.geminiModel);
             }
+            if (state.playerProfile) {
+                localStorage.setItem('elementVaultPlayerProfile', JSON.stringify(state.playerProfile));
+            }
             saveLocalTelemetryOnly();
             
             if (window.saveToCloud) window.saveToCloud();
@@ -472,6 +505,9 @@
             window.logout = () => {
                 signOut(auth).then(() => {
                     userId = null;
+                    state.isOwnerUnlocked = false;
+                    state.showOwnerPinModal = false;
+                    state.currentView = 'dashboard';
                     state.isLoaded = false;
                     renderApp();
                 });
@@ -479,12 +515,35 @@
 
             onAuthStateChanged(auth, (user) => {
                 if (user) {
+                    const prevUid = localStorage.getItem('elementVaultLastUid');
                     userId = user.uid;
+                    if (!state.playerProfile.displayName) {
+                        state.playerProfile.displayName = (user.displayName || (user.email ? user.email.split('@')[0] : 'Engineer')).trim();
+                    }
+                    if (user.photoURL && !state.playerProfile.photoURL) {
+                        state.playerProfile.photoURL = user.photoURL;
+                    }
+                    // Restore per-UID cached Owner Mode immediately while cloud sync loads
+                    state.isOwnerUnlocked = localStorage.getItem(`elementVaultOwner_${user.uid}`) === 'true';
+                    // If switching to a DIFFERENT Google account on the same device, prevent leaking previous account's local cache
+                    if (prevUid && prevUid !== user.uid) {
+                        state.folders = [{ id: 'general', name: 'General', parentId: null }];
+                        state.terms = [];
+                        state.history = {};
+                        state.activityLog = {};
+                        state.playerProfile = {
+                            displayName: (user.displayName || (user.email ? user.email.split('@')[0] : 'Engineer')).trim(),
+                            avatar: '⚙️',
+                            photoURL: user.photoURL || ''
+                        };
+                    }
+                    localStorage.setItem('elementVaultLastUid', user.uid);
                     state.isLoaded = true;
                     enforceSingleSession(); 
-                    setupCloudSync();
+                    setupCloudSync(user);
                 } else {
                     userId = null;
+                    state.isOwnerUnlocked = false;
                     state.isLoaded = true;
                     renderApp(); 
                 }
@@ -526,7 +585,7 @@
 
         let cloudSaveTimer = null;
 
-        async function setupCloudSync() {
+        async function setupCloudSync(authUser = null) {
             if (!userId || !db || state.sessionConflict) return;
             const docRef = doc(db, 'artifacts', appId, 'users', userId, 'appData', 'vault');
             try {
@@ -539,6 +598,14 @@
                     if (data.activityLog && typeof data.activityLog === 'object') {
                         state.activityLog = data.activityLog;
                         localStorage.setItem('elementVaultActivityLog', JSON.stringify(state.activityLog));
+                    }
+                    if (data.playerProfile && typeof data.playerProfile === 'object') {
+                        state.playerProfile = { ...state.playerProfile, ...data.playerProfile };
+                        localStorage.setItem('elementVaultPlayerProfile', JSON.stringify(state.playerProfile));
+                    }
+                    if (typeof data.isOwnerUnlocked === 'boolean') {
+                        state.isOwnerUnlocked = data.isOwnerUnlocked;
+                        localStorage.setItem(`elementVaultOwner_${userId}`, data.isOwnerUnlocked ? 'true' : 'false');
                     }
                     if (data.geminiApiKey) {
                         state.geminiApiKey = data.geminiApiKey;
@@ -556,12 +623,24 @@
                     localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
                     localStorage.setItem('elementVaultTerms', JSON.stringify(cleanTermsForStorage(state.terms)));
                     localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
+                } else {
+                    // Brand-new classmate account: initialize clean starter vault so they can immediately join!
+                    if (authUser && (!state.playerProfile.displayName || state.playerProfile.displayName === 'Engineer')) {
+                        state.playerProfile.displayName = (authUser.displayName || (authUser.email ? authUser.email.split('@')[0] : 'Engineer')).trim();
+                    }
+                    ensureValidActiveFolder();
                 }
             } catch (e) {
                 console.error("Error fetching from cloud:", e);
             } finally {
+                if (!state.isOwnerUnlocked && state.currentView === 'topnotcher') {
+                    state.currentView = 'dashboard';
+                }
                 state.isLoaded = true; 
-                renderApp(); 
+                renderApp();
+                // Sync player to Global Class Leaderboard & load class standings cleanly in background
+                if (typeof publishLeaderboardStats === 'function') publishLeaderboardStats();
+                if (typeof fetchLeaderboard === 'function') fetchLeaderboard(false);
             }
         }
 
@@ -576,9 +655,14 @@
                         terms: cleanTermsForStorage(state.terms),
                         history: state.history,
                         activityLog: state.activityLog || {},
+                        playerProfile: state.playerProfile || {},
+                        isOwnerUnlocked: Boolean(state.isOwnerUnlocked),
                         geminiApiKey: state.geminiApiKey || '',
                         geminiModel: state.geminiModel || 'auto'
                     });
+                    if (typeof publishLeaderboardStats === 'function') {
+                        publishLeaderboardStats();
+                    }
                 } catch (e) {
                     console.error("Error saving to cloud:", e);
                 }
@@ -2463,6 +2547,726 @@
             renderApp();
         };
 
+        // =========================================================================
+        // MULTIPLAYER ENGINE: SECRET OWNER UNLOCK, GLOBAL LEADERBOARD & SHARED LIBRARY
+        // =========================================================================
+        window.handleSecretLogoTap = () => {
+            const now = Date.now();
+            secretLogoTapTimestamps = secretLogoTapTimestamps.filter(ts => now - ts <= 2500);
+            secretLogoTapTimestamps.push(now);
+            if (secretLogoTapTimestamps.length >= 5) {
+                secretLogoTapTimestamps = [];
+                if (state.isOwnerUnlocked) {
+                    window.setView('topnotcher');
+                    showToast("👑 Topnotcher Mode is already unlocked!");
+                } else {
+                    state.showOwnerPinModal = true;
+                    renderApp();
+                    setTimeout(() => {
+                        const inp = document.getElementById('owner-pin-input');
+                        if (inp) inp.focus();
+                    }, 50);
+                }
+                return;
+            }
+            window.setView('dashboard');
+        };
+
+        window.closeOwnerPinModal = () => {
+            state.showOwnerPinModal = false;
+            renderApp();
+        };
+
+        window.submitOwnerPin = () => {
+            const inp = document.getElementById('owner-pin-input');
+            const pin = inp ? inp.value.trim() : '';
+            if (pin === OWNER_UNLOCK_PIN) {
+                state.isOwnerUnlocked = true;
+                state.showOwnerPinModal = false;
+                if (userId) localStorage.setItem(`elementVaultOwner_${userId}`, 'true');
+                saveData();
+                window.setView('topnotcher');
+                showToast("👑 Owner Topnotcher Mode Unlocked & synced to your account!");
+            } else {
+                if (inp) { inp.value = ''; inp.focus(); }
+                showToast("Invalid code.", "error");
+            }
+        };
+
+        window.lockOwnerMode = () => {
+            state.isOwnerUnlocked = false;
+            if (userId) localStorage.setItem(`elementVaultOwner_${userId}`, 'false');
+            saveData();
+            window.setView('dashboard');
+            showToast("🔒 Topnotcher Mode hidden.");
+        };
+
+        // --- Player Profile & Duolingo-Style League Calculation ---
+        function getPlayerLeague(score) {
+            const s = Number(score) || 0;
+            if (s >= 6500) return { label: 'Grandmaster ME', icon: '👑', badgeCls: 'bg-amber-100 text-amber-800 border-amber-300', barCls: 'bg-amber-500', min: 6500, next: 10000 };
+            if (s >= 3500) return { label: 'Diamond ME', icon: '💎', badgeCls: 'bg-sky-100 text-sky-800 border-sky-300', barCls: 'bg-sky-500', min: 3500, next: 6500 };
+            if (s >= 1750) return { label: 'Gold ME', icon: '🥇', badgeCls: 'bg-yellow-100 text-yellow-800 border-yellow-300', barCls: 'bg-yellow-500', min: 1750, next: 3500 };
+            if (s >= 750)  return { label: 'Silver ME', icon: '🥈', badgeCls: 'bg-slate-200 text-slate-700 border-slate-300', barCls: 'bg-slate-500', min: 750, next: 1750 };
+            if (s >= 250)  return { label: 'Bronze ME', icon: '🥉', badgeCls: 'bg-orange-100 text-orange-800 border-orange-300', barCls: 'bg-orange-500', min: 250, next: 750 };
+            return { label: 'Cadet ME', icon: '⚙️', badgeCls: 'bg-emerald-50 text-emerald-700 border-emerald-200', barCls: 'bg-emerald-500', min: 0, next: 250 };
+        }
+
+        function computeMyPlayerStats() {
+            const activeTerms = (state.terms || []).filter(t => !t.isErroneous);
+            let masteryScore = 0;
+            let masteredCount = 0;
+            let totalC = 0;
+            let totalW = 0;
+            activeTerms.forEach(t => {
+                if (!t.isNew) {
+                    masteryScore += (t.level || 0);
+                    if ((t.level || 0) >= 5) masteredCount++;
+                }
+                totalC += (t.correct || 0);
+                totalW += (t.incorrect || 0);
+            });
+            const accuracy = (totalC + totalW) > 0 ? Math.round((totalC / (totalC + totalW)) * 100) : 0;
+
+            const todayKey = getTodayDateKey();
+            const todayLog = (state.activityLog && state.activityLog[todayKey]) || {};
+            let cardsToday = 0;
+            Object.keys(todayLog).forEach(h => { cardsToday += (Number(todayLog[h]?.c) || 0) + (Number(todayLog[h]?.w) || 0); });
+            if (cardsToday === 0) {
+                cardsToday = state.terms.filter(t => (t.lastReviewedDate || 0) >= getTodayStart()).length;
+            }
+
+            // Compute active consecutive study streak from activityLog + history.all
+            const activeDateSet = new Set();
+            Object.keys((state.history && state.history.all) || {}).forEach(k => activeDateSet.add(k));
+            Object.keys(state.activityLog || {}).forEach(k => {
+                const hrs = state.activityLog[k] || {};
+                const sum = Object.keys(hrs).reduce((a, h) => a + (Number(hrs[h]?.c) || 0) + (Number(hrs[h]?.w) || 0), 0);
+                if (sum > 0) activeDateSet.add(k);
+            });
+            if (cardsToday > 0) activeDateSet.add(todayKey);
+
+            let streak = 0;
+            const mid = new Date();
+            mid.setHours(0, 0, 0, 0);
+            const hasToday = activeDateSet.has(todayKey);
+            for (let back = hasToday ? 0 : 1; back < 365; back++) {
+                const dt = new Date(mid.getTime() - back * MS_PER_DAY);
+                const dk = dt.toLocaleDateString('en-CA');
+                if (activeDateSet.has(dk)) streak++;
+                else break;
+            }
+
+            const league = getPlayerLeague(masteryScore);
+            const displayName = (state.playerProfile && state.playerProfile.displayName) ? state.playerProfile.displayName.trim() : 'Engineer';
+            const avatar = (state.playerProfile && state.playerProfile.avatar) || '⚙️';
+            const photoURL = (state.playerProfile && state.playerProfile.photoURL) || '';
+
+            return {
+                uid: userId || 'local_me',
+                displayName: displayName || 'Engineer',
+                avatar,
+                photoURL,
+                masteryScore,
+                cardsToday,
+                todayDate: todayKey,
+                accuracy,
+                masteredCount,
+                totalCards: activeTerms.length,
+                streak,
+                league,
+                updatedAt: Date.now()
+            };
+        }
+
+        function upsertMeIntoLeaderboardLocal(myStats) {
+            const list = Array.isArray(state.leaderboardEntries) ? [...state.leaderboardEntries] : [];
+            const idx = list.findIndex(e => e.uid === myStats.uid);
+            const entry = {
+                uid: myStats.uid,
+                displayName: myStats.displayName,
+                avatar: myStats.avatar,
+                photoURL: myStats.photoURL,
+                masteryScore: myStats.masteryScore,
+                cardsToday: myStats.cardsToday,
+                todayDate: myStats.todayDate,
+                accuracy: myStats.accuracy,
+                masteredCount: myStats.masteredCount,
+                totalCards: myStats.totalCards,
+                streak: myStats.streak,
+                updatedAt: myStats.updatedAt
+            };
+            if (idx >= 0) list[idx] = entry;
+            else list.push(entry);
+            state.leaderboardEntries = list;
+        }
+
+        async function publishLeaderboardStats() {
+            const myStats = computeMyPlayerStats();
+            upsertMeIntoLeaderboardLocal(myStats);
+            if (!userId || !db || state.sessionConflict) return;
+            try {
+                const lbRef = doc(db, 'artifacts', appId, 'leaderboard', userId);
+                await setDoc(lbRef, {
+                    uid: userId,
+                    displayName: myStats.displayName,
+                    avatar: myStats.avatar,
+                    photoURL: myStats.photoURL,
+                    masteryScore: myStats.masteryScore,
+                    cardsToday: myStats.cardsToday,
+                    todayDate: myStats.todayDate,
+                    accuracy: myStats.accuracy,
+                    masteredCount: myStats.masteredCount,
+                    totalCards: myStats.totalCards,
+                    streak: myStats.streak,
+                    updatedAt: Date.now()
+                }, { merge: true });
+            } catch (e) {
+                console.warn("Leaderboard sync skipped:", e.message);
+            }
+        }
+
+        async function fetchLeaderboard(force = false) {
+            const myStats = computeMyPlayerStats();
+            upsertMeIntoLeaderboardLocal(myStats);
+            if (!db) { renderApp(); return; }
+            const now = Date.now();
+            if (!force && state.leaderboardLastFetch && (now - state.leaderboardLastFetch < 60000) && state.leaderboardEntries.length > 0) {
+                return;
+            }
+            state.leaderboardLoading = true;
+            if (force) renderApp();
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'leaderboard');
+                const snap = await getDocs(colRef);
+                const todayKey = getTodayDateKey();
+                const entries = [];
+                snap.forEach(docSnap => {
+                    const d = docSnap.data() || {};
+                    const isSameDay = d.todayDate === todayKey;
+                    entries.push({
+                        uid: d.uid || docSnap.id,
+                        displayName: String(d.displayName || 'Engineer').slice(0, 28),
+                        avatar: d.avatar || '⚙️',
+                        photoURL: d.photoURL || '',
+                        masteryScore: Number(d.masteryScore) || 0,
+                        cardsToday: isSameDay ? (Number(d.cardsToday) || 0) : 0,
+                        todayDate: d.todayDate || '',
+                        accuracy: Number(d.accuracy) || 0,
+                        masteredCount: Number(d.masteredCount) || 0,
+                        totalCards: Number(d.totalCards) || 0,
+                        streak: Number(d.streak) || 0,
+                        updatedAt: Number(d.updatedAt) || 0
+                    });
+                });
+                state.leaderboardEntries = entries;
+                upsertMeIntoLeaderboardLocal(computeMyPlayerStats());
+                state.leaderboardLastFetch = Date.now();
+            } catch (e) {
+                console.warn("Error loading leaderboard:", e.message);
+            } finally {
+                state.leaderboardLoading = false;
+                renderApp();
+            }
+        }
+        window.refreshLeaderboard = () => fetchLeaderboard(true);
+
+        function getSortedLeaderboard(sortKey = state.leaderboardSort) {
+            const myStats = computeMyPlayerStats();
+            upsertMeIntoLeaderboardLocal(myStats);
+            const todayKey = getTodayDateKey();
+            const arr = (state.leaderboardEntries || []).map(e => ({
+                ...e,
+                cardsToday: e.todayDate === todayKey ? (Number(e.cardsToday) || 0) : 0,
+                isMe: e.uid === (userId || 'local_me')
+            }));
+            arr.sort((a, b) => {
+                if (sortKey === 'today') return (b.cardsToday - a.cardsToday) || (b.masteryScore - a.masteryScore);
+                if (sortKey === 'accuracy') return (b.accuracy - a.accuracy) || (b.masteryScore - a.masteryScore);
+                if (sortKey === 'streak') return (b.streak - a.streak) || (b.masteryScore - a.masteryScore);
+                return (b.masteryScore - a.masteryScore) || (b.cardsToday - a.cardsToday);
+            });
+            return arr.map((e, i) => ({ ...e, rank: i + 1, league: getPlayerLeague(e.masteryScore) }));
+        }
+
+        function computeRivalBattlePlan(myEntry, rivalEntry) {
+            if (!myEntry || !rivalEntry || myEntry.uid === rivalEntry.uid) return null;
+            const ptsGap = rivalEntry.masteryScore - myEntry.masteryScore;
+            const todayGap = rivalEntry.cardsToday - myEntry.cardsToday;
+            const accGap = rivalEntry.accuracy - myEntry.accuracy;
+            const masteredGap = rivalEntry.masteredCount - myEntry.masteredCount;
+
+            if (ptsGap > 0) {
+                const levelUpsNeeded = ptsGap; // Each +1 level = +1 Mastery Pt!
+                const perfectReviewsNeeded = Math.ceil(ptsGap / 3);
+                const newPerfectNeeded = Math.ceil(ptsGap / 4);
+                const myRecentPace = Math.max(25, get7DayMedianDailyCards());
+                const estDays = Math.max(1, Math.ceil(ptsGap / (myRecentPace * 0.75)));
+                return {
+                    isAhead: false,
+                    ptsGap,
+                    todayGap,
+                    accGap,
+                    masteredGap,
+                    headline: `Lamang si ${rivalEntry.displayName} ng +${ptsGap.toLocaleString()} pts`,
+                    tactics: [
+                        `Mag-promote ng ~${levelUpsNeeded.toLocaleString()} total card levels (o ~${perfectReviewsNeeded} Perfect reviews sa Review)`,
+                        `OR mag-graduate ng ~${newPerfectNeeded} New cards sa Perfect (+4 pts each sa Intake)`,
+                        `Sa pace mo ngayon, kaya mo siyang ma-overtake in ~${estDays} day${estDays === 1 ? '' : 's'}!`
+                    ],
+                    shortTip: `Need +${ptsGap.toLocaleString()} pts (~${perfectReviewsNeeded} Perfects or ${newPerfectNeeded} New Perfects) to pass #${rivalEntry.rank} ${rivalEntry.displayName}!`
+                };
+            }
+            const lead = Math.abs(ptsGap);
+            return {
+                isAhead: true,
+                ptsGap: -lead,
+                todayGap,
+                accGap,
+                masteredGap,
+                headline: lead === 0 ? `Tabla kayo ni ${rivalEntry.displayName}!` : `Lamang ka ng +${lead.toLocaleString()} pts kay ${rivalEntry.displayName}!`,
+                tactics: [
+                    todayGap > 0
+                        ? `Heads up: mas marami siyang natapos today (+${todayGap} cards) — mag-review para hindi ka maabutan!`
+                        : `Solid ang lamang mo today (${myEntry.cardsToday} vs ${rivalEntry.cardsToday} cards)!`,
+                    `Keep your ${myEntry.streak}d streak & push more L4→L5 cards para palakihin ang lead.`
+                ],
+                shortTip: lead === 0 ? `Tied with ${rivalEntry.displayName} — 1 level-up breaks the tie!` : `Leading ${rivalEntry.displayName} by +${lead.toLocaleString()} pts!`
+            };
+        }
+
+        window.setLeaderboardSort = (sortKey) => {
+            state.leaderboardSort = sortKey;
+            renderApp();
+        };
+        window.selectCompareRival = (uid) => {
+            state.compareRivalUid = uid;
+            renderApp();
+        };
+        window.openProfileModal = () => {
+            state.showProfileModal = true;
+            renderApp();
+        };
+        window.closeProfileModal = () => {
+            state.showProfileModal = false;
+            renderApp();
+        };
+        window.selectProfileAvatar = (emoji) => {
+            state.playerProfile.avatar = emoji;
+            renderApp();
+        };
+        window.savePlayerProfile = () => {
+            const nameInp = document.getElementById('player-name-input');
+            const newName = nameInp ? nameInp.value.trim().slice(0, 26) : '';
+            if (!newName) return showToast("Maglagay muna ng display name.", "error");
+            state.playerProfile.displayName = newName;
+            state.showProfileModal = false;
+            saveData();
+            publishLeaderboardStats();
+            renderApp();
+            showToast(`Profile saved as ${state.playerProfile.avatar} ${newName}!`);
+        };
+
+        // --- GENERAL SHARED LIBRARY (STRICT AUTHOR-ONLY EDIT, READ-ONLY TRY & CLONE) ---
+        async function fetchSharedLibrary(force = false) {
+            if (!db) return;
+            const now = Date.now();
+            if (!force && state.libraryLastFetch && (now - state.libraryLastFetch < 60000) && state.sharedDecks.length > 0) {
+                return;
+            }
+            state.libraryLoading = true;
+            if (force) renderApp();
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'sharedLibrary');
+                const snap = await getDocs(colRef);
+                const decks = [];
+                snap.forEach(docSnap => {
+                    const d = docSnap.data() || {};
+                    decks.push({
+                        id: docSnap.id,
+                        title: String(d.title || 'Untitled Deck'),
+                        subjectTag: d.subjectTag || 'General',
+                        description: String(d.description || ''),
+                        authorUid: d.authorUid || '',
+                        authorName: String(d.authorName || 'Engineer'),
+                        authorAvatar: d.authorAvatar || '⚙️',
+                        sourceFolderId: d.sourceFolderId || '',
+                        cardCount: Array.isArray(d.cards) ? d.cards.length : (Number(d.cardCount) || 0),
+                        tryCount: Number(d.tryCount) || 0,
+                        cloneCount: Number(d.cloneCount) || 0,
+                        cards: Array.isArray(d.cards) ? d.cards : [],
+                        createdAt: Number(d.createdAt) || 0,
+                        updatedAt: Number(d.updatedAt) || 0
+                    });
+                });
+                decks.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+                state.sharedDecks = decks;
+                state.libraryLastFetch = Date.now();
+            } catch (e) {
+                console.warn("Error loading shared library:", e.message);
+                showToast("Could not load Shared Library right now.", "error");
+            } finally {
+                state.libraryLoading = false;
+                renderApp();
+            }
+        }
+        window.refreshSharedLibrary = () => fetchSharedLibrary(true);
+        window.setLibraryFilter = (f) => { state.libraryFilter = f; renderApp(); };
+        window.setLibrarySearch = (q) => { state.librarySearch = q; renderApp(); };
+
+        function collectCleanSharedCardsFromFolder(rootFolderId, includeNotes = true) {
+            const folderIds = [rootFolderId];
+            let idx = 0;
+            while (idx < folderIds.length) {
+                const kids = state.folders.filter(f => f.parentId === folderIds[idx]).map(f => f.id);
+                folderIds.push(...kids);
+                idx++;
+            }
+            const rootName = (state.folders.find(f => f.id === rootFolderId) || {}).name || '';
+            const rawCards = state.terms.filter(t => folderIds.includes(t.folderId) && !t.isErroneous);
+            return rawCards.map(t => {
+                // Build relative subfolder path inside the shared deck
+                const relParts = [];
+                let curr = state.folders.find(f => f.id === t.folderId);
+                while (curr && curr.id !== rootFolderId) {
+                    relParts.unshift(curr.name);
+                    curr = state.folders.find(f => f.id === curr.parentId);
+                }
+                const item = {
+                    id: t.id || generateId(),
+                    question: String(t.question || ''),
+                    answer: String(t.answer || ''),
+                    subPath: relParts.join(' / ')
+                };
+                if (includeNotes && t.explanation && String(t.explanation).trim()) {
+                    item.explanation = String(t.explanation).trim();
+                }
+                if (includeNotes && t.taglishSimplified && typeof t.taglishSimplified === 'object') {
+                    item.taglishSimplified = t.taglishSimplified;
+                }
+                return item;
+            });
+        }
+
+        window.setShareDeckFolder = (fid) => {
+            state.shareDeckFolderId = fid;
+            renderApp();
+        };
+        window.openShareDeckModal = (folderId = null) => {
+            if (!userId) return showToast("Sign in first to share a deck to the community.", "error");
+            const defaultFid = folderId || state.activeFolderId || (state.folders[0] && state.folders[0].id) || null;
+            state.shareDeckFolderId = defaultFid;
+            state.showShareDeckModal = true;
+            renderApp();
+        };
+        window.closeShareDeckModal = () => {
+            state.showShareDeckModal = false;
+            state.shareDeckFolderId = null;
+            renderApp();
+        };
+
+        window.publishFolderToLibrary = async () => {
+            if (!userId || !db) return showToast("Connect online to publish to the Shared Library.", "error");
+            const folderEl = document.getElementById('share-deck-folder');
+            const titleEl = document.getElementById('share-deck-title');
+            const subjEl = document.getElementById('share-deck-subject');
+            const descEl = document.getElementById('share-deck-desc');
+            const notesEl = document.getElementById('share-deck-notes');
+
+            const folderId = folderEl ? folderEl.value : state.shareDeckFolderId;
+            if (!folderId) return showToast("Pumili muna ng folder na ishe-share.", "error");
+            const folderObj = state.folders.find(f => f.id === folderId);
+            const title = (titleEl && titleEl.value.trim()) ? titleEl.value.trim().slice(0, 80) : (folderObj ? folderObj.name : 'Shared ME Deck');
+            const subjectTag = subjEl ? subjEl.value : 'General';
+            const description = descEl ? descEl.value.trim().slice(0, 220) : '';
+            const includeNotes = notesEl ? notesEl.checked : true;
+
+            const cards = collectCleanSharedCardsFromFolder(folderId, includeNotes);
+            if (cards.length === 0) {
+                return showToast("Walang non-erroneous cards sa napiling folder.", "error");
+            }
+            const payloadBytes = new Blob([JSON.stringify(cards)]).size;
+            if (payloadBytes > 860000) {
+                return showToast("Masyadong malaki ang folder (>850KB Firestore limit). I-share per chapter/subfolder!", "error");
+            }
+
+            const deckId = generateId();
+            const now = Date.now();
+            const deckDoc = {
+                id: deckId,
+                title,
+                subjectTag,
+                description,
+                authorUid: userId,
+                authorName: (state.playerProfile && state.playerProfile.displayName) || 'Engineer',
+                authorAvatar: (state.playerProfile && state.playerProfile.avatar) || '⚙️',
+                sourceFolderId: folderId,
+                includeNotes,
+                cardCount: cards.length,
+                tryCount: 0,
+                cloneCount: 0,
+                cards,
+                createdAt: now,
+                updatedAt: now
+            };
+
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), deckDoc);
+                state.sharedDecks = [deckDoc, ...(state.sharedDecks || [])];
+                state.showShareDeckModal = false;
+                state.shareDeckFolderId = null;
+                state.currentView = 'library';
+                renderApp();
+                showToast(`📚 Shared "${title}" (${cards.length} cards)! Ikaw lang ang pwedeng mag-edit nito.`);
+            } catch (e) {
+                console.error("Publish deck error:", e);
+                showToast("Publish failed: " + e.message, "error");
+            }
+        };
+
+        // STRICT AUTHOR-ONLY EDIT / SYNC / DELETE HANDLERS
+        window.openEditSharedDeckModal = (deckId) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || deck.authorUid !== userId) {
+                return showToast("Only the deck owner can edit this shared deck.", "error");
+            }
+            state.editingSharedDeckId = deckId;
+            renderApp();
+        };
+        window.closeEditSharedDeckModal = () => {
+            state.editingSharedDeckId = null;
+            renderApp();
+        };
+        window.saveSharedDeckMeta = async (deckId) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || deck.authorUid !== userId) return showToast("Owner only!", "error");
+            const titleEl = document.getElementById('edit-shared-title');
+            const subjEl = document.getElementById('edit-shared-subject');
+            const descEl = document.getElementById('edit-shared-desc');
+            const updated = {
+                ...deck,
+                title: (titleEl && titleEl.value.trim()) ? titleEl.value.trim().slice(0, 80) : deck.title,
+                subjectTag: subjEl ? subjEl.value : deck.subjectTag,
+                description: descEl ? descEl.value.trim().slice(0, 220) : deck.description,
+                cardCount: deck.cards.length,
+                updatedAt: Date.now()
+            };
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), updated);
+                state.sharedDecks = state.sharedDecks.map(d => d.id === deckId ? updated : d);
+                state.editingSharedDeckId = null;
+                renderApp();
+                showToast("Shared deck updated! ✅");
+            } catch (e) {
+                showToast("Update failed: " + e.message, "error");
+            }
+        };
+
+        window.resyncSharedDeckFromLocal = async (deckId) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || deck.authorUid !== userId) return showToast("Owner only!", "error");
+            if (!deck.sourceFolderId || !state.folders.some(f => f.id === deck.sourceFolderId)) {
+                return showToast("Original local folder not found — edit cards directly below.", "error");
+            }
+            const freshCards = collectCleanSharedCardsFromFolder(deck.sourceFolderId, deck.includeNotes !== false);
+            if (freshCards.length === 0) return showToast("No cards found in source folder.", "error");
+            if (new Blob([JSON.stringify(freshCards)]).size > 860000) {
+                return showToast("Folder exceeded 850KB Firestore doc limit.", "error");
+            }
+            const updated = { ...deck, cards: freshCards, cardCount: freshCards.length, updatedAt: Date.now() };
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), updated);
+                state.sharedDecks = state.sharedDecks.map(d => d.id === deckId ? updated : d);
+                renderApp();
+                showToast(`🔄 Synced ${freshCards.length} latest cards from your folder!`);
+            } catch (e) {
+                showToast("Sync failed: " + e.message, "error");
+            }
+        };
+
+        window.updateSharedDeckCard = async (deckId, cardIndex) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || deck.authorUid !== userId) return showToast("Owner only!", "error");
+            const qEl = document.getElementById(`shared-card-q-${cardIndex}`);
+            const aEl = document.getElementById(`shared-card-a-${cardIndex}`);
+            if (!qEl || !aEl) return;
+            const newCards = deck.cards.map((c, i) => i === cardIndex ? { ...c, question: qEl.value.trim(), answer: aEl.value.trim() } : c);
+            const updated = { ...deck, cards: newCards, cardCount: newCards.length, updatedAt: Date.now() };
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), updated);
+                state.sharedDecks = state.sharedDecks.map(d => d.id === deckId ? updated : d);
+                showToast("Card saved in shared deck! ✅");
+            } catch (e) {
+                showToast("Save failed: " + e.message, "error");
+            }
+        };
+
+        window.deleteSharedDeckCard = async (deckId, cardIndex) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || deck.authorUid !== userId) return showToast("Owner only!", "error");
+            if (!confirm("Remove this card from the shared deck?")) return;
+            const newCards = deck.cards.filter((_, i) => i !== cardIndex);
+            const updated = { ...deck, cards: newCards, cardCount: newCards.length, updatedAt: Date.now() };
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), updated);
+                state.sharedDecks = state.sharedDecks.map(d => d.id === deckId ? updated : d);
+                renderApp();
+                showToast("Card removed from shared deck.");
+            } catch (e) {
+                showToast("Delete failed: " + e.message, "error");
+            }
+        };
+
+        window.deleteSharedDeck = async (deckId) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || deck.authorUid !== userId) return showToast("Only the deck owner can delete this deck.", "error");
+            if (!confirm(`Delete "${deck.title}" from the Community Shared Library? (Hindi maaapektuhan ang local folders mo.)`)) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId));
+                state.sharedDecks = state.sharedDecks.filter(d => d.id !== deckId);
+                if (state.editingSharedDeckId === deckId) state.editingSharedDeckId = null;
+                renderApp();
+                showToast("Removed from Shared Library.");
+            } catch (e) {
+                showToast("Delete failed: " + e.message, "error");
+            }
+        };
+
+        // READ-ONLY TRY MODE: Classmates can practice shared flashcards immediately without editing/mutating the author's deck!
+        window.startTrySharedDeck = (deckId) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || !Array.isArray(deck.cards) || deck.cards.length === 0) {
+                return showToast("No cards available in this shared deck.", "error");
+            }
+            const queue = deck.cards.map((c, idx) => ({
+                id: `try_${deckId}_${idx}`,
+                folderId: '__community_try__',
+                subPath: c.subPath || deck.title,
+                question: c.question,
+                answer: c.answer,
+                explanation: c.explanation || '',
+                taglishSimplified: c.taglishSimplified || null,
+                isNew: false,
+                level: 1,
+                correct: 0,
+                incorrect: 0,
+                isReadOnlyShared: true
+            }));
+            shuffleArray(queue);
+
+            // Softly bump tryCount in background
+            if (db && deckId) {
+                const nextTry = (deck.tryCount || 0) + 1;
+                deck.tryCount = nextTry;
+                setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), { tryCount: nextTry }, { merge: true }).catch(() => {});
+            }
+
+            sessionCardDurations = [];
+            state.sessionLastImpact = null;
+            state.sessionData = {
+                type: 'community_try',
+                queue,
+                initialQueueLength: queue.length,
+                sharedDeckId: deckId,
+                sharedDeckTitle: deck.title,
+                sharedDeckAuthor: deck.authorName,
+                tryCorrect: 0,
+                tryWrong: 0,
+                answeredInSession: 0
+            };
+            state.currentCardIndex = 0;
+            state.timeLeft = state.timePerCard;
+            initCardSessionState();
+            window.setView('session');
+            manageTimer();
+            manageEtaInterval();
+            showToast(`▶ Trying "${deck.title}" (${queue.length} cards • Read-Only Practice)`);
+        };
+
+        // CLONE / PULL COPY TO OWN VAULT: Creates an independent personal copy with fresh SRS (never modifies author's shared deck!)
+        window.cloneSharedDeckToVault = (deckId) => {
+            const deck = (state.sharedDecks || []).find(d => d.id === deckId);
+            if (!deck || !Array.isArray(deck.cards) || deck.cards.length === 0) {
+                return showToast("Walang cards sa shared deck na ito.", "error");
+            }
+            // Reuse existing cloned root folder if already cloned before (lets classmates pull new cards without resetting SRS!)
+            let rootFolder = state.folders.find(f => f.clonedFromDeckId === deckId);
+            if (!rootFolder) {
+                rootFolder = {
+                    id: generateId(),
+                    name: `📚 ${deck.title} (by ${deck.authorName})`,
+                    parentId: null,
+                    clonedFromDeckId: deckId
+                };
+                state.folders.push(rootFolder);
+            }
+
+            const existingNormQs = new Set(state.terms.map(t => String(t.question || '').replace(/\s+/g, '').toLowerCase()));
+            const subFolderCache = {};
+            const getOrCreateSubFolder = (subPath) => {
+                if (!subPath) return rootFolder.id;
+                if (subFolderCache[subPath]) return subFolderCache[subPath];
+                const parts = subPath.split(' / ').filter(Boolean);
+                let parentId = rootFolder.id;
+                parts.forEach(part => {
+                    let found = state.folders.find(f => f.parentId === parentId && f.name === part);
+                    if (!found) {
+                        found = { id: generateId(), name: part, parentId };
+                        state.folders.push(found);
+                    }
+                    parentId = found.id;
+                });
+                subFolderCache[subPath] = parentId;
+                return parentId;
+            };
+
+            let addedCount = 0;
+            let skippedDup = 0;
+            deck.cards.forEach(c => {
+                const norm = String(c.question || '').replace(/\s+/g, '').toLowerCase();
+                if (!norm || existingNormQs.has(norm)) {
+                    skippedDup++;
+                    return;
+                }
+                existingNormQs.add(norm);
+                const targetFid = getOrCreateSubFolder(c.subPath || '');
+                const newTerm = {
+                    id: generateId(),
+                    folderId: targetFid,
+                    question: c.question,
+                    answer: c.answer,
+                    level: 0,
+                    isNew: true,
+                    nextReviewDate: 0,
+                    lastReviewedDate: 0,
+                    graduatedDate: 0,
+                    correct: 0,
+                    incorrect: 0,
+                    parkingLot: false,
+                    isErroneous: false
+                };
+                if (c.explanation) newTerm.explanation = c.explanation;
+                if (c.taglishSimplified) newTerm.taglishSimplified = c.taglishSimplified;
+                state.terms.push(newTerm);
+                addedCount++;
+            });
+
+            if (addedCount > 0) {
+                const tel = ensureDailyTelemetry();
+                tel.addedToday = (tel.addedToday || 0) + addedCount;
+                saveData();
+                if (db && deckId) {
+                    const nextClone = (deck.cloneCount || 0) + 1;
+                    deck.cloneCount = nextClone;
+                    setDoc(doc(db, 'artifacts', appId, 'sharedLibrary', deckId), { cloneCount: nextClone }, { merge: true }).catch(() => {});
+                }
+                renderApp();
+                showToast(`📥 Saved ${addedCount} cards to your vault${skippedDup > 0 ? ` (${skippedDup} duplicates skipped)` : ''}!`);
+            } else {
+                showToast(`All ${skippedDup} cards from "${deck.title}" are already in your vault! ✅`);
+            }
+        };
+
         // Feature 4: 5-Card Leech Surgery Mode (No timer pressure, top 5 active leeches!)
         window.startLeechSurgery = () => {
             const leeches = state.terms
@@ -2560,7 +3364,27 @@
         window.endSession = (completedNaturally = false) => {
             window.stopTTS(true);
             const finishedSession = state.sessionData;
-            if (finishedSession && (finishedSession.type === 'leech_surgery' || (finishedSession.objectiveCat && (finishedSession.answeredInSession || 0) >= 1) || (completedNaturally && (finishedSession.answeredInSession || 0) >= 3))) {
+            if (finishedSession && finishedSession.type === 'community_try') {
+                if ((finishedSession.answeredInSession || 0) >= 1) {
+                    state.sessionSummaryModal = {
+                        type: 'community_try',
+                        sharedDeckId: finishedSession.sharedDeckId,
+                        sharedDeckTitle: finishedSession.sharedDeckTitle,
+                        sharedDeckAuthor: finishedSession.sharedDeckAuthor,
+                        answered: finishedSession.answeredInSession || 0,
+                        tryCorrect: finishedSession.tryCorrect || 0,
+                        tryWrong: finishedSession.tryWrong || 0
+                    };
+                }
+                state.sessionData = null;
+                state.sessionLastImpact = null;
+                sessionCardDurations = [];
+                clearInterval(timerInterval);
+                clearInterval(etaRefreshInterval);
+                window.setView('library');
+                return;
+            }
+            if (state.isOwnerUnlocked && finishedSession && (finishedSession.type === 'leech_surgery' || (finishedSession.objectiveCat && (finishedSession.answeredInSession || 0) >= 1) || (completedNaturally && (finishedSession.answeredInSession || 0) >= 3))) {
                 const endTopScore = computeTopnotcherIndex().score;
                 const tel = ensureDailyTelemetry();
                 if (finishedSession.type === 'leech_surgery' && completedNaturally) {
@@ -2584,7 +3408,7 @@
             clearInterval(timerInterval);
             clearInterval(etaRefreshInterval);
             window.logDailyStats();
-            const returnView = finishedSession && finishedSession.objectiveCat
+            const returnView = (state.isOwnerUnlocked && finishedSession && finishedSession.objectiveCat)
                 ? 'topnotcher'
                 : (finishedSession && finishedSession.type === 'leech_surgery' ? 'analytics' : 'dashboard');
             window.setView(returnView);
@@ -2612,6 +3436,23 @@
             if (currentCardStartTs > 0) {
                 sessionCardDurations.push(clampedSec);
                 if (sessionCardDurations.length > 8) sessionCardDurations.shift();
+            }
+
+            // Read-Only Community Shared Deck Practice Mode (does NOT mutate personal SRS or author's shared deck!)
+            if (state.sessionData && state.sessionData.type === 'community_try') {
+                state.sessionData.answeredInSession = (state.sessionData.answeredInSession || 0) + 1;
+                if (answerType === 'wrong') state.sessionData.tryWrong = (state.sessionData.tryWrong || 0) + 1;
+                else state.sessionData.tryCorrect = (state.sessionData.tryCorrect || 0) + 1;
+                if (state.currentCardIndex + 1 < state.sessionData.queue.length) {
+                    state.currentCardIndex++;
+                    state.timeLeft = state.timePerCard;
+                    initCardSessionState();
+                    renderApp();
+                    manageTimer();
+                } else {
+                    window.endSession(true);
+                }
+                return;
             }
 
             const currentCard = state.sessionData.queue[state.currentCardIndex];
@@ -2796,59 +3637,65 @@
                 tel.cleanBlockW = 0;
             }
 
-            // Evaluate Daily Orders progress & trigger sleek compact right-side popups for every objective that moved up (+1 / Cleared / Overdrive!)
-            const ordersAfterInfo = getOrGenerateDailyOrders();
-            ordersAfterInfo.orders.forEach(ord => {
-                const beforeVal = ordersBeforeMap[ord.cat] || 0;
-                if (ord.rawProgress > beforeVal) {
-                    triggerObjectiveSidePopup(ord, ord.rawProgress - beforeVal, beforeVal, ord.rawProgress);
-                }
-            });
+            // Evaluate Daily Orders progress & trigger sleek compact right-side popups ONLY for Owner Mode!
+            if (state.isOwnerUnlocked) {
+                const ordersAfterInfo = getOrGenerateDailyOrders();
+                ordersAfterInfo.orders.forEach(ord => {
+                    const beforeVal = ordersBeforeMap[ord.cat] || 0;
+                    if (ord.rawProgress > beforeVal) {
+                        triggerObjectiveSidePopup(ord, ord.rawProgress - beforeVal, beforeVal, ord.rawProgress);
+                    }
+                });
+            }
             saveLocalTelemetryOnly();
 
-            // --- Feature 2: Live Top 1 Impact Delta + Game Animations & Haptics ---
-            const topAfter = computeTopnotcherIndex().score;
-            const actualDelta = topAfter - topBefore;
-            const isRushedMiss = answerType === 'wrong' && rawSec < 3.5;
+            // --- Feature 2: Live Top 1 Impact Delta + Game Animations & Haptics (Owner-Only!) ---
+            if (state.isOwnerUnlocked) {
+                const topAfter = computeTopnotcherIndex().score;
+                const actualDelta = topAfter - topBefore;
+                const isRushedMiss = answerType === 'wrong' && rawSec < 3.5;
 
-            let fxType = 'emerald';
-            let extraLabel = '';
-            if (answerType !== 'wrong') {
-                if (leechClearedToL3) {
-                    fxType = 'gold';
-                    extraLabel = 'NEMESIS CLEARED!';
-                    showToast("⚡ NEMESIS CLEARED! Active Leech graduated to Level 3! 🏆");
-                } else if (newlyLocked) {
-                    fxType = 'gold';
-                    extraLabel = 'LOCKED FEB 2027!';
-                    showToast("🔒 LOCKED IN FOR FEB 2027! Card mastered past exam date!");
+                let fxType = 'emerald';
+                let extraLabel = '';
+                if (answerType !== 'wrong') {
+                    if (leechClearedToL3) {
+                        fxType = 'gold';
+                        extraLabel = 'NEMESIS CLEARED!';
+                        showToast("⚡ NEMESIS CLEARED! Active Leech graduated to Level 3! 🏆");
+                    } else if (newlyLocked) {
+                        fxType = 'gold';
+                        extraLabel = 'LOCKED FEB 2027!';
+                        showToast("🔒 LOCKED IN FOR FEB 2027! Card mastered past exam date!");
+                    } else {
+                        fxType = 'emerald';
+                    }
                 } else {
-                    fxType = 'emerald';
+                    if (isRushedMiss) {
+                        fxType = 'rushed';
+                        extraLabel = '<3.5s Slow down!';
+                    } else if (wasLeech || nowLeech) {
+                        fxType = 'crit_miss';
+                        extraLabel = 'LEECH ACTIVE';
+                    } else {
+                        fxType = 'miss';
+                    }
                 }
+
+                const counterfactualVal = answerType !== 'wrong' ? stakes.lossWrong : stakes.gainCorrect;
+                state.sessionLastImpact = {
+                    delta: actualDelta,
+                    counterfactual: counterfactualVal,
+                    isCorrect: answerType !== 'wrong',
+                    isRushed: isRushedMiss,
+                    fxType,
+                    extraLabel,
+                    sessionTotalDelta: topAfter - (state.sessionData.startTopScore ?? topAfter)
+                };
+
+                triggerTop1FeedbackFX(fxType, actualDelta, extraLabel);
             } else {
-                if (isRushedMiss) {
-                    fxType = 'rushed';
-                    extraLabel = '<3.5s Slow down!';
-                } else if (wasLeech || nowLeech) {
-                    fxType = 'crit_miss';
-                    extraLabel = 'LEECH ACTIVE';
-                } else {
-                    fxType = 'miss';
-                }
+                state.sessionLastImpact = null;
             }
-
-            const counterfactualVal = answerType !== 'wrong' ? stakes.lossWrong : stakes.gainCorrect;
-            state.sessionLastImpact = {
-                delta: actualDelta,
-                counterfactual: counterfactualVal,
-                isCorrect: answerType !== 'wrong',
-                isRushed: isRushedMiss,
-                fxType,
-                extraLabel,
-                sessionTotalDelta: topAfter - (state.sessionData.startTopScore ?? topAfter)
-            };
-
-            triggerTop1FeedbackFX(fxType, actualDelta, extraLabel);
 
             if (sessionFinishedNow) {
                 return window.endSession(true);
@@ -3582,7 +4429,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
         // Step 1: Prepare & Cache Invisible Spoken TTS Script (Separate for 'orig' vs 'taglish'!)
         async function prepareTtsScriptForCard(termId, mode) {
-            const term = state.terms.find(t => t.id === termId);
+            const term = state.terms.find(t => t.id === termId) || (state.sessionData && state.sessionData.queue ? state.sessionData.queue.find(t => t.id === termId) : null);
             if (!term) return null;
 
             const cacheField = mode === 'taglish' ? 'ttsScriptTaglish' : 'ttsScriptOrig';
@@ -4144,8 +4991,16 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
         }
 
         window.setView = (view) => {
+            if (view === 'topnotcher' && !state.isOwnerUnlocked) {
+                view = 'dashboard';
+            }
             state.currentView = view;
             renderApp();
+            if (view === 'dashboard' || view === 'stats') {
+                if (typeof fetchLeaderboard === 'function') fetchLeaderboard(false);
+            } else if (view === 'library') {
+                if (typeof fetchSharedLibrary === 'function') fetchSharedLibrary(false);
+            }
         };
 
         window.setStudyFolder = (id) => { state.studyFolderId = id; state.selectedTerms = []; renderApp(); };
@@ -5002,39 +5857,50 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
         function renderNav() {
             if (state.currentView === 'session') return '';
             const parkedCount = state.terms.filter(t => t.parkingLot).length;
+            const myAvatar = (state.playerProfile && state.playerProfile.avatar) || '⚙️';
+            const myName = (state.playerProfile && state.playerProfile.displayName) || 'Engineer';
             return `
-                <nav class="bg-white border-b border-slate-200 px-4 md:px-6 py-4 flex flex-wrap items-center justify-between sticky top-0 z-10 gap-4">
-                    <div class="flex items-center gap-2 cursor-pointer" onclick="window.setView('dashboard')">
-                        <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+                <nav class="bg-white border-b border-slate-200 px-3 md:px-6 py-3 flex flex-wrap items-center justify-between sticky top-0 z-10 gap-3">
+                    <div class="flex items-center gap-2 cursor-pointer select-none" onclick="window.handleSecretLogoTap()">
+                        <div class="w-8 h-8 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm">
                             <i class="ph-fill ph-book-open text-white text-lg"></i>
                         </div>
-                        <span class="font-extrabold text-xl tracking-tight hidden sm:inline text-slate-900">Mechanical Elements</span>
+                        <span class="font-extrabold text-lg md:text-xl tracking-tight hidden sm:inline text-slate-900">Mechanical Elements</span>
                     </div>
-                    <div class="flex items-center gap-4">
-                        <div class="flex gap-2 bg-slate-100 p-1 rounded-xl">
-                            <button onclick="window.setView('dashboard')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'dashboard' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}">
-                                <i class="ph-fill ph-squares-four text-lg"></i> <span class="hidden md:inline">Dashboard</span>
+                    <div class="flex items-center gap-2 md:gap-3 flex-wrap">
+                        <div class="flex gap-1 bg-slate-100 p-1 rounded-xl">
+                            <button onclick="window.setView('dashboard')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'dashboard' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}" title="Home">
+                                <i class="ph-fill ph-house text-lg"></i> <span class="hidden lg:inline">Home</span>
                             </button>
-                            <button onclick="window.setView('add')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'add' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}">
-                                <i class="ph-fill ph-folder text-lg"></i> <span class="hidden md:inline">Database</span>
+                            <button onclick="window.setView('add')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'add' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}" title="Database">
+                                <i class="ph-fill ph-folder text-lg"></i> <span class="hidden lg:inline">Database</span>
                                 ${parkedCount > 0 ? `<span class="bg-amber-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">${parkedCount}</span>` : ''}
                             </button>
-                            <button onclick="window.setView('topnotcher')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'topnotcher' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}" title="Are You a Topnotcher? (MELE Feb 2027)">
-                                <i class="ph-fill ph-crown text-lg"></i> <span class="hidden md:inline">Topnotcher</span>
+                            <button onclick="window.setView('library')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'library' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}" title="Community Shared Library">
+                                <i class="ph-fill ph-books text-lg"></i> <span class="hidden lg:inline">Library</span>
                             </button>
-                            <button onclick="window.setView('stats')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'stats' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}">
-                                <i class="ph-fill ph-users text-lg"></i> <span class="hidden md:inline">Stats</span>
+                            ${state.isOwnerUnlocked ? `
+                            <button onclick="window.setView('topnotcher')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'topnotcher' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}" title="Are You a Topnotcher? (MELE Feb 2027)">
+                                <i class="ph-fill ph-crown text-lg"></i> <span class="hidden lg:inline">Topnotcher</span>
                             </button>
-                            <button onclick="window.setView('analytics')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'analytics' ? 'bg-white shadow-sm text-emerald-600' : 'text-slate-500 hover:text-slate-700'}">
-                                <i class="ph-fill ph-chart-line-up text-lg"></i> <span class="hidden md:inline">Analytics</span>
+                            ` : ''}
+                            <button onclick="window.setView('stats')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'stats' ? 'bg-white shadow-sm text-amber-600' : 'text-slate-500 hover:text-slate-700'}" title="Class Leaderboard & Ranks">
+                                <i class="ph-fill ph-trophy text-lg"></i> <span class="hidden lg:inline">Ranks</span>
                             </button>
-                            <button onclick="window.setView('forecast')" class="px-3 md:px-4 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2 ${state.currentView === 'forecast' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-500 hover:text-slate-700'}">
-                                <i class="ph-fill ph-crystal-ball text-lg"></i> <span class="hidden md:inline">Forecast</span>
+                            <button onclick="window.setView('analytics')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'analytics' ? 'bg-white shadow-sm text-emerald-600' : 'text-slate-500 hover:text-slate-700'}" title="Study Analytics">
+                                <i class="ph-fill ph-chart-line-up text-lg"></i> <span class="hidden lg:inline">Analytics</span>
+                            </button>
+                            <button onclick="window.setView('forecast')" class="px-2.5 md:px-3.5 py-2 rounded-lg font-bold text-xs md:text-sm transition-all flex items-center gap-1.5 ${state.currentView === 'forecast' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-500 hover:text-slate-700'}" title="Forecast">
+                                <i class="ph-fill ph-crystal-ball text-lg"></i> <span class="hidden lg:inline">Forecast</span>
                             </button>
                         </div>
-                        <button onclick="window.openApiKeyModal(event)" class="px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all border ${state.geminiApiKey ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'}" title="Set Gemini API Key (Synced to your account)">
+                        <button onclick="window.openProfileModal()" class="px-2.5 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-bold text-slate-700 flex items-center gap-1.5 transition-colors" title="Edit Profile & Avatar">
+                            <span class="text-base leading-none">${myAvatar}</span>
+                            <span class="hidden xl:inline max-w-[90px] truncate">${escapeHTML(myName)}</span>
+                        </button>
+                        <button onclick="window.openApiKeyModal(event)" class="px-2.5 py-2 rounded-xl font-bold text-xs flex items-center gap-1 transition-all border ${state.geminiApiKey ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'}" title="Set Gemini API Key (Synced to your account)">
                             <i class="ph-fill ph-key text-base"></i>
-                            <span class="hidden sm:inline">${state.geminiApiKey ? 'AI Key Ready' : 'Set AI Key'}</span>
+                            <span class="hidden sm:inline">${state.geminiApiKey ? 'AI Ready' : 'AI Key'}</span>
                         </button>
                         ${userId ? `<button onclick="window.logout()" class="p-2 text-slate-400 hover:text-red-500 transition-colors" title="Logout"><i class="ph-bold ph-sign-out text-xl"></i></button>` : ''}
                     </div>
@@ -5141,16 +6007,144 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 `;
             });
 
+            // Minimalist Duolingo-Style Game Home: Player Profile + Live Global Arena & Next Rival
+            const myStats = computeMyPlayerStats();
+            const sortedLb = getSortedLeaderboard('score');
+            const myLbEntry = sortedLb.find(e => e.isMe) || { ...myStats, rank: 1, isMe: true };
+            const totalPlayers = Math.max(1, sortedLb.length);
+            const activeTodayPlayers = sortedLb.filter(e => e.cardsToday > 0).length;
+            const classCardsToday = sortedLb.reduce((s, e) => s + (e.cardsToday || 0), 0);
+            const rivalAbove = myLbEntry.rank > 1 ? sortedLb[myLbEntry.rank - 2] : (sortedLb.length > 1 ? sortedLb[1] : null);
+            const homeBattle = rivalAbove ? computeRivalBattlePlan(myLbEntry, rivalAbove) : null;
+            const leaguePct = Math.min(100, Math.round(((myStats.masteryScore - myStats.league.min) / Math.max(1, myStats.league.next - myStats.league.min)) * 100));
+            const top3HomeHtml = sortedLb.slice(0, 3).map((p, idx) => {
+                const medals = ['🥇', '🥈', '🥉'];
+                return `
+                    <button type="button" onclick="window.selectCompareRival('${p.uid}'); window.setView('stats');" class="flex items-center justify-between gap-2 px-3 py-2 rounded-2xl border text-left transition-all ${p.isMe ? 'bg-blue-50/90 border-blue-300 shadow-sm' : 'bg-slate-50/80 border-slate-200 hover:bg-white hover:border-blue-300'}">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <span class="text-base leading-none">${medals[idx]}</span>
+                            <span class="text-base leading-none">${p.avatar || '⚙️'}</span>
+                            <div class="min-w-0">
+                                <div class="text-xs font-extrabold truncate ${p.isMe ? 'text-blue-800' : 'text-slate-800'}">${escapeHTML(p.displayName)}${p.isMe ? ' (You)' : ''}</div>
+                                <div class="text-[10px] font-bold text-slate-400">⚡ ${p.cardsToday} today • 🔥 ${p.streak}d</div>
+                            </div>
+                        </div>
+                        <div class="text-right shrink-0">
+                            <div class="text-xs font-black font-mono text-slate-900">${p.masteryScore.toLocaleString()}</div>
+                            <div class="text-[9px] font-bold uppercase text-slate-400">pts</div>
+                        </div>
+                    </button>
+                `;
+            }).join('');
+
+            // Owner-Only compact Topnotcher quick strip (100% hidden from classmates!)
+            let ownerTopnotcherMiniHtml = '';
+            if (state.isOwnerUnlocked) {
+                const tdMini = computeTopnotcherIndex();
+                const ordMini = getOrGenerateDailyOrders(tdMini);
+                ownerTopnotcherMiniHtml = `
+                    <div onclick="window.setView('topnotcher')" class="cursor-pointer bg-gradient-to-r from-amber-50 via-yellow-50/80 to-emerald-50 border-2 border-amber-300/90 hover:border-amber-400 rounded-3xl p-4 shadow-sm flex flex-wrap items-center justify-between gap-3 transition-all active:scale-[0.99]">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-2xl bg-amber-400 text-amber-950 flex items-center justify-center text-xl font-black shadow-sm shrink-0">${tdMini.tier.icon}</div>
+                            <div>
+                                <div class="text-xs font-black uppercase tracking-wider text-amber-800 flex items-center gap-1.5">
+                                    <span>MELE Feb 2027 Topnotcher Index</span>
+                                    <span class="px-2 py-0.5 rounded-full bg-amber-200/80 text-amber-950 font-mono text-[11px]">${formatTop1Score(tdMini.score, 2)}</span>
+                                </div>
+                                <div class="text-xs font-bold text-slate-600 mt-0.5">${tdMini.tier.label} • Daily Orders: <b class="text-emerald-700">${ordMini.clearedCount}/3 Cleared</b>${ordMini.totalBonusCards > 0 ? ` • <b class="text-amber-700">🔥 +${ordMini.totalBonusCards} Bonus</b>` : ''}</div>
+                            </div>
+                        </div>
+                        <span class="px-3 py-1.5 rounded-xl bg-amber-500 text-white text-xs font-black flex items-center gap-1 shadow-sm">Open Command <i class="ph-bold ph-arrow-right"></i></span>
+                    </div>
+                `;
+            }
+
             return `
-            <div class="max-w-4xl mx-auto p-6 space-y-8 fade-in zoom-in">
-                <div class="text-center space-y-4 mb-2">
-                    <h1 class="text-4xl font-extrabold tracking-tight text-slate-900">Mechanical<span class="text-blue-600">Elements</span> <span class="text-xs align-top bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full"><i class="ph-fill ph-cloud-check"></i> SYNCED</span></h1>
+            <div class="max-w-4xl mx-auto p-4 md:p-6 space-y-6 fade-in">
+                <!-- Minimalist Duolingo-Style Player Status Bar -->
+                <div class="bg-white rounded-3xl border-2 border-slate-200 p-4 md:p-5 shadow-sm space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <button type="button" onclick="window.openProfileModal()" class="w-14 h-14 rounded-2xl bg-blue-50 hover:bg-blue-100 border-2 border-blue-200 flex items-center justify-center text-3xl shadow-sm transition-transform active:scale-95 shrink-0" title="Edit Avatar & Display Name">
+                                ${myStats.avatar}
+                            </button>
+                            <div>
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <h1 class="text-xl md:text-2xl font-black text-slate-900 tracking-tight">${escapeHTML(myStats.displayName)}</h1>
+                                    <button type="button" onclick="window.openProfileModal()" class="text-slate-400 hover:text-blue-600 p-1 rounded-lg transition-colors" title="Edit Name & Avatar"><i class="ph-bold ph-pencil-simple text-sm"></i></button>
+                                    <span class="px-2.5 py-0.5 rounded-full text-[11px] font-black border ${myStats.league.badgeCls}">${myStats.league.icon} ${myStats.league.label}</span>
+                                </div>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <div class="w-28 sm:w-36 h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200/70">
+                                        <div class="h-full ${myStats.league.barCls} rounded-full transition-all duration-500" style="width: ${leaguePct}%"></div>
+                                    </div>
+                                    <span class="text-[11px] font-bold text-slate-400 font-mono">${myStats.masteryScore.toLocaleString()} / ${myStats.league.next.toLocaleString()} pts</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Classic Duolingo-Style Top Stat Pills -->
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <div class="px-3 py-2 rounded-2xl bg-orange-50 border border-orange-200 text-center min-w-[70px]">
+                                <div class="text-sm md:text-base font-black text-orange-600 font-mono leading-none">🔥 ${myStats.streak}d</div>
+                                <div class="text-[9px] font-black uppercase text-orange-500 mt-1">Streak</div>
+                            </div>
+                            <div class="px-3 py-2 rounded-2xl bg-emerald-50 border border-emerald-200 text-center min-w-[74px]">
+                                <div class="text-sm md:text-base font-black text-emerald-600 font-mono leading-none">⚡ ${myStats.cardsToday}</div>
+                                <div class="text-[9px] font-black uppercase text-emerald-600 mt-1">Today</div>
+                            </div>
+                            <button type="button" onclick="window.setView('stats')" class="px-3 py-2 rounded-2xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-center min-w-[76px] transition-colors">
+                                <div class="text-sm md:text-base font-black text-amber-600 font-mono leading-none">🏆 #${myLbEntry.rank}</div>
+                                <div class="text-[9px] font-black uppercase text-amber-600 mt-1">of ${totalPlayers}</div>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Global Class Arena & Next Rival Pulse -->
+                    <div class="pt-3.5 border-t border-slate-100 space-y-3">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <div class="flex items-center gap-2 text-xs font-extrabold text-slate-700">
+                                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse inline-block"></span>
+                                <span>Global Class Status:</span>
+                                <span class="text-slate-500 font-bold">${totalPlayers} Engineer${totalPlayers === 1 ? '' : 's'} • ${activeTodayPlayers} active today (${classCardsToday.toLocaleString()} cards)</span>
+                            </div>
+                            <div class="flex items-center gap-1.5">
+                                <button type="button" onclick="window.refreshLeaderboard()" class="px-2.5 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold flex items-center gap-1 transition-colors" title="Refresh Global Status">
+                                    <i class="ph-bold ph-arrows-clockwise ${state.leaderboardLoading ? 'animate-spin' : ''}"></i> Sync
+                                </button>
+                                <button type="button" onclick="window.setView('stats')" class="px-2.5 py-1 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-800 text-[11px] font-black transition-colors">Leaderboard →</button>
+                                <button type="button" onclick="window.setView('library')" class="px-2.5 py-1 rounded-xl bg-indigo-100 hover:bg-indigo-200 text-indigo-800 text-[11px] font-black transition-colors">📚 Library →</button>
+                            </div>
+                        </div>
+
+                        ${sortedLb.length > 0 ? `
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            ${top3HomeHtml}
+                        </div>` : ''}
+
+                        ${homeBattle ? `
+                        <div onclick="window.selectCompareRival('${rivalAbove.uid}'); window.setView('stats');" class="cursor-pointer px-3.5 py-2.5 rounded-2xl border flex flex-wrap items-center justify-between gap-2 transition-all ${homeBattle.isAhead ? 'bg-emerald-50/80 border-emerald-200 hover:border-emerald-300' : 'bg-blue-50/80 border-blue-200 hover:border-blue-300'}">
+                            <div class="flex items-center gap-2 text-xs font-bold ${homeBattle.isAhead ? 'text-emerald-900' : 'text-blue-900'}">
+                                <span class="text-base">${homeBattle.isAhead ? '👑' : '⚔️'}</span>
+                                <span>${escapeHTML(homeBattle.shortTip)}</span>
+                            </div>
+                            <span class="text-[11px] font-black ${homeBattle.isAhead ? 'text-emerald-700' : 'text-blue-700'} shrink-0">Compare vs ${escapeHTML(rivalAbove.displayName)} →</span>
+                        </div>
+                        ` : `
+                        <div class="px-3.5 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs font-bold text-slate-600 flex items-center justify-between gap-2">
+                            <span>🏆 You're #1 on the board! Share your app link with classmates so their scores & shared decks appear live here.</span>
+                            <button type="button" onclick="window.openShareDeckModal()" class="px-2.5 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-black shrink-0">📤 Share Deck</button>
+                        </div>
+                        `}
+                    </div>
                 </div>
 
-                <div class="bg-white p-4 md:p-6 rounded-3xl border border-slate-200 shadow-sm relative overflow-hidden">
-                    <div class="absolute top-0 left-0 w-full h-1 bg-blue-500"></div>
+                ${ownerTopnotcherMiniHtml}
+
+                <!-- Deck / Folder Selector -->
+                <div class="bg-white p-4 md:p-6 rounded-3xl border-2 border-slate-200 shadow-sm relative overflow-hidden">
                     <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
-                        <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><i class="ph-bold ph-folder-open text-base"></i> Select Deck / Folder</h2>
+                        <h2 class="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-2"><i class="ph-bold ph-folder-open text-base text-blue-500"></i> Select Deck / Folder</h2>
                         <div class="flex items-center flex-wrap gap-2">
                             ${allParkedTerms.length > 0 ? `
                             <button onclick="window.setParkingLotFilter(true); window.setView('add')" class="px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 text-xs font-bold flex items-center gap-1.5 transition-colors">
@@ -5172,40 +6166,42 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     ${childrenHtml}
                 </div>
 
-                <div class="flex justify-center mb-8">
-                    <div class="bg-slate-800 text-white p-1 rounded-2xl shadow-lg flex items-center text-sm font-bold border border-slate-700 flex-wrap justify-center">
-                        <div class="flex items-center gap-2 px-3 md:px-4 py-2">
-                            <i class="ph-fill ph-sparkle text-blue-400 text-lg"></i> 
-                            <span class="text-slate-300">New Done:</span> 
-                            <span class="text-blue-400 text-lg">${newFinishedToday.length}</span>
+                <!-- Today's Study Summary Strip (Clean Light Pill) -->
+                <div class="flex justify-center">
+                    <div class="bg-white text-slate-700 px-3 py-2 rounded-2xl shadow-sm flex items-center text-xs md:text-sm font-bold border-2 border-slate-200 flex-wrap justify-center gap-3 md:gap-5">
+                        <div class="flex items-center gap-1.5">
+                            <i class="ph-fill ph-sparkle text-blue-500 text-base"></i> 
+                            <span class="text-slate-500">New Done:</span> 
+                            <span class="text-blue-600 font-black font-mono text-base">${newFinishedToday.length}</span>
                         </div>
-                        <div class="hidden sm:block w-px h-6 bg-slate-600"></div>
-                        <div class="flex items-center gap-2 px-3 md:px-4 py-2">
-                            <i class="ph-fill ph-arrows-clockwise text-amber-400 text-lg"></i> 
-                            <span class="text-slate-300">Review Done:</span> 
-                            <span class="text-amber-400 text-lg">${reviewFinishedToday}</span>
+                        <div class="hidden sm:block w-px h-5 bg-slate-200"></div>
+                        <div class="flex items-center gap-1.5">
+                            <i class="ph-fill ph-arrows-clockwise text-amber-500 text-base"></i> 
+                            <span class="text-slate-500">Review Done:</span> 
+                            <span class="text-amber-600 font-black font-mono text-base">${reviewFinishedToday}</span>
                         </div>
-                        <div class="hidden sm:block w-px h-6 bg-slate-600"></div>
-                        <div class="flex items-center gap-2 px-3 md:px-4 py-2 bg-slate-700/50 rounded-xl m-1">
-                            <i class="ph-fill ph-check-circle text-green-400 text-lg"></i> 
-                            <span class="text-white">Total:</span> 
-                            <span class="text-green-400 text-lg tabular-nums">${totalFinishedToday} <span class="text-xs text-slate-400 font-bold">/ ${getTodayAdaptiveTarget()}</span></span>
+                        <div class="hidden sm:block w-px h-5 bg-slate-200"></div>
+                        <div class="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-xl">
+                            <i class="ph-fill ph-check-circle text-emerald-500 text-base"></i> 
+                            <span class="text-emerald-800">Today Total:</span> 
+                            <span class="text-emerald-700 font-black font-mono text-base tabular-nums">${totalFinishedToday}${state.isOwnerUnlocked ? ` <span class="text-xs text-emerald-500 font-bold">/ ${getTodayAdaptiveTarget()}</span>` : ''}</span>
                         </div>
                     </div>
                 </div>
 
+                <!-- Duolingo-Style Tactile Play Cards -->
                 <div class="grid md:grid-cols-3 gap-4">
                     <!-- Intake -->
-                    <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
+                    <div class="bg-white p-6 rounded-3xl border-2 border-slate-200 shadow-sm flex flex-col justify-between hover:border-blue-300 transition-all">
                         <div>
                             <div class="flex items-center gap-2 mb-2">
-                                <div class="p-2 bg-blue-100 rounded-lg"><i class="ph-fill ph-target text-blue-600 text-xl"></i></div>
-                                <h3 class="font-bold text-slate-800">Micro-Loop Intake</h3>
+                                <div class="p-2 bg-blue-100 rounded-xl"><i class="ph-fill ph-target text-blue-600 text-xl"></i></div>
+                                <h3 class="font-extrabold text-slate-800">Micro-Loop Intake</h3>
                             </div>
                             <p class="text-xs text-slate-500 mb-4 h-8">Learn new terms by repeating until perfect.</p>
                             <div class="flex justify-between items-end mb-6">
                                 <div>
-                                    <span class="text-4xl font-black text-slate-800">${newTerms.length}</span>
+                                    <span class="text-4xl font-black text-slate-800 font-mono">${newTerms.length}</span>
                                     <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">New Cards Left</span>
                                 </div>
                                 <select onchange="window.setIntakeSize(this.value)" class="bg-slate-50 border border-slate-200 text-xs font-bold text-slate-700 rounded-lg p-2 outline-none cursor-pointer hover:bg-slate-100">
@@ -5213,41 +6209,40 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 </select>
                             </div>
                         </div>
-                        <button onclick="window.startSession('intake')" ${newTerms.length === 0 ? 'disabled' : ''} class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Start Intake</button>
+                        <button onclick="window.startSession('intake')" ${newTerms.length === 0 ? 'disabled' : ''} class="duo-btn w-full bg-blue-500 hover:bg-blue-600 border-blue-700 disabled:bg-slate-200 disabled:border-slate-300 disabled:text-slate-400 text-white font-black py-3 rounded-2xl flex items-center justify-center gap-2"><i class="ph-fill ph-play"></i> Start Intake</button>
                     </div>
 
                     <!-- Review -->
-                    <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow relative overflow-hidden">
-                        ${dueTerms.length > 0 ? '<div class="absolute top-0 left-0 w-full h-1 bg-red-500"></div>' : ''}
+                    <div class="bg-white p-6 rounded-3xl border-2 ${dueTerms.length > 0 ? 'border-emerald-300' : 'border-slate-200'} shadow-sm flex flex-col justify-between hover:border-emerald-400 transition-all relative overflow-hidden">
                         <div>
                             <div class="flex items-center gap-2 mb-2">
-                                <div class="p-2 bg-red-100 rounded-lg"><i class="ph-fill ph-clock text-red-600 text-xl"></i></div>
-                                <h3 class="font-bold text-slate-800">Fast-Track Review</h3>
+                                <div class="p-2 bg-emerald-100 rounded-xl"><i class="ph-fill ph-lightning text-emerald-600 text-xl"></i></div>
+                                <h3 class="font-extrabold text-slate-800">Fast-Track Review</h3>
                             </div>
                             <p class="text-xs text-slate-500 mb-4 h-8">Spaced repetition. Terms scheduled for today.</p>
                             <div class="mb-4">
-                                <span class="text-4xl font-black ${dueTerms.length > 0 ? 'text-red-500' : 'text-slate-800'}">${dueTerms.length}</span>
+                                <span class="text-4xl font-black font-mono ${dueTerms.length > 0 ? 'text-emerald-600' : 'text-slate-800'}">${dueTerms.length}</span>
                                 <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Due Today</span>
                             </div>
                             <div class="mb-3 flex bg-slate-100 p-1 rounded-xl text-[11px] font-bold">
-                                <button type="button" onclick="window.setQueueMode('smart')" class="flex-1 py-1.5 px-2 rounded-lg transition-all ${state.queueMode === 'smart' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}" title="3 warm-up cards, then 1 leech every 3-4 normal cards (max 5/25)">🎯 Smart Queue</button>
+                                <button type="button" onclick="window.setQueueMode('smart')" class="flex-1 py-1.5 px-2 rounded-lg transition-all ${state.queueMode === 'smart' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}" title="3 warm-up cards, then spaced hard cards">🎯 Smart Queue</button>
                                 <button type="button" onclick="window.setQueueMode('random')" class="flex-1 py-1.5 px-2 rounded-lg transition-all ${state.queueMode === 'random' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}" title="Classic shuffled order">🔀 Random</button>
                             </div>
                         </div>
-                        <button onclick="window.startSession('review')" ${dueTerms.length === 0 ? 'disabled' : ''} class="w-full bg-red-500 hover:bg-red-600 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Start Review</button>
+                        <button onclick="window.startSession('review')" ${dueTerms.length === 0 ? 'disabled' : ''} class="duo-btn w-full bg-emerald-500 hover:bg-emerald-600 border-emerald-700 disabled:bg-slate-200 disabled:border-slate-300 disabled:text-slate-400 text-white font-black py-3 rounded-2xl flex items-center justify-center gap-2"><i class="ph-fill ph-play"></i> Start Review</button>
                     </div>
 
                     <!-- Ahead -->
-                    <div class="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
+                    <div class="bg-white p-6 rounded-3xl border-2 border-slate-200 shadow-sm flex flex-col justify-between hover:border-amber-300 transition-all">
                         <div>
                             <div class="flex items-center gap-2 mb-2">
-                                <div class="p-2 bg-amber-100 rounded-lg"><i class="ph-fill ph-arrow-right text-amber-600 text-xl"></i></div>
-                                <h3 class="font-bold text-slate-800">Review Ahead</h3>
+                                <div class="p-2 bg-amber-100 rounded-xl"><i class="ph-fill ph-arrow-right text-amber-600 text-xl"></i></div>
+                                <h3 class="font-extrabold text-slate-800">Review Ahead</h3>
                             </div>
                             <p class="text-xs text-slate-500 mb-4 h-8">Advance your studying for the upcoming days.</p>
                             <div class="flex justify-between items-end mb-6">
                                 <div>
-                                    <span class="text-4xl font-black text-slate-800">${futureTerms.length}</span>
+                                    <span class="text-4xl font-black text-slate-800 font-mono">${futureTerms.length}</span>
                                     <span class="text-[10px] text-slate-400 block font-bold uppercase tracking-wider">Future Cards</span>
                                 </div>
                                 <select onchange="window.setLookAheadDays(this.value)" class="bg-slate-50 border border-slate-200 text-xs font-bold text-slate-700 rounded-lg p-2 outline-none cursor-pointer hover:bg-slate-100">
@@ -5255,7 +6250,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 </select>
                             </div>
                         </div>
-                        <button onclick="window.startSession('review_ahead')" ${futureTerms.length === 0 ? 'disabled' : ''} class="w-full bg-slate-800 hover:bg-slate-900 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-95"><i class="ph-fill ph-play"></i> Jump Ahead</button>
+                        <button onclick="window.startSession('review_ahead')" ${futureTerms.length === 0 ? 'disabled' : ''} class="duo-btn w-full bg-amber-500 hover:bg-amber-600 border-amber-700 disabled:bg-slate-200 disabled:border-slate-300 disabled:text-slate-400 text-white font-black py-3 rounded-2xl flex items-center justify-center gap-2"><i class="ph-fill ph-play"></i> Jump Ahead</button>
                     </div>
                 </div>
 
@@ -5374,6 +6369,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             <button onclick="window.startAddingSubfolder(event, '${f.id}')" class="px-2 py-1 text-[11px] font-bold text-blue-700 hover:bg-blue-100 rounded-md flex items-center gap-1 transition-colors" title="New Subfolder"><i class="ph-bold ph-folder-plus"></i> Subfolder</button>
                             <button onclick="window.startRenamingFolder(event, '${f.id}', '${escapeHTML(f.name).replace(/'/g, "\\'")}')" class="px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-200/70 rounded-md flex items-center gap-1 transition-colors" title="Rename Folder"><i class="ph-fill ph-pencil-simple"></i> Rename</button>
                             <button onclick="window.startMovingFolder(event, '${f.id}')" class="px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-200/70 rounded-md flex items-center gap-1 transition-colors" title="Move Folder"><i class="ph-bold ph-arrows-out-line-horizontal"></i> Move</button>
+                            <button onclick="window.openShareDeckModal('${f.id}')" class="px-2 py-1 text-[11px] font-bold text-indigo-700 hover:bg-indigo-100 rounded-md flex items-center gap-1 transition-colors" title="Share this folder to Community Library (Owner-Only Edit)"><i class="ph-bold ph-share-network"></i> Share</button>
                             ${state.folders.length > 1 ? `<button onclick="window.deleteFolder(event, '${f.id}')" class="px-2 py-1 text-[11px] font-bold text-red-600 hover:bg-red-100 rounded-md flex items-center gap-1 transition-colors ml-auto" title="Delete Folder"><i class="ph-fill ph-trash"></i></button>` : ''}
                         </div>
                         ` : ''}
@@ -5821,15 +6817,185 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 historyHtml = `<div class="p-6 text-center text-slate-400 font-bold text-sm">Walang recorded log for this folder.</div>`;
             }
 
+            const sortedLb = getSortedLeaderboard(state.leaderboardSort);
+            const myEntry = sortedLb.find(e => e.isMe) || { ...computeMyPlayerStats(), rank: 1, isMe: true };
+            // Default rival to compare: selected classmate, OR classmate 1 spot right above you, OR #2 if you're #1
+            let selectedRival = state.compareRivalUid
+                ? sortedLb.find(e => e.uid === state.compareRivalUid && !e.isMe)
+                : null;
+            if (!selectedRival) {
+                if (myEntry.rank > 1) selectedRival = sortedLb[myEntry.rank - 2];
+                else if (sortedLb.length > 1) selectedRival = sortedLb.find(e => !e.isMe) || null;
+            }
+            const battlePlan = selectedRival ? computeRivalBattlePlan(myEntry, selectedRival) : null;
+
+            const podiumOrder = [sortedLb[1], sortedLb[0], sortedLb[2]].filter(Boolean);
+            const podiumHtml = sortedLb.length >= 2 ? `
+                <div class="grid grid-cols-3 gap-2.5 md:gap-4 items-end mb-6">
+                    ${podiumOrder.map(p => {
+                        const isFirst = p.rank === 1;
+                        const medal = p.rank === 1 ? '🥇' : p.rank === 2 ? '🥈' : '🥉';
+                        const cardBg = isFirst
+                            ? 'bg-gradient-to-b from-amber-50 to-white border-amber-300 shadow-md pt-5 pb-4'
+                            : 'bg-white border-slate-200 shadow-sm pt-4 pb-3';
+                        return `
+                        <button type="button" onclick="${p.isMe ? 'window.openProfileModal()' : `window.selectCompareRival('${p.uid}')`}" class="rounded-3xl border-2 p-3 text-center transition-all hover:scale-[1.02] ${cardBg} ${p.isMe ? 'ring-2 ring-blue-400/60' : ''}">
+                            <div class="text-2xl md:text-3xl leading-none mb-1">${medal}</div>
+                            <div class="w-11 h-11 md:w-12 md:h-12 mx-auto rounded-2xl ${p.isMe ? 'bg-blue-100 border-blue-300' : 'bg-slate-100 border-slate-200'} border-2 flex items-center justify-center text-2xl mb-1.5">${p.avatar || '⚙️'}</div>
+                            <div class="text-xs md:text-sm font-black text-slate-900 truncate">${escapeHTML(p.displayName)}${p.isMe ? ' (You)' : ''}</div>
+                            <div class="text-sm md:text-base font-black font-mono text-blue-600 mt-0.5">${p.masteryScore.toLocaleString()} <span class="text-[10px] text-slate-400 font-bold">pts</span></div>
+                            <div class="text-[10px] font-bold text-slate-400 mt-0.5">⚡ ${p.cardsToday} today • 🔥 ${p.streak}d</div>
+                        </button>`;
+                    }).join('')}
+                </div>
+            ` : '';
+
+            const lbRowsHtml = sortedLb.map(p => {
+                const rankBadge = p.rank === 1 ? '🥇' : p.rank === 2 ? '🥈' : p.rank === 3 ? '🥉' : `#${p.rank}`;
+                const isSelectedRival = selectedRival && selectedRival.uid === p.uid;
+                return `
+                    <div class="grid grid-cols-12 gap-2 md:gap-4 px-3 md:px-5 py-3.5 items-center transition-colors ${p.isMe ? 'bg-blue-50/70' : isSelectedRival ? 'bg-amber-50/60' : 'hover:bg-slate-50'}">
+                        <div class="col-span-2 sm:col-span-1 text-center font-black ${p.rank <= 3 ? 'text-xl' : 'text-sm text-slate-500 font-mono'}">${rankBadge}</div>
+                        <div class="col-span-5 sm:col-span-4 flex items-center gap-2.5 min-w-0">
+                            <div class="w-9 h-9 rounded-xl ${p.isMe ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'} flex items-center justify-center text-lg shrink-0 shadow-xs">${p.avatar || '⚙️'}</div>
+                            <div class="min-w-0">
+                                <div class="font-extrabold text-xs md:text-sm truncate ${p.isMe ? 'text-blue-800' : 'text-slate-800'}">
+                                    ${escapeHTML(p.displayName)} ${p.isMe ? '<span class="text-[9px] ml-1 bg-blue-600 text-white px-1.5 py-0.5 rounded-full font-black">YOU</span>' : ''}
+                                </div>
+                                <div class="text-[10px] font-bold text-slate-400 flex items-center gap-1.5 flex-wrap">
+                                    <span>${p.league.icon} ${p.league.label}</span>
+                                    <span>• 🔥 ${p.streak}d</span>
+                                    <span class="hidden sm:inline">• 🎯 ${p.accuracy}%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-span-3 sm:col-span-2 text-center">
+                            <div class="font-black font-mono text-slate-900 text-sm md:text-base">${p.masteryScore.toLocaleString()}</div>
+                            <div class="text-[9px] text-slate-400 font-bold uppercase">Pts</div>
+                        </div>
+                        <div class="hidden sm:block sm:col-span-2 text-center">
+                            <span class="px-2.5 py-1 rounded-full text-xs font-black font-mono ${p.cardsToday > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}">⚡ ${p.cardsToday}</span>
+                        </div>
+                        <div class="col-span-2 sm:col-span-3 flex justify-end">
+                            ${p.isMe ? `
+                                <button type="button" onclick="window.openProfileModal()" class="px-2.5 py-1.5 rounded-xl bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 text-[11px] font-extrabold transition-colors">Edit</button>
+                            ` : `
+                                <button type="button" onclick="window.selectCompareRival('${p.uid}')" class="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors flex items-center gap-1 ${isSelectedRival ? 'bg-amber-500 text-white shadow-sm' : 'bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700'}">
+                                    <span>⚔️</span><span class="hidden md:inline">${isSelectedRival ? 'Comparing' : 'Compare'}</span>
+                                </button>
+                            `}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            const compareBarRow = (label, myVal, rivalVal, unit = '') => {
+                const maxV = Math.max(1, myVal, rivalVal);
+                const myPct = Math.round((myVal / maxV) * 100);
+                const rvPct = Math.round((rivalVal / maxV) * 100);
+                return `
+                    <div class="space-y-1">
+                        <div class="flex items-center justify-between text-[11px] font-bold">
+                            <span class="font-mono font-black ${myVal >= rivalVal ? 'text-emerald-600' : 'text-blue-600'}">${myVal.toLocaleString()}${unit}</span>
+                            <span class="text-slate-500 uppercase tracking-wider text-[10px] font-black">${label}</span>
+                            <span class="font-mono font-black ${rivalVal > myVal ? 'text-rose-600' : 'text-slate-600'}">${rivalVal.toLocaleString()}${unit}</span>
+                        </div>
+                        <div class="grid grid-cols-2 gap-1.5">
+                            <div class="h-2 bg-slate-100 rounded-full overflow-hidden flex justify-end"><div class="h-full bg-blue-500 rounded-full" style="width:${myPct}%"></div></div>
+                            <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-amber-500 rounded-full" style="width:${rvPct}%"></div></div>
+                        </div>
+                    </div>
+                `;
+            };
+
             return `
-            <div class="max-w-4xl mx-auto p-6 fade-in zoom-in">
-                <div class="text-center mb-10 space-y-2">
-                    <div class="inline-block p-3 bg-amber-100 text-amber-600 rounded-full mb-2"><i class="ph-fill ph-trophy text-4xl"></i></div>
-                    <h1 class="text-3xl font-extrabold text-slate-800">Your Local Stats</h1>
-                    <p class="text-slate-500">Offline Mode: Rankings are based on your total Mastery Points.</p>
+            <div class="max-w-4xl mx-auto p-4 md:p-6 fade-in">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+                    <div class="flex items-center gap-3">
+                        <div class="w-12 h-12 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
+                            <i class="ph-fill ph-trophy text-3xl"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-2xl md:text-3xl font-black text-slate-900 tracking-tight">Class Leaderboard</h1>
+                            <p class="text-xs md:text-sm text-slate-500">Live global standings — tap any classmate to compare & see how to beat them!</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="window.openProfileModal()" class="px-3 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-xs font-bold text-slate-700 flex items-center gap-1.5 shadow-xs">
+                            <span>${myEntry.avatar}</span> Edit Profile
+                        </button>
+                        <button type="button" onclick="window.refreshLeaderboard()" class="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-black flex items-center gap-1.5 shadow-sm">
+                            <i class="ph-bold ph-arrows-clockwise ${state.leaderboardLoading ? 'animate-spin' : ''}"></i> Refresh
+                        </button>
+                    </div>
                 </div>
 
-                <!-- MELE Feb 2027 Topnotcher & Daily Telemetry Suite -->
+                ${podiumHtml}
+
+                <!-- Head-to-Head Battle & How to Beat Them Card -->
+                ${selectedRival && battlePlan ? `
+                <div class="bg-white rounded-3xl border-2 ${battlePlan.isAhead ? 'border-emerald-200' : 'border-amber-300'} p-5 mb-6 shadow-sm space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xl">${battlePlan.isAhead ? '👑' : '⚔️'}</span>
+                            <div>
+                                <h2 class="text-sm md:text-base font-black text-slate-900">Head-to-Head: You vs ${escapeHTML(selectedRival.displayName)} (#${selectedRival.rank})</h2>
+                                <p class="text-xs font-bold ${battlePlan.isAhead ? 'text-emerald-700' : 'text-amber-700'}">${escapeHTML(battlePlan.headline)}</p>
+                            </div>
+                        </div>
+                        <span class="px-2.5 py-1 rounded-full text-[11px] font-black ${battlePlan.isAhead ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
+                            #${myEntry.rank} vs #${selectedRival.rank}
+                        </span>
+                    </div>
+
+                    <div class="space-y-2.5 pt-1">
+                        ${compareBarRow('Mastery Pts', myEntry.masteryScore, selectedRival.masteryScore)}
+                        ${compareBarRow('Cards Today', myEntry.cardsToday, selectedRival.cardsToday)}
+                        ${compareBarRow('Accuracy', myEntry.accuracy, selectedRival.accuracy, '%')}
+                        ${compareBarRow('Mastered (L5-6)', myEntry.masteredCount, selectedRival.masteredCount)}
+                        ${compareBarRow('Streak', myEntry.streak, selectedRival.streak, 'd')}
+                    </div>
+
+                    <div class="p-3.5 rounded-2xl ${battlePlan.isAhead ? 'bg-emerald-50 border border-emerald-200' : 'bg-blue-50 border border-blue-200'} space-y-1">
+                        <div class="text-[11px] font-black uppercase tracking-wider ${battlePlan.isAhead ? 'text-emerald-800' : 'text-blue-800'}">
+                            ${battlePlan.isAhead ? '🛡️ Paano i-defend ang lamang mo:' : `🎯 Paano mo tatalunin si ${escapeHTML(selectedRival.displayName)}:`}
+                        </div>
+                        <ul class="text-xs font-semibold ${battlePlan.isAhead ? 'text-emerald-900' : 'text-blue-900'} space-y-1 list-disc list-inside">
+                            ${battlePlan.tactics.map(t => `<li>${escapeHTML(t)}</li>`).join('')}
+                        </ul>
+                    </div>
+                </div>
+                ` : ''}
+
+                <!-- Sort Pills + Full Class Table -->
+                <div class="bg-white rounded-3xl shadow-sm border-2 border-slate-200 overflow-hidden mb-8">
+                    <div class="p-3.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                        <span class="text-xs font-black uppercase tracking-wider text-slate-500">All Engineers (${sortedLb.length})</span>
+                        <div class="flex items-center gap-1 bg-white p-1 rounded-xl border border-slate-200 text-[11px] font-bold">
+                            ${[
+                                { k: 'score', l: '⭐ Pts' },
+                                { k: 'today', l: '⚡ Today' },
+                                { k: 'accuracy', l: '🎯 Acc' },
+                                { k: 'streak', l: '🔥 Streak' }
+                            ].map(s => `
+                                <button type="button" onclick="window.setLeaderboardSort('${s.k}')" class="px-2.5 py-1 rounded-lg transition-all ${state.leaderboardSort === s.k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-800'}">${s.l}</button>
+                            `).join('')}
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-12 gap-2 md:gap-4 px-3 md:px-5 py-2.5 bg-slate-50/70 border-b border-slate-100 text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                        <div class="col-span-2 sm:col-span-1 text-center">Rank</div>
+                        <div class="col-span-5 sm:col-span-4">Engineer</div>
+                        <div class="col-span-3 sm:col-span-2 text-center">Mastery Pts</div>
+                        <div class="hidden sm:block sm:col-span-2 text-center">Today</div>
+                        <div class="col-span-2 sm:col-span-3 text-right">Action</div>
+                    </div>
+                    <div class="divide-y divide-slate-100">
+                        ${lbRowsHtml}
+                    </div>
+                </div>
+
+                ${state.isOwnerUnlocked ? `
+                <!-- Owner-Only MELE Feb 2027 Topnotcher & Daily Telemetry Suite (Hidden from Classmates!) -->
                 <div class="space-y-6 mb-8">
                     ${renderLockedInFeb2027Widget()}
                     ${renderMicroWinsAndBreakBankWidgets()}
@@ -5837,47 +7003,19 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     ${renderAdaptiveWeeklyTargetWidget()}
                     ${renderDailyOrdersCardHtml()}
                 </div>
+                ` : ''}
 
                 <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 mb-8 flex gap-4 items-start shadow-sm">
                     <div class="bg-blue-100 text-blue-600 p-2 rounded-xl shrink-0">
                         <i class="ph-fill ph-info text-2xl"></i>
                     </div>
                     <div>
-                        <h3 class="font-bold text-blue-900 mb-1">Paano tumaas ang Points? (How to earn points)</h3>
+                        <h3 class="font-bold text-blue-900 mb-1">Paano tumaas ang Points sa Leaderboard?</h3>
                         <ul class="text-sm text-blue-800 space-y-1 list-disc list-inside">
-                            <li>Ang pag-import ng madaming cards ay <b>HINDI</b> nagbibigay ng points.</li>
-                            <li>Nakakakuha ka ng points tuwing nagle-<b>LEVEL UP</b> ang card mo sa Intake at Review.</li>
-                            <li>(Level 1 = 1 Point, Level 2 = 2 Points ... Level 5 = 5 Points).</li>
-                            <li>Dahil naka-offline ka ngayon, track mo ang sariling High Score mo!</li>
+                            <li>Ang pag-import o pag-save ng madaming cards ay <b>HINDI</b> nagbibigay ng points (fair play!).</li>
+                            <li>Nakakakuha ka ng points tuwing nagle-<b>LEVEL UP</b> ang card mo sa Intake at Review (Lvl 1 = 1 Pt ... Lvl 6 = 6 Pts).</li>
+                            <li>Auto-synced ang rank mo sa lahat ng kaklase mo kada session!</li>
                         </ul>
-                    </div>
-                </div>
-
-                <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-                    <div class="grid grid-cols-12 gap-4 p-4 bg-slate-50 border-b border-slate-100 text-xs font-bold text-slate-400 uppercase tracking-wider">
-                        <div class="col-span-1 text-center">Rank</div>
-                        <div class="col-span-5">Engineer</div>
-                        <div class="col-span-3 text-center">Mastery Score</div>
-                        <div class="col-span-3 text-center">Activity Today</div>
-                    </div>
-                    <div class="divide-y divide-slate-50">
-                        <div class="grid grid-cols-12 gap-4 p-4 items-center hover:bg-slate-50 transition-colors bg-blue-50/50">
-                            <div class="col-span-1 flex justify-center">
-                                <i class="ph-fill ph-medal text-2xl text-amber-400"></i>
-                            </div>
-                            <div class="col-span-5 flex items-center gap-3">
-                                <div class="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center font-bold text-white text-xs">ME</div>
-                                <span class="font-bold text-blue-700">You (Offline) <span class="text-[10px] ml-2 bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">LOCAL</span></span>
-                            </div>
-                            <div class="col-span-3 text-center font-black text-slate-800 text-lg">
-                                ${localScore.toLocaleString()} <span class="text-[10px] text-slate-400 font-bold uppercase block">Pts</span>
-                            </div>
-                            <div class="col-span-3 flex justify-center">
-                                <span class="px-3 py-1 bg-green-100 text-green-700 font-bold text-sm rounded-full flex items-center gap-1">
-                                    <i class="ph-fill ph-check-circle"></i> ${localCompletedToday}
-                                </span>
-                            </div>
-                        </div>
                     </div>
                 </div>
 
@@ -5924,6 +7062,144 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                     <p class="text-center text-xs text-slate-400 font-medium mt-6 bg-slate-50 py-2 rounded-lg">Based on ${totalMultipleChoice} valid multiple choice cards (A, B, C, D)</p>
                 </div>
+            </div>
+            `;
+        }
+
+        // --- STREAMING_CHUNK:General Shared Library UI (Strict Author-Only Editing + Try/Save) ---
+        function renderLibrary() {
+            const allDecks = state.sharedDecks || [];
+            const q = String(state.librarySearch || '').trim().toLowerCase();
+            const filtered = allDecks.filter(d => {
+                if (state.libraryFilter === 'mine' && d.authorUid !== userId) return false;
+                if (!['all', 'mine'].includes(state.libraryFilter) && d.subjectTag !== state.libraryFilter) return false;
+                if (q) {
+                    const hay = `${d.title} ${d.description} ${d.authorName} ${d.subjectTag}`.toLowerCase();
+                    if (!hay.includes(q)) return false;
+                }
+                return true;
+            });
+
+            const tagColors = {
+                PIPE: 'bg-blue-100 text-blue-800 border-blue-200',
+                MDSP: 'bg-amber-100 text-amber-800 border-amber-200',
+                MESL: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+                General: 'bg-slate-100 text-slate-700 border-slate-200'
+            };
+
+            const cardsHtml = filtered.length > 0 ? filtered.map(d => {
+                const isAuthor = Boolean(userId && d.authorUid === userId);
+                const alreadyCloned = state.folders.some(f => f.clonedFromDeckId === d.id);
+                const updatedDate = d.updatedAt ? new Date(d.updatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+                const tagCls = tagColors[d.subjectTag] || tagColors.General;
+                return `
+                <div class="bg-white p-5 rounded-3xl border-2 ${isAuthor ? 'border-indigo-200' : 'border-slate-200'} shadow-sm hover:border-blue-300 transition-all flex flex-col justify-between gap-4">
+                    <div class="space-y-2.5">
+                        <div class="flex items-start justify-between gap-2">
+                            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${tagCls}">${escapeHTML(d.subjectTag || 'General')}</span>
+                            <div class="flex items-center gap-1.5">
+                                ${isAuthor
+                                    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200">✏️ Your Deck</span>`
+                                    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-500">🔒 Read-Only</span>`}
+                            </div>
+                        </div>
+                        <div>
+                            <h3 class="text-base md:text-lg font-extrabold text-slate-900 leading-snug">${escapeHTML(d.title)}</h3>
+                            ${d.description ? `<p class="text-xs text-slate-500 mt-1 line-clamp-2">${escapeHTML(d.description)}</p>` : ''}
+                        </div>
+                        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-bold text-slate-500 pt-1">
+                            <span class="flex items-center gap-1 text-slate-700"><span>${d.authorAvatar || '⚙️'}</span> ${escapeHTML(d.authorName)}</span>
+                            <span>• 🃏 <b class="text-slate-800">${d.cardCount}</b> cards</span>
+                            <span>• ▶ ${d.tryCount || 0} tries</span>
+                            <span>• 📥 ${d.cloneCount || 0} saved</span>
+                            ${updatedDate ? `<span>• ${updatedDate}</span>` : ''}
+                        </div>
+                    </div>
+
+                    <div class="space-y-2 pt-2 border-t border-slate-100">
+                        <div class="flex items-center gap-2">
+                            <button type="button" onclick="window.startTrySharedDeck('${d.id}')" class="duo-btn flex-1 py-2.5 px-3 bg-emerald-500 hover:bg-emerald-600 border-emerald-700 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5">
+                                <i class="ph-fill ph-play"></i> Try Flashcards
+                            </button>
+                            <button type="button" onclick="window.cloneSharedDeckToVault('${d.id}')" class="duo-btn flex-1 py-2.5 px-3 ${alreadyCloned ? 'bg-blue-50 hover:bg-blue-100 border-blue-300 text-blue-700' : 'bg-blue-500 hover:bg-blue-600 border-blue-700 text-white'} rounded-xl font-black text-xs flex items-center justify-center gap-1.5" title="${alreadyCloned ? 'Pull any newly added cards into your personal copy without resetting progress' : 'Save a personal copy to your vault to earn Mastery Points & track SRS'}">
+                                <i class="ph-bold ${alreadyCloned ? 'ph-arrows-clockwise' : 'ph-download-simple'}"></i> ${alreadyCloned ? 'Pull Latest' : 'Save Copy'}
+                            </button>
+                        </div>
+                        ${isAuthor ? `
+                        <div class="flex items-center gap-2 pt-0.5">
+                            <button type="button" onclick="window.openEditSharedDeckModal('${d.id}')" class="flex-1 py-1.5 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl font-bold text-xs flex items-center justify-center gap-1 transition-colors">
+                                <i class="ph-bold ph-pencil-simple"></i> Edit / Sync Deck (Owner Only)
+                            </button>
+                            <button type="button" onclick="window.deleteSharedDeck('${d.id}')" class="py-1.5 px-3 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-xl font-bold text-xs transition-colors" title="Remove from Shared Library">
+                                <i class="ph-bold ph-trash"></i>
+                            </button>
+                        </div>
+                        ` : ''}
+                    </div>
+                </div>
+                `;
+            }).join('') : `
+                <div class="col-span-full bg-white rounded-3xl border-2 border-dashed border-slate-200 p-10 text-center space-y-3">
+                    <div class="w-14 h-14 rounded-2xl bg-indigo-50 text-indigo-500 flex items-center justify-center mx-auto text-3xl">📚</div>
+                    <h3 class="text-lg font-extrabold text-slate-800">${allDecks.length === 0 ? 'Wala pang shared decks sa Library' : 'Walang tugma sa filter/search mo'}</h3>
+                    <p class="text-xs text-slate-500 max-w-md mx-auto">I-share ang isa sa mga folders mo para ma-try ng kaklase mo ang flashcards! <b>Ikaw lang (owner) ang pwedeng mag-edit ng contents</b> — read-only practice & personal copy lang sa iba.</p>
+                    <button type="button" onclick="window.openShareDeckModal()" class="duo-btn inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 border-indigo-800 text-white rounded-2xl font-black text-xs">
+                        <i class="ph-bold ph-upload-simple"></i> Share First Deck
+                    </button>
+                </div>
+            `;
+
+            return `
+            <div class="max-w-5xl mx-auto p-4 md:p-6 space-y-6 fade-in">
+                <div class="bg-white p-5 rounded-3xl border-2 border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
+                            <i class="ph-fill ph-books text-3xl"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-xl md:text-2xl font-black text-slate-900">General Shared Library</h1>
+                            <p class="text-xs md:text-sm text-slate-500">Try classmates' decks or share yours — <b>only the deck owner can edit contents</b>.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <button type="button" onclick="window.refreshSharedLibrary()" class="px-3 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center gap-1 transition-colors">
+                            <i class="ph-bold ph-arrows-clockwise ${state.libraryLoading ? 'animate-spin' : ''}"></i> Refresh
+                        </button>
+                        <button type="button" onclick="window.openShareDeckModal()" class="duo-btn px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 border-indigo-800 text-white font-black text-xs flex items-center gap-1.5">
+                            <i class="ph-bold ph-share-network text-sm"></i> Share My Folder
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Filters & Search -->
+                <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                    <div class="flex items-center gap-1.5 overflow-x-auto pb-1">
+                        ${[
+                            { id: 'all', label: `All (${allDecks.length})` },
+                            { id: 'PIPE', label: 'PIPE' },
+                            { id: 'MDSP', label: 'MDSP' },
+                            { id: 'MESL', label: 'MESL' },
+                            { id: 'General', label: 'General' },
+                            { id: 'mine', label: `My Uploads (${allDecks.filter(d => d.authorUid === userId).length})` }
+                        ].map(f => `
+                            <button type="button" onclick="window.setLibraryFilter('${f.id}')" class="px-3 py-1.5 rounded-xl text-xs font-extrabold whitespace-nowrap border transition-all ${state.libraryFilter === f.id ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'}">${f.label}</button>
+                        `).join('')}
+                    </div>
+                    <div class="relative sm:w-64">
+                        <i class="ph-bold ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                        <input type="text" value="${escapeHTML(state.librarySearch || '')}" oninput="window.setLibrarySearch(this.value)" placeholder="Search decks or author..." class="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:ring-2 focus:ring-indigo-400 outline-none" />
+                    </div>
+                </div>
+
+                ${state.libraryLoading && allDecks.length === 0 ? `
+                <div class="p-12 text-center text-slate-400 font-bold text-sm animate-pulse">
+                    <i class="ph-bold ph-spinner-gap animate-spin text-2xl mb-2 block mx-auto"></i> Loading Community Library...
+                </div>
+                ` : `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    ${cardsHtml}
+                </div>
+                `}
             </div>
             `;
         }
@@ -7030,8 +8306,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         </div>
                     </div>
 
-                    ${(() => {
-                        // Feature #8: Optimal Pace Zone (Anti-Sprint) & Daily Queue Efficiency
+                    ${state.isOwnerUnlocked ? (() => {
+                        // Feature #8: Optimal Pace Zone (Anti-Sprint) & Daily Queue Efficiency (Owner-Only!)
                         const todayTel = ensureDailyTelemetry();
                         const telKeys = Object.keys(state.dailyTelemetry || {}).sort().slice(-14);
                         const aggPace = {
@@ -7166,7 +8442,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             </div>
                         </div>
                         `;
-                    })()}
+                    })() : ''}
                 </div>
             `;
 
@@ -7334,7 +8610,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 </h2>
                                 <p class="text-xs text-slate-500">Top cards where you make the most mistakes — park or dissect them.</p>
                             </div>
-                            ${(() => {
+                            ${state.isOwnerUnlocked ? (() => {
                                 const activeLeechesCount = scopedTerms.filter(t => isActiveLeechCard(t)).length;
                                 return `
                                 <button type="button" onclick="window.startLeechSurgery()" ${activeLeechesCount === 0 ? 'disabled' : ''} class="px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 shadow-sm transition-all ${activeLeechesCount > 0 ? 'bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-700 hover:to-amber-700 text-white active:scale-95' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}">
@@ -7342,7 +8618,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                     <span class="px-1.5 py-0.5 rounded-md text-[10px] ${activeLeechesCount > 0 ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-500'}">${activeLeechesCount}</span>
                                 </button>
                                 `;
-                            })()}
+                            })() : ''}
                         </div>
                         <div class="space-y-2.5 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar">
                             ${weakCardsHtml}
@@ -7350,11 +8626,13 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                 </div>
 
-                <!-- Intake vs. Burn Rate Gauge & Adaptive Mon-Sun Targets -->
+                ${state.isOwnerUnlocked ? `
+                <!-- Owner-Only Intake vs. Burn Rate Gauge & Adaptive Mon-Sun Targets -->
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     ${renderIntakeVsBurnGaugeWidget()}
                     ${renderAdaptiveWeeklyTargetWidget()}
                 </div>
+                ` : ''}
             </div>
             `;
         }
@@ -7474,7 +8752,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     <p class="text-slate-500 text-sm max-w-2xl mx-auto">Simulate your journey until all cards reach Level 5 Mastery (capped at 1 year). This visualizer assumes a <span class="font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded">Dynamic Level-Weighted Pass Rate</span> (60% to 90%) on your daily reviews.</p>
                 </div>
 
-                ${renderLockedInFeb2027Widget()}
+                ${state.isOwnerUnlocked ? renderLockedInFeb2027Widget() : ''}
 
                 ${modeToggleHtml}
 
@@ -7750,6 +9028,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 `;
             }
 
+            const isCommunityTry = state.sessionData.type === 'community_try';
+            const showOwnerHud = Boolean(state.isOwnerUnlocked && !isCommunityTry);
+
             const sessionLabel = state.sessionData.type === 'intake'
                 ? 'Intake'
                 : state.sessionData.type === 'review_ahead'
@@ -7760,59 +9041,63 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             ? 'Erroneous'
                             : state.sessionData.type === 'leech_surgery'
                                 ? '🩺 Leech Surgery'
-                                : 'Review';
+                                : isCommunityTry
+                                    ? '📚 Try Shared'
+                                    : 'Review';
 
-            // Feature 2 & 7: Live Top 1 Impact HUD + Stakes + Clean Block progress
-            const liveTopInfo = computeTopnotcherIndex();
+            // Feature 2 & 7: Live Top 1 Impact HUD + Stakes + Clean Block progress (OWNER-ONLY — hidden from classmates!)
+            const liveTopInfo = showOwnerHud ? computeTopnotcherIndex() : { score: 0, tier: { icon: '' } };
             const liveTopBarPct = Math.min(100, Math.max(0, (liveTopInfo.score / 92) * 100));
-            const liveStakes = simulateCardTop1Stakes(currentCard);
+            const liveStakes = showOwnerHud ? simulateCardTop1Stakes(currentCard) : { gainCorrect: 0, gainPerfect: 0, lossWrong: 0 };
             const liveTel = ensureDailyTelemetry();
             const cleanBlockMins = Math.floor((liveTel.cleanBlockSec || 0) / 60);
             const cleanBlockPct = Math.min(100, Math.round(((liveTel.cleanBlockSec || 0) / 900) * 100));
             const cleanBlockAttempts = (liveTel.cleanBlockC || 0) + (liveTel.cleanBlockW || 0);
             const cleanBlockAcc = cleanBlockAttempts > 0 ? Math.round((liveTel.cleanBlockC / cleanBlockAttempts) * 100) : 100;
             const sessionNetDelta = liveTopInfo.score - (state.sessionData.startTopScore ?? liveTopInfo.score);
-            const isRecentFx = lastFeedbackAnim && (Date.now() - lastFeedbackAnim.ts < 900);
+            const isRecentFx = showOwnerHud && lastFeedbackAnim && (Date.now() - lastFeedbackAnim.ts < 900);
             const cardAnimClass = isRecentFx
                 ? (lastFeedbackAnim.type === 'gold' ? 'top1-shimmer-gold'
                     : lastFeedbackAnim.type === 'emerald' ? 'top1-flash-emerald'
                     : (lastFeedbackAnim.type === 'miss' || lastFeedbackAnim.type === 'crit_miss' || lastFeedbackAnim.type === 'rushed') ? 'top1-shake'
                     : '')
                 : '';
-            const showPreStakes = state.hudStakesMode === 'stakes';
-            const currentCardIsLeech = isActiveLeechCard(currentCard);
+            const showPreStakes = showOwnerHud && state.hudStakesMode === 'stakes';
+            const currentCardIsLeech = showOwnerHud && isActiveLeechCard(currentCard);
 
-            // Build Thumb-Zone 1-Line Impact Note
+            // Build Thumb-Zone 1-Line Impact Note (Owner-Only!)
             let thumbImpactHtml = '';
-            if (state.sessionLastImpact && state.sessionLastImpact.isRushed) {
-                const imp = state.sessionLastImpact;
-                thumbImpactHtml = `
-                <div class="top1-amber-slide w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2 shadow-sm">
-                    <span>⚡ Rushed Miss (&lt;3.5s) — Slow down! ▼ Top 1: <span class="font-mono font-black">${formatTop1Delta(imp.delta)}</span> (Missed ${formatTop1Delta(imp.counterfactual)})</span>
-                    <span class="font-mono font-black shrink-0">Sess: ${formatTop1Delta(imp.sessionTotalDelta)}</span>
-                </div>`;
-            } else if (state.sessionLastImpact) {
-                const imp = state.sessionLastImpact;
-                const isPos = imp.isCorrect;
-                const cls = imp.fxType === 'gold'
-                    ? 'bg-amber-50 border-amber-300 text-amber-900'
-                    : isPos
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                        : 'bg-rose-50 border-rose-200 text-rose-800';
-                const counterTxt = isPos
-                    ? `Dodged ${formatTop1Delta(imp.counterfactual)}`
-                    : `Missed ${formatTop1Delta(imp.counterfactual)}`;
-                thumbImpactHtml = `
-                <div class="w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl border text-[11px] md:text-xs font-bold flex items-center justify-between gap-2 shadow-sm ${cls}">
-                    <span class="truncate">${isPos ? '▲' : '▼'} Top 1: <span class="font-mono font-black">${formatTop1Delta(imp.delta)}</span> (${counterTxt})${imp.extraLabel ? ` • <b>${imp.extraLabel}</b>` : ''}</span>
-                    <span class="font-mono font-black shrink-0">Sess: ${formatTop1Delta(imp.sessionTotalDelta)}</span>
-                </div>`;
-            } else if (showPreStakes) {
-                thumbImpactHtml = `
-                <div class="w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl bg-slate-100/90 border border-slate-200 text-slate-600 text-[11px] md:text-xs font-bold flex items-center justify-between gap-2">
-                    <span>⚡ Card Stakes: <span class="text-emerald-700 font-mono font-black">${formatTop1Delta(liveStakes.gainCorrect)}</span> if right • <span class="text-rose-600 font-mono font-black">${formatTop1Delta(liveStakes.lossWrong)}</span> if missed</span>
-                    <span class="font-mono font-bold text-slate-400 shrink-0">Target: 92%</span>
-                </div>`;
+            if (showOwnerHud) {
+                if (state.sessionLastImpact && state.sessionLastImpact.isRushed) {
+                    const imp = state.sessionLastImpact;
+                    thumbImpactHtml = `
+                    <div class="top1-amber-slide w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2 shadow-sm">
+                        <span>⚡ Rushed Miss (&lt;3.5s) — Slow down! ▼ Top 1: <span class="font-mono font-black">${formatTop1Delta(imp.delta)}</span> (Missed ${formatTop1Delta(imp.counterfactual)})</span>
+                        <span class="font-mono font-black shrink-0">Sess: ${formatTop1Delta(imp.sessionTotalDelta)}</span>
+                    </div>`;
+                } else if (state.sessionLastImpact) {
+                    const imp = state.sessionLastImpact;
+                    const isPos = imp.isCorrect;
+                    const cls = imp.fxType === 'gold'
+                        ? 'bg-amber-50 border-amber-300 text-amber-900'
+                        : isPos
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            : 'bg-rose-50 border-rose-200 text-rose-800';
+                    const counterTxt = isPos
+                        ? `Dodged ${formatTop1Delta(imp.counterfactual)}`
+                        : `Missed ${formatTop1Delta(imp.counterfactual)}`;
+                    thumbImpactHtml = `
+                    <div class="w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl border text-[11px] md:text-xs font-bold flex items-center justify-between gap-2 shadow-sm ${cls}">
+                        <span class="truncate">${isPos ? '▲' : '▼'} Top 1: <span class="font-mono font-black">${formatTop1Delta(imp.delta)}</span> (${counterTxt})${imp.extraLabel ? ` • <b>${imp.extraLabel}</b>` : ''}</span>
+                        <span class="font-mono font-black shrink-0">Sess: ${formatTop1Delta(imp.sessionTotalDelta)}</span>
+                    </div>`;
+                } else if (showPreStakes) {
+                    thumbImpactHtml = `
+                    <div class="w-full max-w-xl mx-auto mt-3 px-3.5 py-2 rounded-xl bg-slate-100/90 border border-slate-200 text-slate-600 text-[11px] md:text-xs font-bold flex items-center justify-between gap-2">
+                        <span>⚡ Card Stakes: <span class="text-emerald-700 font-mono font-black">${formatTop1Delta(liveStakes.gainCorrect)}</span> if right • <span class="text-rose-600 font-mono font-black">${formatTop1Delta(liveStakes.lossWrong)}</span> if missed</span>
+                        <span class="font-mono font-bold text-slate-400 shrink-0">Target: 92%</span>
+                    </div>`;
+                }
             }
 
             const quickChoicePillsHtml = (state.currentShuffledChoices && state.currentShuffledChoices.options)
@@ -7973,7 +9258,14 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
             return `
             <div class="max-w-2xl mx-auto p-3 md:p-4 flex flex-col min-h-[90vh]">
-                <!-- Feature 2: Compact Sticky Live Top 1 Impact HUD -->
+                ${isCommunityTry ? `
+                <div class="mb-3 px-3.5 py-2.5 rounded-2xl bg-indigo-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-indigo-900">
+                    <span class="truncate">📚 Trying: <b>${escapeHTML(state.sessionData.sharedDeckTitle || 'Shared Deck')}</b> <span class="text-indigo-600 font-semibold">by ${escapeHTML(state.sessionData.sharedDeckAuthor || 'Engineer')} (Read-Only)</span></span>
+                    <span class="font-mono font-black shrink-0"><span class="text-emerald-600">✓ ${state.sessionData.tryCorrect || 0}</span> · <span class="text-rose-500">✗ ${state.sessionData.tryWrong || 0}</span></span>
+                </div>
+                ` : ''}
+                ${showOwnerHud ? `
+                <!-- Feature 2: Compact Sticky Live Top 1 Impact HUD (Owner-Only — Hidden from Classmates!) -->
                 <div class="sticky top-0 z-20 -mx-3 md:-mx-4 px-3 md:px-4 pt-2 pb-2.5 mb-3 bg-slate-50/95 backdrop-blur-md border-b border-slate-200/80 shadow-sm">
                     <div class="flex items-center justify-between gap-2 flex-wrap">
                         <div class="flex items-center gap-2">
@@ -8035,6 +9327,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         </div>`;
                     })()}
                 </div>
+                ` : ''}
 
                 <div class="flex flex-wrap items-center justify-between mb-4 gap-2.5">
                     <button onclick="window.endSession()" class="text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center gap-1 transition-colors"><i class="ph-bold ph-arrow-left"></i> Exit Session</button>
@@ -8075,8 +9368,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     <div onclick="window.handleCardBodyTap(event)" class="touch-card cursor-pointer w-full max-w-xl bg-white rounded-3xl shadow-xl p-6 md:p-8 text-center border-2 ${state.showAnswer && currentCard.isErroneous ? 'border-rose-300' : state.showTaglishSimplified ? 'border-teal-300' : 'border-slate-200'} ${cardAnimClass} flex flex-col min-h-[360px] justify-between relative transition-all duration-300">
                         <!-- Card Top Bar: Deck Path + Taglish Toggle + Parking Lot + Erroneous Tracker (Post-Reveal Only) + Live OCR Edit -->
                         <div class="flex items-center justify-between gap-2 w-full mb-4 pb-3 border-b border-slate-100 flex-wrap">
-                            <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[180px] sm:max-w-[240px]" title="${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}">
-                                ${escapeHTML(getFolderFullPath(currentCard.folderId, state.folders))}
+                            <span class="text-[11px] font-bold text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-lg truncate max-w-[180px] sm:max-w-[240px]" title="${escapeHTML(isCommunityTry ? (currentCard.subPath || state.sessionData.sharedDeckTitle || 'Shared Deck') : getFolderFullPath(currentCard.folderId, state.folders))}">
+                                ${escapeHTML(isCommunityTry ? (currentCard.subPath || state.sessionData.sharedDeckTitle || 'Shared Deck') : getFolderFullPath(currentCard.folderId, state.folders))}
                             </span>
                             <div class="flex items-center gap-1.5 ml-auto flex-wrap" onclick="event.stopPropagation()">
                                 ${state.sessionData.type === 'review' ? `<div class="flex gap-1 mr-1">${lvlDots}</div>` : ''}
@@ -8084,6 +9377,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                     <i class="${state.ttsState === 'speaking' ? 'ph-fill ph-stop-circle' : state.ttsState === 'preparing' ? 'ph-bold ph-spinner-gap animate-spin' : 'ph-fill ph-speaker-high'} text-sm"></i>
                                     <span>${state.ttsState === 'speaking' ? 'Stop' : state.ttsState === 'preparing' ? 'Prep...' : 'Listen'}</span>
                                 </button>
+                                ${!isCommunityTry ? `
                                 <button type="button" onclick="window.copyCurrentCardTtsText(event)" class="p-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-indigo-50 text-slate-500 hover:text-indigo-700 border border-transparent hover:border-indigo-200 transition-all active:scale-95" title="Copy clean TTS-ready script (Question + Choices A–D) to paste into Gemini / external TTS app">
                                     <i class="ph-bold ph-copy text-sm"></i>
                                 </button>
@@ -8112,6 +9406,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                 <button type="button" onclick="window.openApiKeyModal(event)" class="p-1.5 rounded-lg text-xs font-bold transition-all active:scale-95 ${state.geminiApiKey ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' : 'bg-amber-50 text-amber-600 hover:bg-amber-100'}" title="${state.geminiApiKey ? 'Gemini API Key Configured' : 'Set Gemini API Key'}">
                                     <i class="ph-fill ph-key text-sm"></i>
                                 </button>
+                                ` : `
+                                <span class="px-2.5 py-1 rounded-lg text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200">🔒 Read-Only</span>
+                                `}
                             </div>
                         </div>
                         
@@ -8194,7 +9491,12 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             </div>
                             ` : ''}
                             
-                            ${!state.showKeywordsExp ? `
+                            ${isCommunityTry ? (currentCard.explanation ? `
+                            <div class="p-4 bg-purple-50/90 border border-purple-200 rounded-2xl text-left space-y-2 fade-in">
+                                <span class="text-[10px] font-black text-purple-700 uppercase tracking-widest flex items-center gap-1"><i class="ph-fill ph-sparkle"></i> Author's Notes</span>
+                                <div class="text-sm font-medium text-purple-950 leading-relaxed whitespace-pre-wrap break-words">${renderFormattedNotesHtml(currentCard.explanation)}</div>
+                            </div>
+                            ` : '') : (!state.showKeywordsExp ? `
                             <button type="button" onclick="window.triggerKeywordsAndExplanation('${currentCard.id}')" class="w-full py-3 px-4 bg-purple-100 hover:bg-purple-200 text-purple-800 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 border border-purple-200 shadow-sm">
                                 <i class="ph-fill ph-highlighter-circle text-lg"></i> Show Keywords & Explanation
                             </button>
@@ -8283,7 +9585,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                                     </button>
                                 </div>
                             </div>
-                            `}
+                            `)}
                         </div>
                         ` : `
                         <div class="mt-4 pt-2 border-t border-slate-100">
@@ -8303,17 +9605,24 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 ${thumbImpactHtml}
 
                 <div class="h-28 flex items-center justify-center gap-3 mt-3 w-full max-w-xl mx-auto">
-                    ${state.showAnswer ? `
-                    <button onclick="window.handleAnswer('wrong')" class="flex-1 bg-red-100 hover:bg-red-200 text-red-700 py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm">
-                        <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MALI</span><span class="text-[10px] opacity-70 font-mono">[1] ${formatTop1Delta(liveStakes.lossWrong)}</span>
+                    ${state.showAnswer ? (isCommunityTry ? `
+                    <button onclick="window.handleAnswer('wrong')" class="duo-btn flex-1 bg-rose-100 hover:bg-rose-200 border-rose-300 text-rose-700 py-4 rounded-2xl font-black text-sm md:text-base flex flex-col items-center justify-center gap-1">
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MISSED</span><span class="text-[10px] opacity-70 font-mono">[1]</span>
                     </button>
-                    <button onclick="window.handleAnswer('correct')" class="flex-1 bg-green-500 hover:bg-green-600 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-green-200">
-                        <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> TAMA</span><span class="text-[10px] opacity-90 font-mono">[2] ${formatTop1Delta(liveStakes.gainCorrect)}</span>
+                    <button onclick="window.handleAnswer('correct')" class="duo-btn flex-1 bg-emerald-500 hover:bg-emerald-600 border-emerald-700 text-white py-4 rounded-2xl font-black text-sm md:text-base flex flex-col items-center justify-center gap-1">
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> GOT IT!</span><span class="text-[10px] opacity-90 font-mono">[2]</span>
                     </button>
-                    <button onclick="window.handleAnswer('perfect')" class="flex-1 bg-amber-400 hover:bg-amber-500 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 transition-all active:scale-95 shadow-sm shadow-amber-200">
-                        <span class="flex items-center gap-1"><i class="ph-fill ph-shooting-star text-xl"></i> PERFECT</span><span class="text-[10px] opacity-90 font-mono">[3] ${formatTop1Delta(liveStakes.gainPerfect)}</span>
+                    ` : `
+                    <button onclick="window.handleAnswer('wrong')" class="duo-btn flex-1 bg-red-100 hover:bg-red-200 border-red-300 text-red-700 py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 shadow-sm">
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-x text-xl"></i> MALI</span><span class="text-[10px] opacity-70 font-mono">[1]${showOwnerHud ? ` ${formatTop1Delta(liveStakes.lossWrong)}` : ''}</span>
                     </button>
-                    ` : ''}
+                    <button onclick="window.handleAnswer('correct')" class="duo-btn flex-1 bg-green-500 hover:bg-green-600 border-green-700 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 shadow-sm shadow-green-200">
+                        <span class="flex items-center gap-1"><i class="ph-bold ph-check text-xl"></i> TAMA</span><span class="text-[10px] opacity-90 font-mono">[2]${showOwnerHud ? ` ${formatTop1Delta(liveStakes.gainCorrect)}` : ''}</span>
+                    </button>
+                    <button onclick="window.handleAnswer('perfect')" class="duo-btn flex-1 bg-amber-400 hover:bg-amber-500 border-amber-600 text-white py-4 rounded-2xl font-bold text-sm md:text-base flex flex-col items-center justify-center gap-1 shadow-sm shadow-amber-200">
+                        <span class="flex items-center gap-1"><i class="ph-fill ph-shooting-star text-xl"></i> PERFECT</span><span class="text-[10px] opacity-90 font-mono">[3]${showOwnerHud ? ` ${formatTop1Delta(liveStakes.gainPerfect)}` : ''}</span>
+                    </button>
+                    `) : ''}
                 </div>
             </div>
             `;
@@ -8783,6 +10092,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             <button type="button" onclick="window.toggleTopnotcherDisplayUnit(event)" class="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-mono font-bold text-amber-300 border border-white/10">
                                 ${state.topnotcherDisplayUnit === 'rp' ? 'Unit: RP' : 'Unit: %'}
                             </button>
+                            <button type="button" onclick="window.lockOwnerMode()" class="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-rose-500/30 text-xs font-bold text-slate-300 hover:text-white border border-white/10 transition-colors" title="Hide Topnotcher Mode (5-tap logo to unlock again)">
+                                🔒 Hide
+                            </button>
                         </div>
                     </div>
 
@@ -8998,49 +10310,228 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             content += `<main class="flex-1">`;
             if (state.currentView === 'dashboard') content += renderDashboard();
             else if (state.currentView === 'add') content += renderDatabase();
-            else if (state.currentView === 'topnotcher') content += renderTopnotcher();
+            else if (state.currentView === 'library') content += renderLibrary();
+            else if (state.currentView === 'topnotcher' && state.isOwnerUnlocked) content += renderTopnotcher();
             else if (state.currentView === 'stats') content += renderStats();
             else if (state.currentView === 'analytics') content += renderAnalytics();
             else if (state.currentView === 'forecast') content += renderForecast();
             else if (state.currentView === 'session') content += renderSession();
+            else content += renderDashboard();
             content += `</main>`;
 
-            // Feature 4 & 6: Session Summary Modal (Leech Surgery + Completed Sessions)
+            // Session Summary Modal (Community Try Practice OR Owner-Only Topnotcher Summary)
             if (state.sessionSummaryModal) {
                 const sm = state.sessionSummaryModal;
+                if (sm.type === 'community_try') {
+                    const tryAcc = sm.answered > 0 ? Math.round(((sm.tryCorrect || 0) / sm.answered) * 100) : 0;
+                    content += `
+                    <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeSessionSummaryModal()">
+                        <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in text-center space-y-4 border border-slate-100" onclick="event.stopPropagation()">
+                            <div class="w-16 h-16 rounded-2xl bg-indigo-100 text-indigo-600 flex items-center justify-center mx-auto text-3xl">📚</div>
+                            <div>
+                                <h3 class="text-xl font-black text-slate-900">Practice Complete!</h3>
+                                <p class="text-xs text-slate-500 mt-1">${escapeHTML(sm.sharedDeckTitle || 'Shared Deck')} • by ${escapeHTML(sm.sharedDeckAuthor || 'Engineer')}</p>
+                            </div>
+                            <div class="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+                                <span class="text-[10px] font-black uppercase tracking-widest text-indigo-600">Practice Accuracy</span>
+                                <div class="text-4xl font-black font-mono text-slate-900">${tryAcc}%</div>
+                                <div class="text-xs font-bold text-slate-500"><span class="text-emerald-600">✓ ${sm.tryCorrect || 0} Got It</span> · <span class="text-rose-500">✗ ${sm.tryWrong || 0} Missed</span></div>
+                            </div>
+                            <div class="space-y-2">
+                                <button type="button" onclick="window.cloneSharedDeckToVault('${sm.sharedDeckId}'); window.closeSessionSummaryModal();" class="duo-btn w-full py-3 bg-blue-500 hover:bg-blue-600 border-blue-700 text-white rounded-2xl font-black text-sm">📥 Save Copy to My Vault</button>
+                                <button type="button" onclick="window.closeSessionSummaryModal()" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition-colors">Back to Library</button>
+                            </div>
+                        </div>
+                    </div>`;
+                } else if (state.isOwnerUnlocked) {
+                    content += `
+                    <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeSessionSummaryModal()">
+                        <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in text-center space-y-4 border border-slate-100" onclick="event.stopPropagation()">
+                            <div class="w-16 h-16 rounded-2xl ${sm.type === 'leech_surgery' ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'} flex items-center justify-center mx-auto text-3xl">
+                                ${sm.type === 'leech_surgery' ? '🩺' : '🏆'}
+                            </div>
+                            <div>
+                                <h3 class="text-xl font-black text-slate-900">${sm.type === 'leech_surgery' ? 'Leech Surgery Complete!' : 'Session Complete!'}</h3>
+                                <p class="text-xs text-slate-500 mt-1">${sm.answered} cards completed</p>
+                            </div>
+                            <div class="p-4 rounded-2xl bg-slate-900 text-white space-y-1">
+                                <span class="text-[10px] font-black uppercase tracking-widest text-amber-400">Topnotcher Index Change</span>
+                                <div class="text-3xl font-black font-mono tabular-nums ${sm.topDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${sm.topDelta >= 0 ? '+' : ''}${sm.topDelta.toFixed(3)}${state.topnotcherDisplayUnit === 'rp' ? ' RP' : '%'}</div>
+                                <div class="text-xs font-bold text-slate-300">Current Standing: <span class="font-mono text-white">${formatTop1Score(sm.endTopScore, 2)}</span></div>
+                            </div>
+                            <div class="grid grid-cols-3 gap-2 text-xs">
+                                <div class="p-2.5 rounded-xl bg-emerald-50 border border-emerald-100">
+                                    <div class="font-black text-emerald-700 font-mono text-base">${sm.netLevelUpsToday >= 0 ? '+' : ''}${sm.netLevelUpsToday}</div>
+                                    <div class="text-[10px] font-bold text-slate-500">Net Lvl-Ups</div>
+                                </div>
+                                <div class="p-2.5 rounded-xl bg-amber-50 border border-amber-100">
+                                    <div class="font-black text-amber-700 font-mono text-base">${sm.tamed} / ${sm.leechesTamedToday}</div>
+                                    <div class="text-[10px] font-bold text-slate-500">Leeches Tamed</div>
+                                </div>
+                                <div class="p-2.5 rounded-xl bg-indigo-50 border border-indigo-100">
+                                    <div class="font-black text-indigo-700 font-mono text-base">${sm.cleanBlocksToday}</div>
+                                    <div class="text-[10px] font-bold text-slate-500">Clean Blocks</div>
+                                </div>
+                            </div>
+                            <button type="button" onclick="window.closeSessionSummaryModal()" class="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-sm transition-colors">Continue</button>
+                        </div>
+                    </div>`;
+                }
+            }
+
+            // Secret Owner PIN Modal (Triggered ONLY by 5 quick taps on the app logo)
+            if (state.showOwnerPinModal) {
                 content += `
-                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeSessionSummaryModal()">
-                    <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in text-center space-y-4 border border-slate-100" onclick="event.stopPropagation()">
-                        <div class="w-16 h-16 rounded-2xl ${sm.type === 'leech_surgery' ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600'} flex items-center justify-center mx-auto text-3xl">
-                            ${sm.type === 'leech_surgery' ? '🩺' : '🏆'}
+                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeOwnerPinModal()">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-xs shadow-2xl zoom-in text-center space-y-4 border border-slate-200" onclick="event.stopPropagation()">
+                        <div class="w-12 h-12 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center mx-auto text-2xl">🔐</div>
+                        <div>
+                            <h3 class="text-lg font-black text-slate-900">Owner Access</h3>
+                            <p class="text-xs text-slate-500 mt-0.5">Enter passcode to unlock private mode.</p>
+                        </div>
+                        <input id="owner-pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="Passcode..." onkeydown="if(event.key==='Enter'){window.submitOwnerPin();}" class="w-full text-center font-mono font-black text-lg tracking-widest p-3 bg-slate-50 border-2 border-slate-200 rounded-xl focus:border-amber-400 outline-none" />
+                        <div class="flex gap-2">
+                            <button type="button" onclick="window.closeOwnerPinModal()" class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold text-xs">Cancel</button>
+                            <button type="button" onclick="window.submitOwnerPin()" class="duo-btn flex-1 py-2.5 bg-amber-500 hover:bg-amber-600 border-amber-700 text-white rounded-xl font-black text-xs">Unlock</button>
+                        </div>
+                    </div>
+                </div>`;
+            }
+
+            // Edit Player Profile & Avatar Modal
+            if (state.showProfileModal) {
+                content += `
+                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeProfileModal()">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl zoom-in space-y-4 border border-slate-200" onclick="event.stopPropagation()">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-slate-900">Your Engineer Profile</h3>
+                            <button type="button" onclick="window.closeProfileModal()" class="p-1 text-slate-400 hover:text-slate-700"><i class="ph-bold ph-x text-lg"></i></button>
                         </div>
                         <div>
-                            <h3 class="text-xl font-black text-slate-900">${sm.type === 'leech_surgery' ? 'Leech Surgery Complete!' : 'Session Complete!'}</h3>
-                            <p class="text-xs text-slate-500 mt-1">${sm.answered} cards completed</p>
+                            <label class="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1.5">Display Name (Shown on Class Leaderboard)</label>
+                            <input id="player-name-input" type="text" maxlength="26" value="${escapeHTML(state.playerProfile.displayName || '')}" onkeydown="if(event.key==='Enter'){window.savePlayerProfile();}" class="w-full p-3 bg-slate-50 border-2 border-slate-200 rounded-xl font-bold text-slate-800 focus:border-blue-500 outline-none" placeholder="e.g. Engr. Juan" />
                         </div>
-                        <div class="p-4 rounded-2xl bg-slate-900 text-white space-y-1">
-                            <span class="text-[10px] font-black uppercase tracking-widest text-amber-400">Topnotcher Index Change</span>
-                            <div class="text-3xl font-black font-mono tabular-nums ${sm.topDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${sm.topDelta >= 0 ? '+' : ''}${sm.topDelta.toFixed(3)}${state.topnotcherDisplayUnit === 'rp' ? ' RP' : '%'}</div>
-                            <div class="text-xs font-bold text-slate-300">Current Standing: <span class="font-mono text-white">${formatTop1Score(sm.endTopScore, 2)}</span></div>
-                        </div>
-                        <div class="grid grid-cols-3 gap-2 text-xs">
-                            <div class="p-2.5 rounded-xl bg-emerald-50 border border-emerald-100">
-                                <div class="font-black text-emerald-700 font-mono text-base">${sm.netLevelUpsToday >= 0 ? '+' : ''}${sm.netLevelUpsToday}</div>
-                                <div class="text-[10px] font-bold text-slate-500">Net Lvl-Ups</div>
-                            </div>
-                            <div class="p-2.5 rounded-xl bg-amber-50 border border-amber-100">
-                                <div class="font-black text-amber-700 font-mono text-base">${sm.tamed} / ${sm.leechesTamedToday}</div>
-                                <div class="text-[10px] font-bold text-slate-500">Leeches Tamed</div>
-                            </div>
-                            <div class="p-2.5 rounded-xl bg-indigo-50 border border-indigo-100">
-                                <div class="font-black text-indigo-700 font-mono text-base">${sm.cleanBlocksToday}</div>
-                                <div class="text-[10px] font-bold text-slate-500">Clean Blocks</div>
+                        <div>
+                            <label class="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-2">Pick Your Avatar</label>
+                            <div class="grid grid-cols-6 gap-2">
+                                ${AVATAR_CHOICES.map(av => `
+                                    <button type="button" onclick="window.selectProfileAvatar('${av}')" class="h-11 rounded-xl text-2xl flex items-center justify-center border-2 transition-all ${state.playerProfile.avatar === av ? 'bg-blue-50 border-blue-500 scale-105 shadow-xs' : 'bg-slate-50 border-slate-200 hover:border-blue-300'}">${av}</button>
+                                `).join('')}
                             </div>
                         </div>
-                        <button type="button" onclick="window.closeSessionSummaryModal()" class="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-sm transition-colors">Continue</button>
+                        <button type="button" onclick="window.savePlayerProfile()" class="duo-btn w-full py-3 bg-blue-500 hover:bg-blue-600 border-blue-700 text-white rounded-2xl font-black text-sm">Save Profile</button>
                     </div>
-                </div>
-                `;
+                </div>`;
+            }
+
+            // Share Folder to Community Library Modal
+            if (state.showShareDeckModal) {
+                const selFid = state.shareDeckFolderId || (state.folders[0] && state.folders[0].id) || '';
+                const selFolderObj = state.folders.find(f => f.id === selFid);
+                const guessedSubj = selFid ? (mapFolderToPrcSubject(selFid) === 'UNMAPPED' ? 'General' : mapFolderToPrcSubject(selFid)) : 'General';
+                content += `
+                <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeShareDeckModal()">
+                    <div class="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl zoom-in space-y-4 border border-slate-200 max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-slate-900 flex items-center gap-2"><i class="ph-fill ph-share-network text-indigo-600 text-xl"></i> Share to General Library</h3>
+                            <button type="button" onclick="window.closeShareDeckModal()" class="p-1 text-slate-400 hover:text-slate-700"><i class="ph-bold ph-x text-lg"></i></button>
+                        </div>
+                        <div class="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 text-xs font-bold text-indigo-900">
+                            🔒 <b>Owner-Only Editing:</b> Ikaw lang ang makakapag-edit o makakapag-delete ng deck na ito. Pwede lang itong i-try o i-save bilang sariling copy ng kaklase mo!
+                        </div>
+                        <div class="space-y-3">
+                            <div>
+                                <label class="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">Select Folder to Share (Includes Subfolders)</label>
+                                <select id="share-deck-folder" onchange="window.setShareDeckFolder(this.value)" class="w-full p-2.5 bg-slate-50 border-2 border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none">
+                                    ${state.folders.map(f => `<option value="${f.id}" ${selFid === f.id ? 'selected' : ''}>${escapeHTML(getFolderFullPath(f.id, state.folders))} (${getFolderRecursiveCardCount(f.id)} cards)</option>`).join('')}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">Deck Title</label>
+                                <input id="share-deck-title" type="text" maxlength="80" value="${escapeHTML(selFolderObj ? selFolderObj.name : '')}" class="w-full p-2.5 bg-slate-50 border-2 border-slate-200 rounded-xl text-sm font-bold text-slate-800 outline-none focus:border-indigo-400" placeholder="e.g. PIPE Thermodynamics Review" />
+                            </div>
+                            <div>
+                                <label class="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">Subject Category</label>
+                                <select id="share-deck-subject" class="w-full p-2.5 bg-slate-50 border-2 border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none">
+                                    ${['PIPE', 'MDSP', 'MESL', 'General'].map(s => `<option value="${s}" ${guessedSubj === s ? 'selected' : ''}>${s}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[11px] font-black uppercase tracking-wider text-slate-500 block mb-1">Short Description (Optional)</label>
+                                <textarea id="share-deck-desc" rows="2" maxlength="220" placeholder="Anong topics ang nasa deck na ito?" class="w-full p-2.5 bg-slate-50 border-2 border-slate-200 rounded-xl text-xs font-medium text-slate-800 outline-none resize-none"></textarea>
+                            </div>
+                            <label class="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                                <input id="share-deck-notes" type="checkbox" checked class="w-4 h-4 rounded text-indigo-600" />
+                                <span>Include saved AI explanations & Taglish notes (personal SRS progress is never shared)</span>
+                            </label>
+                        </div>
+                        <div class="flex gap-2 pt-2">
+                            <button type="button" onclick="window.closeShareDeckModal()" class="flex-1 py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold text-xs">Cancel</button>
+                            <button type="button" onclick="window.publishFolderToLibrary()" class="duo-btn flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 border-indigo-800 text-white rounded-xl font-black text-xs">📤 Publish Deck</button>
+                        </div>
+                    </div>
+                </div>`;
+            }
+
+            // Author-Only Edit / Sync Shared Deck Modal (Strictly restricted to deck.authorUid === userId!)
+            if (state.editingSharedDeckId) {
+                const editDeck = (state.sharedDecks || []).find(d => d.id === state.editingSharedDeckId && d.authorUid === userId);
+                if (editDeck) {
+                    const previewCards = (editDeck.cards || []).slice(0, 60);
+                    content += `
+                    <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 fade-in" onclick="window.closeEditSharedDeckModal()">
+                        <div class="bg-white rounded-3xl p-6 w-full max-w-2xl shadow-2xl zoom-in flex flex-col max-h-[90vh] border border-slate-200" onclick="event.stopPropagation()">
+                            <div class="flex items-center justify-between gap-2 pb-3 border-b border-slate-100 shrink-0">
+                                <h3 class="text-lg font-black text-slate-900 flex items-center gap-2"><i class="ph-fill ph-pencil-simple text-indigo-600"></i> Edit Shared Deck (Owner Only)</h3>
+                                <button type="button" onclick="window.closeEditSharedDeckModal()" class="p-1 text-slate-400 hover:text-slate-700"><i class="ph-bold ph-x text-lg"></i></button>
+                            </div>
+                            <div class="flex-1 overflow-y-auto space-y-4 py-4 pr-1 custom-scrollbar">
+                                <div class="grid sm:grid-cols-3 gap-3">
+                                    <div class="sm:col-span-2">
+                                        <label class="text-[10px] font-black uppercase text-slate-500 block mb-1">Deck Title</label>
+                                        <input id="edit-shared-title" type="text" value="${escapeHTML(editDeck.title)}" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-800 outline-none" />
+                                    </div>
+                                    <div>
+                                        <label class="text-[10px] font-black uppercase text-slate-500 block mb-1">Subject</label>
+                                        <select id="edit-shared-subject" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none">
+                                            ${['PIPE', 'MDSP', 'MESL', 'General'].map(s => `<option value="${s}" ${editDeck.subjectTag === s ? 'selected' : ''}>${s}</option>`).join('')}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="text-[10px] font-black uppercase text-slate-500 block mb-1">Description</label>
+                                    <textarea id="edit-shared-desc" rows="2" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 outline-none resize-none">${escapeHTML(editDeck.description || '')}</textarea>
+                                </div>
+                                ${editDeck.sourceFolderId && state.folders.some(f => f.id === editDeck.sourceFolderId) ? `
+                                <div class="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2">
+                                    <span class="text-xs font-bold text-emerald-900">🔄 Linked to your local folder — push latest card edits/additions in 1 click!</span>
+                                    <button type="button" onclick="window.resyncSharedDeckFromLocal('${editDeck.id}')" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-xs">Re-Sync Cards Now</button>
+                                </div>
+                                ` : ''}
+                                <div class="space-y-2.5">
+                                    <div class="text-xs font-black uppercase tracking-wider text-slate-500">Cards in Deck (${editDeck.cards.length}${editDeck.cards.length > 60 ? ' • showing first 60; use Re-Sync above for bulk edits' : ''})</div>
+                                    ${previewCards.map((c, idx) => `
+                                    <div class="p-3 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                                        <div class="flex items-center justify-between text-[10px] font-black text-slate-400">
+                                            <span>Card #${idx + 1}${c.subPath ? ` • ${escapeHTML(c.subPath)}` : ''}</span>
+                                            <div class="flex items-center gap-1.5">
+                                                <button type="button" onclick="window.updateSharedDeckCard('${editDeck.id}', ${idx})" class="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold">Save Card</button>
+                                                <button type="button" onclick="window.deleteSharedDeckCard('${editDeck.id}', ${idx})" class="px-2 py-0.5 rounded bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold">Remove</button>
+                                            </div>
+                                        </div>
+                                        <textarea id="shared-card-q-${idx}" rows="2" class="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-800 outline-none">${escapeHTML(c.question)}</textarea>
+                                        <input id="shared-card-a-${idx}" type="text" value="${escapeHTML(c.answer)}" class="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold text-emerald-800 outline-none" />
+                                    </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                            <div class="flex gap-2 pt-3 border-t border-slate-100 shrink-0">
+                                <button type="button" onclick="window.closeEditSharedDeckModal()" class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs">Close</button>
+                                <button type="button" onclick="window.saveSharedDeckMeta('${editDeck.id}')" class="duo-btn flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 border-indigo-800 text-white rounded-xl font-black text-xs">Save Deck Info</button>
+                            </div>
+                        </div>
+                    </div>`;
+                }
             }
             
             // --- STREAMING_CHUNK:Edit Term Modal Overlay (Live OCR Card Editor) ---
