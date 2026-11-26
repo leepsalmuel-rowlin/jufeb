@@ -415,6 +415,7 @@
             analyticsFolderId: 'all',
             analyticsHeatmapRange: 'this_week', // 'today' | 'this_week' | 'last_week' | 'all'
             analyticsSelectedSlot: null, // Selected cell key for tap inspection on phone
+            analyticsNewTriedBasis: '14d', // '7d' | '14d' | 'all' | 'active' (Rate basis for Feb 2027 total cards projection)
             showBulk: false,
             editingFolderId: null,
             addingSubfolderTo: null,
@@ -5423,6 +5424,12 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             state.analyticsSelectedSlot = state.analyticsSelectedSlot === slotKey ? null : slotKey;
             renderApp();
         };
+        window.setAnalyticsNewTriedBasis = (basis) => {
+            if (['7d', '14d', 'all', 'active'].includes(basis)) {
+                state.analyticsNewTriedBasis = basis;
+                renderApp();
+            }
+        };
         window.setIntakeSize = (val) => { state.intakeSize = Number(val); renderApp(); };
         window.setLookAheadDays = (val) => { state.lookAheadDays = Number(val); renderApp(); };
         window.toggleBulk = () => { state.showBulk = !state.showBulk; renderApp(); };
@@ -8897,6 +8904,211 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 </div>
             `;
 
+            // --- NEW CARDS TRIED / DAY (graduatedDate-based, excludes untried bulk adds) + FEB 2027 TOTAL PROJECTION ---
+            const toLocalDayKey = (ts) => {
+                const d = new Date(ts);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            };
+            const todayKeyNew = getTodayDateKey();
+            const triedCardsAll = scopedTerms.filter(t => !t.isNew);
+            const triedTotalCount = triedCardsAll.length;
+            const untriedNewLeft = lvlCounts.new;
+            const gradByDayMap = {};
+            let totalWithGradDate = 0;
+            let earliestGradTs = Infinity;
+
+            triedCardsAll.forEach(t => {
+                const gts = Number(t.graduatedDate) || 0;
+                if (gts > 0) {
+                    const dk = toLocalDayKey(gts);
+                    gradByDayMap[dk] = (gradByDayMap[dk] || 0) + 1;
+                    totalWithGradDate++;
+                    if (gts < earliestGradTs) earliestGradTs = gts;
+                }
+            });
+
+            const activeGradDayKeys = Object.keys(gradByDayMap).sort();
+            const activeGradDaysCount = activeGradDayKeys.length;
+            const todayNewTried = gradByDayMap[todayKeyNew] || 0;
+
+            let bestGradDayCount = 0;
+            let bestGradDayLabel = '';
+            activeGradDayKeys.forEach(dk => {
+                if (gradByDayMap[dk] > bestGradDayCount) {
+                    bestGradDayCount = gradByDayMap[dk];
+                    const dt = new Date(dk + 'T00:00:00');
+                    bestGradDayLabel = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                }
+            });
+
+            const last14NewDays = [];
+            for (let offset = 13; offset >= 0; offset--) {
+                const d = new Date(todayStart - offset * MS_PER_DAY);
+                const dk = toLocalDayKey(d.getTime());
+                last14NewDays.push({
+                    dateKey: dk,
+                    shortLabel: offset === 0 ? 'Today' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                    dowLabel: d.toLocaleDateString('en-US', { weekday: 'short' }),
+                    count: gradByDayMap[dk] || 0,
+                    isToday: offset === 0
+                });
+            }
+
+            const sumLast7New = last14NewDays.slice(-7).reduce((acc, x) => acc + x.count, 0);
+            const sumLast14New = last14NewDays.reduce((acc, x) => acc + x.count, 0);
+            const avg7dNew = sumLast7New / 7;
+            const avg14dNew = sumLast14New / 14;
+            const avgActiveNew = activeGradDaysCount > 0 ? (totalWithGradDate / activeGradDaysCount) : 0;
+
+            let spanCalendarDays = 1;
+            if (Number.isFinite(earliestGradTs) && earliestGradTs <= Date.now()) {
+                const earliestMid = new Date(earliestGradTs);
+                earliestMid.setHours(0, 0, 0, 0);
+                spanCalendarDays = Math.max(1, Math.round((todayStart - earliestMid.getTime()) / MS_PER_DAY) + 1);
+            }
+            const avgAllSpanNew = totalWithGradDate > 0 ? (totalWithGradDate / spanCalendarDays) : 0;
+
+            const chosenBasis = ['7d', '14d', 'all', 'active'].includes(state.analyticsNewTriedBasis) ? state.analyticsNewTriedBasis : '14d';
+            const basisMetaMap = {
+                '7d': { label: '7-Day Avg', rate: avg7dNew },
+                '14d': { label: '14-Day Avg', rate: avg14dNew },
+                'all': { label: `Overall (${spanCalendarDays}d)`, rate: avgAllSpanNew },
+                'active': { label: `Active Days (${activeGradDaysCount}d)`, rate: avgActiveNew }
+            };
+            const activeBasisMeta = basisMetaMap[chosenBasis];
+            const selectedNewRate = activeBasisMeta.rate;
+
+            const daysLeftFeb2027 = Math.max(0, Math.ceil((MELE_EXAM_DATE_MS - Date.now()) / MS_PER_DAY));
+            const estAddedByFeb2027 = Math.round(selectedNewRate * daysLeftFeb2027);
+            const projectedTotalByFeb2027 = triedTotalCount + estAddedByFeb2027;
+            const daysToClearCurrentUntried = selectedNewRate > 0 && untriedNewLeft > 0 ? Math.ceil(untriedNewLeft / selectedNewRate) : null;
+            const extraHeadroomAfterUntried = Math.max(0, estAddedByFeb2027 - untriedNewLeft);
+
+            // Build Last 14 Days SVG Bar Chart for New Cards Tried
+            const nSvgW = 560, nSvgH = 148, nPadL = 16, nPadR = 16, nPadT = 24, nPadB = 26;
+            const nPlotW = nSvgW - nPadL - nPadR;
+            const nPlotH = nSvgH - nPadT - nPadB;
+            const maxNewBar = Math.max(5, selectedNewRate, ...last14NewDays.map(x => x.count));
+            const nSlotW = nPlotW / 14;
+            const nBarW = Math.max(14, nSlotW - 8);
+            const avgRefY = nPadT + nPlotH - Math.min(1, selectedNewRate / maxNewBar) * nPlotH;
+
+            let newBarsSvg = '';
+            last14NewDays.forEach((day, idx) => {
+                const x = nPadL + idx * nSlotW + (nSlotW - nBarW) / 2;
+                const h = day.count > 0 ? Math.max(4, (day.count / maxNewBar) * nPlotH) : 2;
+                const y = nPadT + nPlotH - h;
+                const fill = day.isToday ? '#10b981' : day.count > 0 ? '#6366f1' : '#e2e8f0';
+                const showXLabel = idx === 0 || idx === 3 || idx === 6 || idx === 9 || idx === 13;
+                newBarsSvg += `
+                    <g>
+                        <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${nBarW.toFixed(1)}" height="${h.toFixed(1)}" rx="5" fill="${fill}">
+                            <title>${day.dowLabel}, ${day.shortLabel}: ${day.count} new cards tried</title>
+                        </rect>
+                        ${day.count > 0 ? `<text x="${(x + nBarW / 2).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="800" fill="${day.isToday ? '#10b981' : '#64748b'}">${day.count}</text>` : ''}
+                        ${showXLabel ? `<text x="${(x + nBarW / 2).toFixed(1)}" y="${nSvgH - 8}" text-anchor="middle" font-size="9" font-weight="700" fill="${day.isToday ? '#10b981' : '#64748b'}">${day.shortLabel}</text>` : ''}
+                    </g>`;
+            });
+            const avgLineSvg = selectedNewRate > 0 ? `
+                <line x1="${nPadL}" y1="${avgRefY.toFixed(1)}" x2="${nSvgW - nPadR}" y2="${avgRefY.toFixed(1)}" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.85" />
+                <text x="${nSvgW - nPadR}" y="${Math.max(12, avgRefY - 4).toFixed(1)}" text-anchor="end" font-size="9" font-weight="800" fill="#f59e0b">${activeBasisMeta.label}: ${selectedNewRate.toFixed(1)}/d</text>
+            ` : '';
+
+            const newCardsTriedHtml = `
+            <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <h2 class="text-base md:text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                            <i class="ph-fill ph-sparkle text-indigo-500 text-xl"></i> New Cards Tried / Day & Feb 2027 Total Projection
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">Actual na new cards na na-try / na-unlock mo per day — <b>hindi kasama ang naka-tambak na bulk-added cards</b>.</p>
+                    </div>
+                    <div class="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-[11px] font-extrabold">
+                        ${[
+                            { id: '7d', label: '7d' },
+                            { id: '14d', label: '14d' },
+                            { id: 'all', label: 'Overall' },
+                            { id: 'active', label: 'Active Days' }
+                        ].map(b => `
+                            <button type="button" onclick="window.setAnalyticsNewTriedBasis('${b.id}')" class="px-2.5 py-1 rounded-lg transition-all ${chosenBasis === b.id ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}">${b.label}</button>
+                        `).join('')}
+                    </div>
+                </div>
+
+                <!-- 4 Pace KPI Tiles -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200">
+                        <span class="text-[10px] font-black uppercase tracking-wider text-emerald-700 block">Tried Today</span>
+                        <div class="text-2xl font-black font-mono text-emerald-800 mt-0.5">${todayNewTried}</div>
+                        <span class="text-[10px] font-bold text-emerald-700/80">${selectedNewRate > 0 ? (todayNewTried >= selectedNewRate ? '🔥 Above pace' : `${Math.max(0, Math.ceil(selectedNewRate - todayNewTried))} to match avg`) : 'New cards unlocked'}</span>
+                    </div>
+                    <div class="p-3.5 rounded-2xl ${chosenBasis === '7d' ? 'bg-indigo-50 border-2 border-indigo-400' : 'bg-slate-50 border border-slate-200'}">
+                        <span class="text-[10px] font-black uppercase tracking-wider text-slate-500 block">7-Day Average</span>
+                        <div class="text-2xl font-black font-mono text-indigo-600 mt-0.5">${avg7dNew.toFixed(1)}<span class="text-xs font-bold text-slate-400">/d</span></div>
+                        <span class="text-[10px] font-bold text-slate-500">${sumLast7New.toLocaleString()} cards in 7d</span>
+                    </div>
+                    <div class="p-3.5 rounded-2xl ${chosenBasis === '14d' ? 'bg-indigo-50 border-2 border-indigo-400' : 'bg-slate-50 border border-slate-200'}">
+                        <span class="text-[10px] font-black uppercase tracking-wider text-slate-500 block">14-Day Average</span>
+                        <div class="text-2xl font-black font-mono text-blue-600 mt-0.5">${avg14dNew.toFixed(1)}<span class="text-xs font-bold text-slate-400">/d</span></div>
+                        <span class="text-[10px] font-bold text-slate-500">${sumLast14New.toLocaleString()} cards in 14d</span>
+                    </div>
+                    <div class="p-3.5 rounded-2xl ${chosenBasis === 'active' || chosenBasis === 'all' ? 'bg-indigo-50 border-2 border-indigo-400' : 'bg-slate-50 border border-slate-200'}">
+                        <span class="text-[10px] font-black uppercase tracking-wider text-slate-500 block">${chosenBasis === 'all' ? `Overall (${spanCalendarDays}d)` : 'Active-Day Avg'}</span>
+                        <div class="text-2xl font-black font-mono text-amber-600 mt-0.5">${(chosenBasis === 'all' ? avgAllSpanNew : avgActiveNew).toFixed(1)}<span class="text-xs font-bold text-slate-400">/d</span></div>
+                        <span class="text-[10px] font-bold text-slate-500">${bestGradDayCount > 0 ? `Best: ${bestGradDayCount} (${bestGradDayLabel})` : `${activeGradDaysCount} active days`}</span>
+                    </div>
+                </div>
+
+                <!-- Feb 2027 Total Projected Cards Banner -->
+                <div class="p-4 md:p-5 rounded-2xl bg-gradient-to-r from-indigo-50 to-emerald-50 border-2 border-indigo-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div class="space-y-1">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-black uppercase tracking-wider">📅 Feb 15, 2027 Projection</span>
+                            <span class="text-[11px] font-extrabold text-indigo-700">${daysLeftFeb2027} days left • Using ${activeBasisMeta.label} (${selectedNewRate.toFixed(1)}/day)</span>
+                        </div>
+                        <div class="flex items-baseline gap-2 flex-wrap pt-0.5">
+                            <span class="text-3xl md:text-4xl font-black font-mono tabular-nums text-slate-900">~${projectedTotalByFeb2027.toLocaleString()}</span>
+                            <span class="text-sm font-extrabold text-slate-700">total cards tried by Feb 2027</span>
+                        </div>
+                        <p class="text-xs font-bold text-slate-600">
+                            ${selectedNewRate > 0
+                                ? (untriedNewLeft > 0
+                                    ? (estAddedByFeb2027 >= untriedNewLeft
+                                        ? `Sa rate mo ngayon, mauubos mo ang <b>${untriedNewLeft.toLocaleString()}</b> untried cards sa vault in ~<b>${daysToClearCurrentUntried}d</b>, at kaya mo pang mag-unlock ng <b>+${extraHeadroomAfterUntried.toLocaleString()}</b> pang bagong cards bago mag-exam!`
+                                        : `May <b>${untriedNewLeft.toLocaleString()}</b> untried cards ka sa vault — sa rate na ito, ~<b>${estAddedByFeb2027.toLocaleString()}</b> ang matatry mo bago mag-Feb 2027 (${(untriedNewLeft - estAddedByFeb2027).toLocaleString()} maiiwan).`)
+                                    : `Ubos na ang untried cards mo sa vault! Kung tuloy-tuloy kang magdagdag ng bagong decks sa pace na <b>${selectedNewRate.toFixed(1)}/day</b>, aabot ka sa ~<b>${projectedTotalByFeb2027.toLocaleString()}</b> total cards by Feb 2027.`)
+                                : `Wala pang new cards na na-try sa napiling window (${activeBasisMeta.label})${totalWithGradDate > 0 ? ' — i-tap ang <b>Overall</b> o <b>Active Days</b> sa taas para makita ang projection mula sa past pace mo!' : '.'}`}
+                        </p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 shrink-0 min-w-[210px]">
+                        <div class="p-3 rounded-xl bg-white/90 border border-slate-200 text-center">
+                            <span class="text-[9px] font-black uppercase tracking-wider text-slate-500 block">Done So Far</span>
+                            <span class="text-lg font-black font-mono text-slate-900">${triedTotalCount.toLocaleString()}</span>
+                        </div>
+                        <div class="p-3 rounded-xl bg-white/90 border border-emerald-200 text-center">
+                            <span class="text-[9px] font-black uppercase tracking-wider text-emerald-700 block">+ Est. More (${daysLeftFeb2027}d)</span>
+                            <span class="text-lg font-black font-mono text-emerald-600">+${estAddedByFeb2027.toLocaleString()}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Last 14 Days Daily New Cards Tried Mini Bar Chart -->
+                <div>
+                    <div class="flex items-center justify-between mb-1.5">
+                        <span class="text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Last 14 Days — Daily New Cards Tried</span>
+                        <span class="text-[11px] font-bold text-slate-500">Untried Queue Left: <b class="font-mono text-slate-800">${untriedNewLeft.toLocaleString()}</b></span>
+                    </div>
+                    <div class="w-full overflow-x-auto">
+                        <svg viewBox="0 0 ${nSvgW} ${nSvgH}" class="w-full min-w-[460px] h-auto select-none">
+                            <line x1="${nPadL}" y1="${nPadT + nPlotH}" x2="${nSvgW - nPadR}" y2="${nPadT + nPlotH}" stroke="#e2e8f0" stroke-width="1.5" />
+                            ${avgLineSvg}
+                            ${newBarsSvg}
+                        </svg>
+                    </div>
+                </div>
+            </div>
+            `;
+
             return `
             <div class="max-w-6xl mx-auto p-4 md:p-6 space-y-6 fade-in">
                 <!-- Header + Scope Filter -->
@@ -9011,6 +9223,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         </div>
                     </div>
                 </div>
+
+                <!-- New Cards Tried / Day (graduatedDate) + Feb 2027 Total Projection -->
+                ${newCardsTriedHtml}
 
                 <!-- Study Rhythm & Time-of-Day Heatmap (Today / This Week / Last Week / All Time) -->
                 ${studyRhythmHtml}
