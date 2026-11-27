@@ -3083,6 +3083,12 @@
             saveLocalTelemetryOnly(true);
             renderApp();
         };
+        window.setWeeklyNewDailyAvgGoal = (dailyVal) => {
+            const d = Math.max(0, Math.min(250, Number(dailyVal) || 0));
+            state.weeklyNewCardsGoal = Math.round(d * 7);
+            saveLocalTelemetryOnly(true);
+            renderApp();
+        };
         window.updateWeeklyWaveDayTarget = (dow, val) => {
             const num = Math.max(15, Math.min(1200, parseInt(val, 10) || 50));
             state.weeklyTargets[dow] = num;
@@ -11675,15 +11681,33 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             const mondayStart = todayStart - daysSinceMonday * MS_PER_DAY;
             const sundayEnd = mondayStart + 7 * MS_PER_DAY;
 
-            // Count actual New Cards Tried (graduatedDate) per day this week
+            // Count actual New Cards Tried (graduatedDate) per day this week + 7d / 14d / all-time active averages
             const newTriedByKey = {};
+            const allGradDayCounts = {};
+            const cutoff7Start = todayStart - 6 * MS_PER_DAY;
+            const cutoff14Start = todayStart - 13 * MS_PER_DAY;
+            const tomorrowStart = todayStart + MS_PER_DAY;
+            let last7dNewCount = 0;
+            let last14dNewCount = 0;
+            let totalWithGradCount = 0;
+
             (state.terms || []).forEach(t => {
                 const gts = Number(t.graduatedDate) || 0;
-                if (!t.isErroneous && !t.isNew && gts >= mondayStart && gts < sundayEnd) {
+                if (!t.isErroneous && !t.isNew && gts > 0) {
                     const dk = toLocalKey(gts);
-                    newTriedByKey[dk] = (newTriedByKey[dk] || 0) + 1;
+                    allGradDayCounts[dk] = (allGradDayCounts[dk] || 0) + 1;
+                    totalWithGradCount++;
+                    if (gts >= mondayStart && gts < sundayEnd) {
+                        newTriedByKey[dk] = (newTriedByKey[dk] || 0) + 1;
+                    }
+                    if (gts >= cutoff7Start && gts < tomorrowStart) last7dNewCount++;
+                    if (gts >= cutoff14Start && gts < tomorrowStart) last14dNewCount++;
                 }
             });
+            const activeGradDaysTotal = Object.keys(allGradDayCounts).length;
+            const last7dNewAvg = Math.round((last7dNewCount / 7) * 10) / 10;
+            const last14dNewAvg = Math.round((last14dNewCount / 14) * 10) / 10;
+            const allTimeActiveNewAvg = activeGradDaysTotal > 0 ? Math.round((totalWithGradCount / activeGradDaysTotal) * 10) / 10 : 0;
 
             const dowShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
             const weekDays = [];
@@ -11737,13 +11761,18 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             const expectedSoFar = Math.round(avgGoalPerDay * daysElapsed);
             const weekSurplusOrDeficit = thisWeekTotalDone - expectedSoFar;
 
-            // Weekly New Cards Tried catch-up
+            // Weekly New Cards Tried catch-up & per-day averages (Pure New Cards Only!)
             const weeklyNewGoal = Math.max(0, Number(state.weeklyNewCardsGoal) || 200);
+            const weeklyNewDailyAvgGoal = Math.round((weeklyNewGoal / 7) * 10) / 10;
+            const thisWeekNewAvg = Math.round((thisWeekNewTried / Math.max(1, daysElapsed)) * 10) / 10;
+            const expectedNewSoFar = Math.round((weeklyNewGoal / 7) * daysElapsed);
+            const newSurplusOrDeficit = thisWeekNewTried - expectedNewSoFar;
             const newRemainingThisWeek = Math.max(0, weeklyNewGoal - thisWeekNewTried);
             const newNeededPerRemainingDay = Math.ceil(newRemainingThisWeek / Math.max(1, 7 - daysSinceMonday));
 
             return {
                 weekDays,
+                daysElapsed,
                 todayName: todayObj ? todayObj.name : dowShort[todayDow],
                 todayDone: todayObj ? todayObj.done : 0,
                 todayNewTried: todayObj ? todayObj.newTried : 0,
@@ -11754,6 +11783,13 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 lightDowNames,
                 thisWeekTotalDone,
                 thisWeekNewTried,
+                thisWeekNewAvg,
+                last7dNewCount,
+                last7dNewAvg,
+                last14dNewCount,
+                last14dNewAvg,
+                allTimeActiveNewAvg,
+                activeGradDaysTotal,
                 shapedWeekTotal,
                 avgGoalPerDay,
                 weeklyGoalTotal,
@@ -11763,6 +11799,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 neededPerRemainingDay,
                 weekSurplusOrDeficit,
                 weeklyNewGoal,
+                weeklyNewDailyAvgGoal,
+                newSurplusOrDeficit,
                 newRemainingThisWeek,
                 newNeededPerRemainingDay,
                 daysLeftInclToday: 7 - daysSinceMonday
@@ -11868,43 +11906,94 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                 </div>
 
-                <!-- Weekly NEW CARDS TRIED Catch-Up Strip (Actual Tried Only — Not Bulk Add!) -->
-                <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
-                    <div class="flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                            <div class="text-xs font-extrabold text-slate-800 flex flex-wrap items-center gap-1.5">
-                                <i class="ph-fill ph-sparkle text-emerald-500 text-base"></i>
-                                <span>Weekly New Cards Tried (Intake Only):</span>
-                                <span class="font-mono font-black text-emerald-600">${w.thisWeekNewTried.toLocaleString()} / ${w.weeklyNewGoal.toLocaleString()}</span>
-                                <span class="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800">Today (${w.todayName}): +${w.todayNewTried} new</span>
+                <!-- Weekly NEW CARDS TRIED / DAY BALANCER (Pure New Cards Only — Hiwalay sa Repeat Reviews!) -->
+                ${(() => {
+                    const maxNewBar = Math.max(20, w.weeklyNewDailyAvgGoal * 1.35, ...w.weekDays.map(d => d.newTried));
+                    const newTargetBottom = Math.min(95, Math.round((w.weeklyNewDailyAvgGoal / maxNewBar) * 100));
+                    const newBarsHtml = w.weekDays.map(d => {
+                        const hPct = Math.min(100, Math.round((d.newTried / maxNewBar) * 100));
+                        const metDay = d.newTried >= w.weeklyNewDailyAvgGoal && w.weeklyNewDailyAvgGoal > 0;
+                        const bCls = d.isFuture ? 'bg-slate-200' : (metDay ? 'bg-emerald-500' : (d.isToday ? 'bg-indigo-500' : 'bg-amber-400'));
+                        return `
+                        <div class="flex flex-col items-center gap-1 flex-1 min-w-[38px]" title="${d.name}: ${d.newTried} actual new cards tried (Daily target avg: ${w.weeklyNewDailyAvgGoal}/d)">
+                            <span class="text-[10px] font-mono font-black ${d.newTried > 0 ? (metDay ? 'text-emerald-600' : (d.isToday ? 'text-indigo-700' : 'text-slate-700')) : 'text-slate-400'}">${d.isFuture ? '·' : `+${d.newTried}`}</span>
+                            <div class="relative w-full max-w-[30px] h-16 rounded-lg bg-white border ${d.isToday ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'} overflow-hidden flex items-end">
+                                <div class="w-full rounded-t-md transition-all duration-500 ${bCls}" style="height: ${Math.max(d.newTried > 0 ? 8 : 0, hPct)}%"></div>
+                                ${w.weeklyNewDailyAvgGoal > 0 ? `<div class="absolute left-0 right-0 border-t-2 border-dashed border-amber-500 pointer-events-none" style="bottom: ${newTargetBottom}%"></div>` : ''}
                             </div>
-                            <p class="text-[10px] font-semibold text-slate-500 mt-0.5">Bagong cards lang na first-time mong na-unlock this Mon–Sun (hiwalay sa repeat reviews; naka-link sa Roadmap graph sa taas!).</p>
+                            <span class="text-[10px] font-black ${d.isToday ? 'text-emerald-700' : 'text-slate-500'}">${d.name}</span>
+                        </div>`;
+                    }).join('');
+
+                    return `
+                <div class="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                    <div class="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                            <div class="text-xs md:text-sm font-extrabold text-slate-800 flex flex-wrap items-center gap-1.5">
+                                <i class="ph-fill ph-sparkle text-emerald-500 text-base"></i>
+                                <span>New Cards Tried / Day Avg (New Only):</span>
+                                <span class="font-mono font-black text-emerald-700">${w.thisWeekNewAvg}/day</span>
+                                <span class="text-[11px] font-bold text-slate-500">(${w.thisWeekNewTried.toLocaleString()} / ${w.weeklyNewGoal.toLocaleString()} this Mon–Sun)</span>
+                            </div>
+                            <p class="text-[10px] font-semibold text-slate-500 mt-0.5">Pure bagong cards lang na first-time mong nasagutan (hiwalay sa due/repeat reviews at bulk imports; naka-link sa Roadmap!).</p>
                         </div>
-                        <div class="flex items-center gap-1 text-[10px] font-black flex-wrap">
-                            <span class="text-slate-500">Goal/wk:</span>
-                            ${[200, 350, 500, 700].map(ng => `
-                                <button type="button" onclick="window.setWeeklyNewCardsGoal(${ng})" class="px-2 py-0.5 rounded-lg transition-all ${w.weeklyNewGoal === ng ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-emerald-300'}">${ng === 700 ? '700 (100/d)' : ng}</button>
-                            `).join('')}
-                            <input type="number" min="0" max="2000" value="${w.weeklyNewGoal}" onchange="window.setWeeklyNewCardsGoal(this.value)" class="w-14 px-1.5 py-0.5 text-center font-mono font-black text-[10px] bg-white border border-slate-200 rounded-lg outline-none focus:border-emerald-400" title="Custom weekly new cards goal" />
+                        <span class="px-2.5 py-0.5 rounded-full text-[11px] font-black ${w.newSurplusOrDeficit >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}">
+                            ${w.newSurplusOrDeficit >= 0 ? `✨ +${w.newSurplusOrDeficit} ahead of ${w.weeklyNewDailyAvgGoal}/d new avg!` : `${Math.abs(w.newSurplusOrDeficit)} behind ${w.weeklyNewDailyAvgGoal}/d new avg`}
+                        </span>
+                    </div>
+
+                    <!-- 4 Pure New-Cards-Only Average Pills -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                        <div class="p-2.5 rounded-xl bg-white border border-slate-200">
+                            <div class="text-[10px] font-bold text-slate-500">Today (${w.todayName})</div>
+                            <div class="text-sm font-mono font-black text-emerald-700 mt-0.5">+${w.todayNewTried} <span class="text-[10px] font-bold text-slate-400">new</span></div>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-white border border-slate-200">
+                            <div class="text-[10px] font-bold text-slate-500">This Week Avg (${w.daysElapsed}d)</div>
+                            <div class="text-sm font-mono font-black text-indigo-700 mt-0.5">${w.thisWeekNewAvg}<span class="text-[10px] font-bold text-slate-400">/day</span></div>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-white border border-slate-200">
+                            <div class="text-[10px] font-bold text-slate-500">Last 7d / 14d Avg</div>
+                            <div class="text-sm font-mono font-black text-slate-800 mt-0.5">${w.last7dNewAvg}<span class="text-[10px] text-slate-400">/d</span> <span class="text-[10px] font-bold text-slate-400">• 14d: ${w.last14dNewAvg}</span></div>
+                        </div>
+                        <div class="p-2.5 rounded-xl bg-white border border-slate-200">
+                            <div class="text-[10px] font-bold text-slate-500">Active-Day Avg</div>
+                            <div class="text-sm font-mono font-black text-cyan-600 mt-0.5">${w.allTimeActiveNewAvg}<span class="text-[10px] font-bold text-slate-400">/day (${w.activeGradDaysTotal}d)</span></div>
                         </div>
                     </div>
+
+                    <!-- Set New Cards / Day Avg Target (Auto-syncs Goal/wk & Roadmap!) -->
+                    <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-white border border-slate-200 text-[11px]">
+                        <div class="flex flex-wrap items-center gap-1.5">
+                            <span class="font-extrabold text-slate-600">Target New/Day Avg:</span>
+                            ${[30, 50, 75, 100].map(dn => `
+                                <button type="button" onclick="window.setWeeklyNewDailyAvgGoal(${dn})" class="px-2 py-0.5 rounded-lg font-black transition-all ${Math.round(w.weeklyNewDailyAvgGoal) === dn ? 'bg-emerald-600 text-white' : 'bg-slate-50 text-slate-600 border border-slate-200 hover:border-emerald-300'}">${dn}/d</button>
+                            `).join('')}
+                            <input type="number" min="0" max="250" step="1" value="${Math.round(w.weeklyNewDailyAvgGoal)}" onchange="window.setWeeklyNewDailyAvgGoal(this.value)" class="w-14 px-1.5 py-0.5 text-center font-mono font-black text-[11px] bg-slate-50 border border-slate-200 rounded-lg outline-none focus:border-emerald-400" title="Custom New Cards / Day average goal" />
+                            <span class="text-[10px] font-bold text-slate-400">/day</span>
+                        </div>
+                        <div class="flex items-center gap-1 text-[10px] font-black text-slate-500">
+                            <span>= Goal/wk:</span>
+                            <input type="number" min="0" max="2000" value="${w.weeklyNewGoal}" onchange="window.setWeeklyNewCardsGoal(this.value)" class="w-14 px-1.5 py-0.5 text-center font-mono font-black text-[10px] bg-slate-50 border border-slate-200 rounded-lg outline-none focus:border-emerald-400 text-slate-700" title="Custom weekly new cards total goal" />
+                        </div>
+                    </div>
+
                     <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                         <div class="h-full bg-emerald-500 rounded-full transition-all duration-500" style="width: ${newWeekPct}%"></div>
                     </div>
-                    <div class="grid grid-cols-7 gap-1 text-center">
-                        ${w.weekDays.map(d => `
-                            <div class="py-1 px-0.5 rounded-lg border ${d.isToday ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-white border-slate-200 text-slate-600'}">
-                                <div class="text-[9px] font-black ${d.isToday ? 'text-emerald-700' : 'text-slate-400'}">${d.name}</div>
-                                <div class="text-[11px] font-mono font-black ${d.newTried > 0 ? (d.isToday ? 'text-emerald-700' : 'text-slate-800') : 'text-slate-400'}">${d.isFuture ? '·' : `+${d.newTried}`}</div>
-                            </div>
-                        `).join('')}
+
+                    <!-- Mon-Sun Pure New Cards Tried Bar Chart -->
+                    <div class="flex items-end justify-between gap-1.5 pt-1">
+                        ${newBarsHtml}
                     </div>
+
                     <div class="text-[11px] font-bold text-slate-600">
                         ${w.newRemainingThisWeek === 0
-                            ? `✅ <b>Weekly New Cards Goal Reached!</b> (${w.thisWeekNewTried} actual new cards tried this Mon–Sun!)`
-                            : `📌 <b>${w.newRemainingThisWeek}</b> new cards pa ang hahabulin this week (~<b>${w.newNeededPerRemainingDay} new/day</b> sa natitirang ${w.daysLeftInclToday} day${w.daysLeftInclToday === 1 ? '' : 's'}) — pure tried cards lang, hindi bulk add.`}
+                            ? `✅ <b>Weekly New Avg Hit!</b> Naka-<b>${w.thisWeekNewTried.toLocaleString()}</b> actual new cards ka na this Mon–Sun (<b>${w.thisWeekNewAvg} new/day</b> avg vs target <b>${w.weeklyNewDailyAvgGoal}/d</b>).`
+                            : `📌 <b>${w.newRemainingThisWeek}</b> new cards pa para ma-hit ang <b>${w.weeklyNewDailyAvgGoal}/day</b> avg (<b>${w.weeklyNewGoal}/wk</b>) — ~<b>${w.newNeededPerRemainingDay} new/day</b> sa natitirang ${w.daysLeftInclToday} day${w.daysLeftInclToday === 1 ? '' : 's'}.`}
                     </div>
-                </div>
+                </div>`;
+                })()}
             </div>
             `;
         }
