@@ -231,6 +231,8 @@
         html.dark .text-rose-950 { color: #ffe4e6 !important; }
         html.dark .text-purple-600, html.dark .text-purple-700, html.dark .text-purple-800, html.dark .text-purple-900 { color: #d8b4fe !important; }
         html.dark .text-purple-950 { color: #f3e8ff !important; }
+        html.dark .text-green-700, html.dark .text-lime-700 { color: #86efac !important; }
+        html.dark .bg-lime-50 { background-color: rgba(132, 204, 22, 0.14) !important; }
         html.dark .decoration-blue-600 { text-decoration-color: #60a5fa !important; }
 
         /* Hover Surfaces in Dark Mode (Zero White Flash on Hover) */
@@ -256,11 +258,11 @@
         html.dark .from-blue-50 { --tw-gradient-from: rgba(30, 64, 175, 0.25) !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
         html.dark .from-indigo-50 { --tw-gradient-from: rgba(55, 48, 163, 0.25) !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
         html.dark .from-slate-50 { --tw-gradient-from: #131c2e !important; --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important; }
-        html.dark .via-yellow-50\/90, html.dark .via-yellow-50\/80, html.dark .via-yellow-50\/70 { --tw-gradient-via: rgba(161, 98, 7, 0.18) !important; }
-        html.dark .via-teal-50\/60 { --tw-gradient-via: rgba(17, 94, 89, 0.22) !important; }
+        html.dark .via-yellow-50, html.dark .via-yellow-50\/90, html.dark .via-yellow-50\/80, html.dark .via-yellow-50\/70 { --tw-gradient-via: rgba(161, 98, 7, 0.18) !important; }
+        html.dark .via-teal-50, html.dark .via-teal-50\/60 { --tw-gradient-via: rgba(17, 94, 89, 0.22) !important; }
         html.dark .to-white { --tw-gradient-to: #131c2e !important; }
         html.dark .to-emerald-50, html.dark .to-emerald-50\/80, html.dark .to-emerald-50\/70 { --tw-gradient-to: rgba(6, 95, 70, 0.24) !important; }
-        html.dark .to-amber-50\/60 { --tw-gradient-to: rgba(180, 83, 9, 0.22) !important; }
+        html.dark .to-amber-50, html.dark .to-amber-50\/60 { --tw-gradient-to: rgba(180, 83, 9, 0.22) !important; }
 
         /* Preserve Crisp Contrast on Bright Solid Badges & Solid Primary Buttons (Placed LAST to win!) */
         html.dark .bg-amber-400, html.dark .bg-amber-400 *,
@@ -1847,14 +1849,38 @@
             return Boolean(t && !t.isErroneous && !t.isNew && ((t.level || 0) >= 6 || (t.nextReviewDate || 0) > MELE_EXAM_END_MS));
         }
 
-        function getCardExamDayWeight(t) {
-            // Hybrid L4 Exam-Ready + Auto-Locked (> Feb 19, 2027):
-            // Early cards naturally climb L4->L5->L6; any L4/L5/L6 past Feb 19 is 98% Locked-In!
+        function getCardMemoryStabilityDays(t) {
+            if (!t || t.isNew) return 0;
+            const lv = Math.min(Math.max(t.level || 1, 1), 6);
+            const baseS = { 1: 2.0, 2: 5.5, 3: 12.0, 4: 26.0, 5: 55.0, 6: 110.0 }[lv] || 2.0;
+            return isActiveLeechCard(t) ? baseS * 0.78 : baseS;
+        }
+
+        function getCardExamDayWeight(t, referenceNowMs = Date.now()) {
+            // FSRS Time-Aware Stability + Level Reliability Ceiling + Auto-Locked (> Feb 19, 2027):
+            // L1 overdue (~30%) < L1 @80d (~35%) < L1 @7d (~54%) < L1 @1d (~78%) < L3 @1d (~93%) < L4-L6 Locked (98%)!
             if (!t || t.isNew) return 0;
             if ((t.level || 0) >= 6 || (t.nextReviewDate || 0) > MELE_EXAM_END_MS) return 0.98;
             const lv = Math.min(Math.max(t.level || 1, 1), 6);
-            const map = { 1: 0.32, 2: 0.54, 3: 0.75, 4: 0.90, 5: 0.95, 6: 0.98 };
-            return map[lv] || 0.32;
+            const S = getCardMemoryStabilityDays(t);
+            const lastRev = Number(t.lastReviewedDate) || Number(t.graduatedDate) || referenceNowMs;
+            const elapsedDays = Math.max(0.5, (referenceNowMs - lastRev) / MS_PER_DAY);
+            const daysToExam = Math.max(1, (MELE_EXAM_DATE_MS - referenceNowMs) / MS_PER_DAY);
+
+            // FSRS power-law retrievability: R(t, S) = 1 / (1 + t / (9 * S))
+            const rNow = 1 / (1 + elapsedDays / (9 * S));
+            const rExam = 1 / (1 + (elapsedDays + daysToExam) / (9 * S));
+
+            // Stability baseline modulated by current freshness (overdue cards naturally decay!)
+            const baseMap = { 1: 0.35, 2: 0.58, 3: 0.78, 4: 0.91, 5: 0.96, 6: 0.98 };
+            const levelCeil = { 1: 0.84, 2: 0.90, 3: 0.94, 4: 0.97, 5: 0.98, 6: 0.98 }[lv] || 0.84;
+            const stabilityNow = (baseMap[lv] || 0.35) * (0.45 + 0.55 * rNow);
+
+            // Within the final 30 days before Feb 17, FSRS Exam-Day survival (capped by level reliability) smoothly takes over!
+            const nearExamBlend = Math.max(0, Math.min(1, 1 - (daysToExam - 1) / 30));
+            const shortRangeExam = Math.min(0.98, rExam * levelCeil);
+            const combined = stabilityNow * (1 - nearExamBlend) + shortRangeExam * nearExamBlend;
+            return Math.max(0.18, Math.min(0.98, combined));
         }
 
         function mapFolderToPrcSubject(folderId) {
@@ -1882,50 +1908,38 @@
             return { terms: allNonErr, scopeFallback: false };
         }
 
-        // Compute actual Card Addition Rate (cards/day) from history['all'] + live dailyTelemetry.addedToday
-        function computeCardIntakeRate() {
-            const histAll = (state.history && state.history.all) ? state.history.all : {};
-            const dates = Object.keys(histAll).sort().slice(-15);
-            const todayKey = getTodayDateKey();
-            const todayTel = ensureDailyTelemetry(todayKey);
-            const addedTodayLive = Number(todayTel.addedToday) || 0;
-
-            const dailyAdds = [];
-            for (let i = 1; i < dates.length; i++) {
-                const prevTot = Number(histAll[dates[i - 1]]?.total) || 0;
-                const currTot = Number(histAll[dates[i]]?.total) || 0;
-                const dtPrev = new Date(dates[i - 1] + 'T00:00:00');
-                const dtCurr = new Date(dates[i] + 'T00:00:00');
-                const dayGap = Math.max(1, Math.round((dtCurr - dtPrev) / MS_PER_DAY));
-                const rawInc = Math.max(0, currTot - prevTot);
-                // Distribute multi-day gaps evenly; damp single-day bulk imports (>60) for steady ongoing rate
-                const perDayRaw = rawInc / dayGap;
-                const perDayDamped = Math.min(60, perDayRaw);
-                for (let g = 0; g < Math.min(dayGap, 7); g++) {
-                    dailyAdds.push({ date: dates[i], raw: perDayRaw, damped: perDayDamped });
+        // Compute ACTUAL New Cards Tried Rate (cards/day) strictly from graduatedDate (NEVER untried bulk DB adds!)
+        function computeCardIntakeRate(termsList = state.terms) {
+            const todayStart = getTodayStart();
+            const toLocalKey = (ts) => {
+                const d = new Date(ts);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            };
+            const byDay = {};
+            (termsList || []).forEach(t => {
+                if (!t || t.isErroneous || t.isNew) return;
+                const gts = Number(t.graduatedDate) || 0;
+                if (gts > 0) {
+                    const dk = toLocalKey(gts);
+                    byDay[dk] = (byDay[dk] || 0) + 1;
                 }
-            }
-            if (addedTodayLive > 0 && (dates.length === 0 || dates[dates.length - 1] !== todayKey)) {
-                dailyAdds.push({ date: todayKey, raw: addedTodayLive, damped: Math.min(60, addedTodayLive) });
+            });
+
+            const last14 = [];
+            for (let off = 13; off >= 0; off--) {
+                const dk = toLocalKey(todayStart - off * MS_PER_DAY);
+                const cnt = byDay[dk] || 0;
+                last14.push({ date: dk, raw: cnt, damped: Math.min(120, cnt) });
             }
 
-            let raw14dRate = 0;
-            let steadyAutoRate = 0;
-            let addedLast7d = 0;
-            if (dailyAdds.length > 0) {
-                const last14 = dailyAdds.slice(-14);
-                raw14dRate = last14.reduce((a, x) => a + x.raw, 0) / last14.length;
-                const recent7 = last14.slice(-7);
-                const older7 = last14.slice(0, Math.max(0, last14.length - 7));
-                const avgRecent = recent7.reduce((a, x) => a + x.damped, 0) / recent7.length;
-                const avgOlder = older7.length > 0 ? older7.reduce((a, x) => a + x.damped, 0) / older7.length : avgRecent;
-                steadyAutoRate = Math.round((avgRecent * 0.65 + avgOlder * 0.35) * 10) / 10;
-                addedLast7d = Math.round(recent7.reduce((a, x) => a + x.raw, 0));
-            } else {
-                steadyAutoRate = addedTodayLive;
-                raw14dRate = addedTodayLive;
-                addedLast7d = addedTodayLive;
-            }
+            const recent7 = last14.slice(-7);
+            const older7 = last14.slice(0, 7);
+            const addedLast7d = recent7.reduce((a, x) => a + x.raw, 0);
+            const addedTodayLive = last14[last14.length - 1]?.raw || 0;
+            const raw14dRate = last14.reduce((a, x) => a + x.raw, 0) / 14;
+            const avgRecentDamped = recent7.reduce((a, x) => a + x.damped, 0) / 7;
+            const avgOlderDamped = older7.reduce((a, x) => a + x.damped, 0) / 7;
+            const steadyAutoRate = Math.round((avgRecentDamped * 0.60 + avgOlderDamped * 0.40) * 10) / 10;
 
             const isCustom = state.intakeRateMode === 'custom';
             const effectiveRate = isCustom
@@ -2030,11 +2044,15 @@
             const scope = scopeOverride || state.topnotcherScope || 'full';
             const { terms: scopedTerms, scopeFallback } = getTopnotcherScopedTerms(termsOverride || state.terms, scope);
             const total = scopedTerms.length;
+            // Pure Actual Tried Cards ONLY (excludes untried bulk-added cards from Mastery % penalty!)
+            const triedTerms = scopedTerms.filter(t => !t.isNew);
+            const untriedCount = Math.max(0, total - triedTerms.length);
+            const masteryPool = triedTerms.length > 0 ? triedTerms : scopedTerms;
 
-            // --- Pillar 1 (45%): Exam-Day Mastery (PRC-weighted 35% PIPE, 35% MDSP, 30% MESL; fallback unweighted) ---
+            // --- Pillar 1 (45%): Exam-Day Mastery on ACTUAL TRIED CARDS (PRC-weighted 35% PIPE, 35% MDSP, 30% MESL) ---
             const PRC_WEIGHTS = { PIPE: 0.35, MDSP: 0.35, MESL: 0.30 };
             const subjectBuckets = { PIPE: [], MDSP: [], MESL: [], UNMAPPED: [] };
-            scopedTerms.forEach(t => {
+            masteryPool.forEach(t => {
                 const subj = mapFolderToPrcSubject(t.folderId);
                 subjectBuckets[subj].push(t);
             });
@@ -2052,7 +2070,7 @@
             const mappedSubjects = Object.keys(subjectStats);
             const isPrcWeighted = mappedSubjects.length >= 2;
             let masteryPct = 0;
-            if (total > 0) {
+            if (masteryPool.length > 0) {
                 if (isPrcWeighted) {
                     let wSum = 0, wTotal = 0;
                     mappedSubjects.forEach(subj => {
@@ -2061,19 +2079,19 @@
                     });
                     masteryPct = wTotal > 0 ? (wSum / wTotal) : 0;
                 } else {
-                    masteryPct = (scopedTerms.reduce((a, t) => a + getCardExamDayWeight(t), 0) / total) * 100;
+                    masteryPct = (masteryPool.reduce((a, t) => a + getCardExamDayWeight(t), 0) / masteryPool.length) * 100;
                 }
             }
 
             // Find weakest subject or weakest folder for Biggest Drag & Daily Orders
-            let weakestTarget = { name: 'All Sets', type: 'all', pct: masteryPct, folderIds: null, l12Count: scopedTerms.filter(t => !t.isNew && (t.level || 0) <= 2).length };
+            let weakestTarget = { name: 'All Sets', type: 'all', pct: masteryPct, folderIds: null, l12Count: triedTerms.filter(t => (t.level || 0) <= 2).length };
             if (mappedSubjects.length >= 2) {
                 const worstSubj = mappedSubjects.sort((a, b) => subjectStats[a].pct - subjectStats[b].pct)[0];
                 const subjFolderIds = (state.folders || []).filter(f => mapFolderToPrcSubject(f.id) === worstSubj).map(f => f.id);
                 weakestTarget = { name: worstSubj, type: 'subject', pct: subjectStats[worstSubj].pct, folderIds: subjFolderIds, l12Count: subjectStats[worstSubj].l12Count };
             } else {
                 const byFolder = {};
-                scopedTerms.forEach(t => {
+                masteryPool.forEach(t => {
                     if (!byFolder[t.folderId]) byFolder[t.folderId] = [];
                     byFolder[t.folderId].push(t);
                 });
@@ -2091,36 +2109,36 @@
             const sharpnessPct = sharpnessObj.pct;
 
             // --- Pillar 3 (15%): Leech Control ---
-            const reviewedCards = scopedTerms.filter(t => !t.isNew).length;
-            const activeLeechesList = scopedTerms.filter(isActiveLeechCard);
+            const reviewedCards = triedTerms.length;
+            const activeLeechesList = triedTerms.filter(isActiveLeechCard);
             const activeLeeches = activeLeechesList.length;
             const leechControlPct = reviewedCards > 0
                 ? Math.max(0, 100 - (activeLeeches / reviewedCards) * 200)
                 : 100;
 
-            // --- Pillar 4 (15%): Feb 2027 Trajectory (Factors in Card Addition Rate!) ---
+            // --- Pillar 4 (15%): Feb 2027 Trajectory (Based ONLY on Actual Tried Cards + Actual New Tried/Day Rate!) ---
             const todayStart = getTodayStart();
             const daysLeftToExam = Math.max(1, Math.ceil((MELE_EXAM_DATE_MS - todayStart) / MS_PER_DAY));
             const weeklyAvgQuota = Math.round(Object.values(state.weeklyTargets || {}).reduce((a, v) => a + (Number(v) || 80), 0) / 7) || state.forecastQuota || 60;
             const real7dMedian = get7DayMedianDailyCards(activityOverride || state.activityLog);
-            // Trust actual pace when studying harder than default Mon-Sun targets; gently nudge up if targets exceed recent median
             const effectiveQuota = Math.max(25, Math.max(real7dMedian, Math.round(real7dMedian * 0.75 + weeklyAvgQuota * 0.25)));
 
-            // Factor card intake rate up until the final 14-day Hybrid L4 exam lock-in freeze before Feb 17, 2027
-            const intakeInfo = computeCardIntakeRate();
+            // Factor ACTUAL new cards tried rate (graduatedDate) up until the final 14-day Lock-In freeze before Feb 17, 2027
+            const intakeInfo = computeCardIntakeRate(termsOverride || state.terms);
             const intakeWindowDays = Math.max(0, daysLeftToExam - 14);
-            const scopeShare = (state.terms && state.terms.length > 0) ? Math.min(1, total / Math.max(1, state.terms.filter(t => !t.isErroneous).length)) : 1;
+            const allTriedAll = (termsOverride || state.terms || []).filter(t => !t.isErroneous && !t.isNew).length;
+            const scopeShare = allTriedAll > 0 ? Math.min(1, reviewedCards / allTriedAll) : 1;
             const scopedIntakeRate = Math.round(intakeInfo.effectiveRate * scopeShare * 10) / 10;
             const projectedFutureCards = Math.round(scopedIntakeRate * intakeWindowDays);
-            const projectedExamBankSize = total + projectedFutureCards;
+            const projectedExamBankSize = reviewedCards + projectedFutureCards;
 
-            const workloadInfo = estimateWorkloadToL5(scopedTerms, effectiveQuota, projectedFutureCards);
+            const workloadInfo = estimateWorkloadToL5(triedTerms, effectiveQuota, projectedFutureCards);
             const projectedDaysToL5 = workloadInfo.days;
             const safeRunwayDays = Math.max(7, daysLeftToExam - 7); // Finish mastery 1 week before exam day
             const requiredDailyReviews = Math.max(15, Math.ceil(workloadInfo.totalWorkUnits / safeRunwayDays));
             const paceMarginPerDay = effectiveQuota - requiredDailyReviews;
 
-            const trajectoryPct = total > 0
+            const trajectoryPct = reviewedCards > 0
                 ? Math.min(100, (daysLeftToExam / Math.max(1, projectedDaysToL5)) * 100)
                 : 0;
 
@@ -2134,19 +2152,19 @@
             else if (score >= 80) tier = { label: 'Strong Contender', color: 'text-blue-700', bg: 'bg-blue-100 border-blue-300', icon: '🔥' };
             else if (score >= 70) tier = { label: 'Passer Zone', color: 'text-teal-700', bg: 'bg-teal-100 border-teal-300', icon: '✅' };
 
-            // --- 3 Hard Gates ---
+            // --- 3 Hard Gates (Untried bulk imports never fail Coverage once >= 1,500 cards are actually tried!) ---
             const coveragePct = total > 0 ? (reviewedCards / total) * 100 : 0;
             const gate1Pass = isPrcWeighted
                 ? mappedSubjects.every(s => subjectStats[s].pct >= 80)
                 : masteryPct >= 80;
-            const gate2Pass = coveragePct >= 85;
+            const gate2Pass = coveragePct >= 85 || reviewedCards >= 1500;
             const gate3Pass = sharpnessPct >= 85;
             const gatesPassedCount = [gate1Pass, gate2Pass, gate3Pass].filter(Boolean).length;
 
-            // --- Projected Feb 2027 Standing (Forward SRS Capacity Physics — No Double Penalty!) ---
+            // --- Projected Feb 2027 Standing (Forward SRS Capacity Physics on Actual Tried Cards + Future Tried Rate!) ---
             const totalCapacity = effectiveQuota * daysLeftToExam;
-            const completionFrac = total > 0 ? Math.min(1, totalCapacity / Math.max(1, workloadInfo.totalWorkUnits)) : 0;
-            const currentMasteryUnits = total * (masteryPct / 100);
+            const completionFrac = reviewedCards > 0 ? Math.min(1, totalCapacity / Math.max(1, workloadInfo.totalWorkUnits)) : 0;
+            const currentMasteryUnits = reviewedCards * (masteryPct / 100);
             const targetMasteryUnits = projectedExamBankSize * 0.96;
             const remainingMasteryUnits = Math.max(0, targetMasteryUnits - currentMasteryUnits);
             const projMastery = projectedExamBankSize > 0
@@ -2198,9 +2216,9 @@
             ].sort((a, b) => b.loss - a.loss);
             const biggestDrag = drags[0];
 
-            // Locked-In for Feb 2027 metrics
-            const lockedCount = scopedTerms.filter(isLockedForFeb2027).length;
-            const lockedPct = total > 0 ? Math.round((lockedCount / total) * 100) : 0;
+            // Locked-In for Feb 2027 metrics (Pure Tried Cards Only — untried bulk imports never drag Locked %!)
+            const lockedCount = triedTerms.filter(isLockedForFeb2027).length;
+            const lockedPct = reviewedCards > 0 ? Math.round((lockedCount / reviewedCards) * 100) : 0;
 
             return {
                 scope,
@@ -2209,6 +2227,7 @@
                 tier,
                 total,
                 reviewedCards,
+                untriedCount,
                 coveragePct,
                 lockedCount,
                 lockedPct,
@@ -2242,7 +2261,7 @@
                 },
                 gates: {
                     subjects80: { pass: gate1Pass, label: isPrcWeighted ? 'All PRC Subjects ≥80%' : 'Mastery ≥80%' },
-                    coverage85: { pass: gate2Pass, label: `Scope Coverage ≥85% (${coveragePct.toFixed(0)}%)` },
+                    coverage85: { pass: gate2Pass, label: `Tried Cards (${reviewedCards.toLocaleString()} tried${untriedCount > 0 ? ` • ${Math.round(coveragePct)}% vault` : ''})` },
                     sharpness85: { pass: gate3Pass, label: `14d Sharpness ≥85% (${sharpnessPct.toFixed(0)}%)` },
                     passedCount: gatesPassedCount
                 },
@@ -2260,19 +2279,19 @@
         }
 
         function projectFeb2027FromScenario(td, dailyPace, opts = {}) {
-            const total = Math.max(0, td.total || 0);
-            const bank = Math.max(1, (td.intakeInfo && td.intakeInfo.projectedExamBankSize) || total || 1);
+            const triedBase = Math.max(0, td.reviewedCards || 0);
+            const bank = Math.max(1, (td.intakeInfo && td.intakeInfo.projectedExamBankSize) || triedBase || 1);
             const workUnits = Math.max(1, (td.workloadInfo && td.workloadInfo.totalWorkUnits) || 1);
             const daysLeft = Math.max(1, td.daysLeftToExam || 1);
             const pace = Math.max(15, Number(dailyPace) || 25);
 
             const totalCapacity = pace * daysLeft;
-            const completionFrac = total > 0 ? Math.min(1, totalCapacity / workUnits) : 0;
+            const completionFrac = triedBase > 0 ? Math.min(1, totalCapacity / workUnits) : 0;
             const minSpanFloor = td.projectedDaysToL5 ? Math.min(14, td.projectedDaysToL5) : 10;
             const projDays = Math.max(minSpanFloor, Math.ceil(workUnits / pace));
-            const projTraj = total > 0 ? Math.min(100, (daysLeft / Math.max(1, projDays)) * 100) : 0;
+            const projTraj = triedBase > 0 ? Math.min(100, (daysLeft / Math.max(1, projDays)) * 100) : 0;
 
-            const currentMasteryUnits = total * (((td.pillars && td.pillars.mastery) || 0) / 100);
+            const currentMasteryUnits = triedBase * (((td.pillars && td.pillars.mastery) || 0) / 100);
             const targetMasteryUnits = bank * (opts.masteryCeiling || 0.96);
             const remainingMasteryUnits = Math.max(0, targetMasteryUnits - currentMasteryUnits);
             const projMastery = Math.min(97, ((currentMasteryUnits + remainingMasteryUnits * completionFrac) / bank) * 100);
@@ -2968,10 +2987,10 @@
         };
         window.syncWeeklyTargetsToTopnotcherPace = () => {
             const td = computeTopnotcherIndex();
-            const req = Math.max(40, Math.min(400, td.requiredDailyReviews || 100));
+            const req = Math.max(40, Math.min(800, td.requiredDailyReviews || 100));
             // Keep realistic weekly shape: lighter Sat (0.75x), heavier Sun (1.25x), Mon-Fri (1.0x) -> average = req!
             state.weeklyTargets = {
-                0: Math.min(500, Math.round(req * 1.25)),
+                0: Math.min(1000, Math.round(req * 1.25)),
                 1: req,
                 2: req,
                 3: req,
@@ -2979,6 +2998,7 @@
                 5: req,
                 6: Math.max(25, Math.round(req * 0.75))
             };
+            state.weeklyWaveAvgGoal = req;
             const tel = ensureDailyTelemetry();
             tel.ordersSnapshot = null;
             saveLocalTelemetryOnly(true);
@@ -3126,6 +3146,30 @@
             showToast(msg);
         };
         window.autoShapeWeeklyWave = () => window.applyWeeklyWavePreset('auto');
+        window.matchWeeklyBalancerToPace = (reqAvg) => {
+            const targetAvg = Math.max(40, Math.min(800, Math.round(Number(reqAvg) || 200)));
+            const weeklyTotalGoal = targetAvg * 7;
+            const cur = [0, 1, 2, 3, 4, 5, 6].map(d => Math.max(25, Number(state.weeklyTargets && state.weeklyTargets[d]) || 100));
+            const curSum = cur.reduce((a, b) => a + b, 0) || 700;
+            const shaped = {};
+            let assigned = 0;
+            [1, 2, 3, 4, 5, 6, 0].forEach((d, idx) => {
+                if (idx < 6) {
+                    const v = Math.max(25, Math.min(1200, Math.round((cur[d] / curSum) * weeklyTotalGoal)));
+                    shaped[d] = v;
+                    assigned += v;
+                } else {
+                    shaped[d] = Math.max(25, Math.min(1200, weeklyTotalGoal - assigned));
+                }
+            });
+            state.weeklyTargets = shaped;
+            state.weeklyWaveAvgGoal = targetAvg;
+            const tel = ensureDailyTelemetry();
+            tel.ordersSnapshot = null;
+            saveLocalTelemetryOnly(true);
+            renderApp();
+            showToast(`⚡ Weekly Balancer scaled to ${targetAvg}/day avg (${weeklyTotalGoal.toLocaleString()}/wk) keeping your Mon–Sun shape!`);
+        };
         window.closeSessionSummaryModal = () => {
             state.sessionSummaryModal = null;
             renderApp();
@@ -10601,9 +10645,11 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
         // --- STREAMING_CHUNK:Topnotcher & MELE 2027 Reusable Widgets ---
         function renderLockedInFeb2027Widget() {
             const activeCards = state.terms.filter(t => !t.isErroneous);
-            const total = activeCards.length;
-            const lockedCount = activeCards.filter(isLockedForFeb2027).length;
-            const lockedPct = total > 0 ? Math.round((lockedCount / total) * 100) : 0;
+            const triedCards = activeCards.filter(t => !t.isNew);
+            const untriedCount = Math.max(0, activeCards.length - triedCards.length);
+            const triedTotal = triedCards.length;
+            const lockedCount = triedCards.filter(isLockedForFeb2027).length;
+            const lockedPct = triedTotal > 0 ? Math.round((lockedCount / triedTotal) * 100) : 0;
             const tel = ensureDailyTelemetry();
             const lockedToday = tel.lockedToday || 0;
             return `
@@ -10614,16 +10660,16 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         </div>
                         <div>
                             <div class="flex items-center gap-2 flex-wrap">
-                                <h3 class="text-sm md:text-base font-black tracking-tight">Locked-In for Feb 2027 MELE</h3>
+                                <h3 class="text-sm md:text-base font-black tracking-tight">Locked-In for Feb 17–19, 2027 MELE</h3>
                                 <span class="px-2 py-0.5 rounded-full text-[11px] font-black ${lockedToday > 0 ? 'bg-emerald-400 text-emerald-950' : 'bg-white/10 text-slate-300'}">+${lockedToday} locked in today</span>
                             </div>
-                            <p class="text-xs text-slate-300 mt-0.5">Cards at Level 6 or scheduled past Feb 2027 (exam-day vault).</p>
+                            <p class="text-xs text-slate-300 mt-0.5">Tried cards at Level 6 or scheduled past Feb 19, 2027 (exam-day vault).${untriedCount > 0 ? ` <span class="text-slate-400">(${untriedCount.toLocaleString()} untried in vault excluded)</span>` : ''}</p>
                         </div>
                     </div>
                     <div class="flex items-center gap-4 shrink-0">
                         <div class="text-right">
-                            <div class="text-2xl md:text-3xl font-black font-mono tabular-nums text-amber-300 leading-none">${lockedCount.toLocaleString()} <span class="text-sm text-slate-400 font-bold">/ ${total.toLocaleString()}</span></div>
-                            <div class="text-[11px] font-extrabold text-emerald-300 mt-1">${lockedPct}% Exam-Vault Locked</div>
+                            <div class="text-2xl md:text-3xl font-black font-mono tabular-nums text-amber-300 leading-none">${lockedCount.toLocaleString()} <span class="text-sm text-slate-400 font-bold">/ ${triedTotal.toLocaleString()}</span></div>
+                            <div class="text-[11px] font-extrabold text-emerald-300 mt-1">${lockedPct}% Tried Cards Locked</div>
                         </div>
                     </div>
                 </div>
@@ -10697,37 +10743,42 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
         function renderIntakeVsBurnGaugeWidget() {
             const tel = ensureDailyTelemetry();
-            const added = tel.addedToday || 0;
-            const cleared = tel.clearedToday || 0;
-            const netFlow = added - cleared; // negative = backlog shrinking (great!), positive = backlog growing
-            const totalFlow = Math.max(1, added + cleared);
-            const addedPct = Math.round((added / totalFlow) * 100);
-            const clearedPct = 100 - addedPct;
+            const todayStart = getTodayStart();
+            // Pure Actual New Cards TRIED Today (graduatedDate >= todayStart), NEVER untried bulk DB imports!
+            const gradTodayCount = state.terms.filter(t => !t.isErroneous && !t.isNew && (Number(t.graduatedDate) || 0) >= todayStart).length;
+            const triedNewToday = Math.max(gradTodayCount, Number(tel.newCardsUnlocked) || 0);
+            const bulkAddedToday = Number(tel.addedToday) || 0;
+            const cleared = Number(tel.clearedToday) || 0;
+            const netFlow = triedNewToday - cleared; // negative = backlog shrinking (great!), positive = active new load expanding
+            const totalFlow = Math.max(1, triedNewToday + cleared);
+            const triedPct = Math.round((triedNewToday / totalFlow) * 100);
+            const clearedPct = 100 - triedPct;
             const flowBadge = netFlow < 0
                 ? `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-700">🔥 ${netFlow} Net Backlog (Shrinking!)</span>`
                 : netFlow > 0
-                    ? `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-rose-100 text-rose-700">+${netFlow} Net Backlog (Growing)</span>`
+                    ? `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-amber-100 text-amber-800">+${netFlow} Net New Load (Expanding)</span>`
                     : `<span class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-slate-100 text-slate-600">⚖️ 0 Net Balanced</span>`;
 
             return `
                 <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-3">
                     <div class="flex flex-wrap items-center justify-between gap-2">
                         <h3 class="text-sm md:text-base font-extrabold text-slate-800 flex items-center gap-2">
-                            <i class="ph-fill ph-scales text-blue-500 text-xl"></i> Intake vs. Burn Rate Gauge (Today)
+                            <i class="ph-fill ph-scales text-blue-500 text-xl"></i> Actual New Tried vs. Burn Rate (Today)
                         </h3>
                         ${flowBadge}
                     </div>
                     <div class="flex items-center justify-between text-xs font-bold">
-                        <span class="text-amber-700">📥 Added Today: <b class="font-mono text-sm">${added}</b></span>
+                        <span class="text-amber-700">✨ New Tried Today: <b class="font-mono text-sm">${triedNewToday}</b></span>
                         <span class="text-emerald-700">🔥 Cleared / Promoted: <b class="font-mono text-sm">${cleared}</b></span>
                     </div>
                     <div class="w-full h-3.5 bg-slate-100 rounded-full overflow-hidden flex border border-slate-200">
-                        ${added + cleared === 0
+                        ${triedNewToday + cleared === 0
                             ? `<div class="w-full h-full bg-slate-200"></div>`
-                            : `<div style="width: ${addedPct}%" class="bg-amber-400 h-full transition-all duration-500" title="Added Today: ${added}"></div>
+                            : `<div style="width: ${triedPct}%" class="bg-amber-400 h-full transition-all duration-500" title="Actual New Cards Tried Today: ${triedNewToday}"></div>
                                <div style="width: ${clearedPct}%" class="bg-emerald-500 h-full transition-all duration-500" title="Cleared/Promoted Today: ${cleared}"></div>`
                         }
                     </div>
+                    ${bulkAddedToday > 0 ? `<div class="text-[11px] font-semibold text-slate-400">📥 ${bulkAddedToday.toLocaleString()} card${bulkAddedToday === 1 ? '' : 's'} imported to vault today — not counted in intake until you actually answer them.</div>` : ''}
                 </div>
             `;
         }
@@ -11068,31 +11119,66 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 return (c + w >= 5) ? (c / (c + w)) * 100 : td.pillars.sharpness;
             };
 
-            // Compute today's unweighted mastery offset so historical estimates stay smoothly aligned to Today's PRC-weighted score
-            const todayBuckets = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+            // FSRS Time-Aware Weights for Roadmap Simulation (mirrors getCardExamDayWeight()!)
+            const FSRS_S = { 1: 2.0, 2: 5.5, 3: 12.0, 4: 26.0, 5: 55.0, 6: 110.0 };
+            const FSRS_BASE_W = { 1: 0.35, 2: 0.58, 3: 0.78, 4: 0.91, 5: 0.96, 6: 0.98 };
+            const FSRS_CEIL_W = { 1: 0.84, 2: 0.90, 3: 0.94, 4: 0.97, 5: 0.98, 6: 0.98 };
+            const FSRS_AVG_ELAPSED = { 1: 0.5, 2: 1.5, 3: 3.5, 4: 7.5, 5: 15.0, 6: 0 };
+            const getFsrsLevelWeights = (daysToExam, revFrac = 1) => {
+                const dExam = Math.max(0, daysToExam);
+                const nearExamBlend = dExam <= 30 ? Math.max(0, Math.min(1, 1 - (dExam - 1) / 30)) : 0;
+                const overdueFactor = 0.72 + 0.28 * Math.max(0, Math.min(1, revFrac));
+                const w = {};
+                for (let lvl = 1; lvl <= 6; lvl++) {
+                    if (lvl === 6 || (lvl === 5 && dExam <= 28) || (lvl === 4 && dExam <= 15)) {
+                        w[lvl] = 0.98;
+                    } else {
+                        const S = FSRS_S[lvl];
+                        const el = FSRS_AVG_ELAPSED[lvl];
+                        const rNow = 1 / (1 + (el / (9 * S)));
+                        const rExam = 1 / (1 + ((el + dExam) / (9 * S)));
+                        const longRange = FSRS_BASE_W[lvl] * (0.45 + 0.55 * rNow * overdueFactor);
+                        const shortRange = Math.min(0.98, rExam * FSRS_CEIL_W[lvl] * overdueFactor);
+                        w[lvl] = longRange * (1 - nearExamBlend) + shortRange * nearExamBlend;
+                    }
+                }
+                return w;
+            };
+
+            const feb17Mid = new Date('2027-02-17T00:00:00').getTime();
+            const feb19Mid = new Date('2027-02-19T00:00:00').getTime();
+            const daysToFeb17Today = Math.max(1, Math.round((feb17Mid - todayStart) / MS_PER_DAY));
+            const todayWeights = getFsrsLevelWeights(daysToFeb17Today, 1);
+
+            // Compute today's unweighted mastery offset strictly on TRIED cards (excludes untried isNew bulk imports!)
+            const todayBuckets = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
             scoped.forEach(t => {
-                if (t.isNew) todayBuckets[0]++;
-                else if (isLockedForFeb2027(t)) todayBuckets[6]++;
+                if (t.isNew) return;
+                if (isLockedForFeb2027(t)) todayBuckets[6]++;
                 else todayBuckets[Math.min(Math.max(t.level || 1, 1), 6)]++;
             });
-            const todayTotal = Math.max(1, scoped.length);
-            const rawUnweightedTodayMastery = ((0.32 * todayBuckets[1] + 0.54 * todayBuckets[2] + 0.75 * todayBuckets[3] + 0.90 * todayBuckets[4] + 0.95 * todayBuckets[5] + 0.98 * todayBuckets[6]) / todayTotal) * 100;
+            const todayTriedBaseline = todayBuckets[1] + todayBuckets[2] + todayBuckets[3] + todayBuckets[4] + todayBuckets[5] + todayBuckets[6];
+            const todayTriedDenom = Math.max(1, todayTriedBaseline);
+            const rawUnweightedTodayMastery = ((todayWeights[1] * todayBuckets[1] + todayWeights[2] * todayBuckets[2] + todayWeights[3] * todayBuckets[3] + todayWeights[4] * todayBuckets[4] + todayWeights[5] * todayBuckets[5] + todayWeights[6] * todayBuckets[6]) / todayTriedDenom) * 100;
             const prcMasteryOffsetToday = td.pillars.mastery - rawUnweightedTodayMastery;
 
             pastKeys.forEach(({ ms, dk }) => {
                 const telDay = state.dailyTelemetry && state.dailyTelemetry[dk];
                 const h = histAll[dk];
                 let actualScore = null;
-                let bankSize = td.total;
+                let bankSize = todayTriedBaseline;
                 if (telDay && typeof telDay.topnotcherRating === 'number') {
                     actualScore = telDay.topnotcherRating;
-                    bankSize = telDay.topnotcherBankSize || (h ? Number(h.total) || td.total : td.total);
+                    const hTried = h ? ((Number(h['1'] ?? h.lvl1) || 0) + (Number(h['2'] ?? h.lvl2) || 0) + (Number(h['3'] ?? h.lvl3) || 0) + (Number(h['4'] ?? h.lvl4) || 0) + (Number(h['5'] ?? h.lvl5) || 0) + (Number(h['6'] ?? h.lvl6) || 0)) : 0;
+                    bankSize = hTried > 0 ? hTried : (telDay.topnotcherBankSize || todayTriedBaseline);
                 } else if (h && Number(h.total) > 0) {
-                    const tot = Number(h.total);
-                    bankSize = tot;
                     const l1 = Number(h['1'] ?? h.lvl1) || 0, l2 = Number(h['2'] ?? h.lvl2) || 0, l3 = Number(h['3'] ?? h.lvl3) || 0;
                     const l4 = Number(h['4'] ?? h.lvl4) || 0, l5 = Number(h['5'] ?? h.lvl5) || 0, l6 = Number(h['6'] ?? h.lvl6) || 0;
-                    const estMastery = Math.max(0, Math.min(98, ((0.32 * l1 + 0.54 * l2 + 0.75 * l3 + 0.90 * l4 + 0.95 * l5 + 0.98 * l6) / tot) * 100 + prcMasteryOffsetToday * 0.65));
+                    const triedTot = Math.max(1, l1 + l2 + l3 + l4 + l5 + l6);
+                    bankSize = triedTot;
+                    const dExamPast = Math.max(1, Math.round((feb17Mid - ms) / MS_PER_DAY));
+                    const wp = getFsrsLevelWeights(dExamPast, 1);
+                    const estMastery = Math.max(0, Math.min(98, ((wp[1] * l1 + wp[2] * l2 + wp[3] * l3 + wp[4] * l4 + wp[5] * l5 + wp[6] * l6) / triedTot) * 100 + prcMasteryOffsetToday * 0.65));
                     const estSharp = Number(getHistSharpnessAt(ms)) || 0;
                     const estLeech = Number(td.pillars.leech) || 0;
                     const estTraj = Number(td.pillars.trajectory) || 0;
@@ -11109,23 +11195,22 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         actualScore: Number(actualScore.toFixed(1)),
                         targetScore: null, // filled below once anchored
                         bankSize,
+                        triedTotal: bankSize,
                         newTriedCum: 0,
                         phase: 'Logged History'
                     });
                 }
             });
 
-            // 2) Simulate Day-by-Day Target Curve from TODAY -> Feb 19, 2027 (MELE Exam Days 1–3!)
-            const feb17Mid = new Date('2027-02-17T00:00:00').getTime();
-            const feb19Mid = new Date('2027-02-19T00:00:00').getTime();
+            // 2) Simulate Day-by-Day Target Curve from TODAY -> Feb 19, 2027 (MELE Exam Days 1–3!) — PURE TRIED CARDS ONLY!
             const totalFutureDays = Math.max(1, Math.min(180, Math.round((feb19Mid - todayStart) / MS_PER_DAY)));
 
-            let c0 = todayBuckets[0], c1 = todayBuckets[1], c2 = todayBuckets[2], c3 = todayBuckets[3], c4 = todayBuckets[4], c5 = todayBuckets[5], c6 = todayBuckets[6];
+            let c1 = todayBuckets[1], c2 = todayBuckets[2], c3 = todayBuckets[3], c4 = todayBuckets[4], c5 = todayBuckets[5], c6 = todayBuckets[6];
             let simLeeches = td.activeLeeches;
             let simSharp = td.pillars.sharpness;
-            let simCumNewAdded = 0;
+            let simCumNewPlanned = 0;
             let simCumNewTried = 0;
-            const todayTriedBaseline = scoped.filter(t => !t.isNew).length;
+            let expansionDaysCount = 0;
 
             const todayPoint = {
                 dateKey: todayKey,
@@ -11136,10 +11221,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 isExamDay: false,
                 actualScore: Number(td.score.toFixed(1)),
                 targetScore: Number(td.score.toFixed(1)),
-                bankSize: td.total,
+                bankSize: todayTriedBaseline,
                 triedTotal: todayTriedBaseline,
                 newTriedCum: 0,
-                newAddedCum: 0,
+                newPlannedCum: 0,
                 phase: 'Today (Live)'
             };
 
@@ -11155,15 +11240,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 const daysToFeb17 = Math.round((feb17Mid - simMs) / MS_PER_DAY);
                 const isExamDay = simMs >= feb17Mid;
                 const isLockIn = !isExamDay && daysToFeb17 <= freezeDays;
-                const phase = isExamDay ? 'MELE Exam (Feb 17–19)' : (isLockIn ? 'Lock-In Surge (Review Focus)' : 'Expansion (+New Cards)');
+                const phase = isExamDay ? 'MELE Exam (Feb 17–19)' : (isLockIn ? 'Lock-In Surge (Review Focus)' : 'Expansion (+New Tried)');
 
                 const capToday = capByDow[dow] || desiredAvgCap;
                 const dayShare = capToday / Math.max(1, desiredAvgCap);
-
-                // Add planned new cards only during Expansion Phase (until freezeDays before Feb 17)
-                const addToday = (!isExamDay && !isLockIn) ? (plannedNewPerDay * dayShare) : 0;
-                c0 += addToday;
-                simCumNewAdded += addToday;
 
                 // Expected due reviews across SRS intervals (1d, 3d, 7d, 15d, 30d)
                 const due1 = c1 * 0.92;
@@ -11173,15 +11253,19 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 const due5 = c5 / 30;
                 const totalDue = due1 + due2 + due3 + due4 + due5;
 
-                // Serve due reviews first up to daily capacity; leftover capacity unlocks New cards!
+                // Serve due reviews first up to daily capacity; leftover capacity unlocks ACTUAL new cards tried!
                 const revFrac = totalDue > 0 ? Math.min(1, capToday / totalDue) : 1;
                 const remCap = Math.max(0, capToday - totalDue);
-                const unlockedNow = Math.min(c0, remCap * 0.92);
-                c0 = Math.max(0, c0 - unlockedNow);
+                const targetNewToday = (!isExamDay && !isLockIn) ? (plannedNewPerDay * dayShare) : 0;
+                if (!isExamDay && !isLockIn) expansionDaysCount++;
+                simCumNewPlanned += targetNewToday;
+                // Only genuinely tried new cards enter c1 — NO phantom untried c0 pileup dragging Mastery down!
+                const unlockedNow = Math.min(targetNewToday, remCap * 0.95);
                 simCumNewTried += unlockedNow;
 
                 // Progressive accuracy improves cleanly as cards move from L1-L2 to L3-L5 (especially in Lock-In)
-                const maturityFrac = Math.min(1, (c3 + c4 + c5 + c6) / Math.max(1, c0 + c1 + c2 + c3 + c4 + c5 + c6));
+                const simReviewedPre = Math.max(1, c1 + c2 + c3 + c4 + c5 + c6);
+                const maturityFrac = Math.min(1, (c3 + c4 + c5 + c6) / simReviewedPre);
                 const accBoost = isLockIn || isExamDay ? 0.05 : 0;
                 const p1 = Math.min(0.90, 0.72 + maturityFrac * 0.14 + accBoost);
                 const p2 = Math.min(0.93, 0.78 + maturityFrac * 0.12 + accBoost);
@@ -11198,13 +11282,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 const next6 = Math.max(0, c6 + r5 * p5);
                 c1 = next1; c2 = next2; c3 = next3; c4 = next4; c5 = next5; c6 = next6;
 
-                const simTotal = Math.max(1, c0 + c1 + c2 + c3 + c4 + c5 + c6);
                 const simReviewed = Math.max(1, c1 + c2 + c3 + c4 + c5 + c6);
-                // Hybrid L4 + Auto-Locked (> Feb 19): inside final 15 days before Feb 19, L4 cards (+15d) lock past exam day -> 0.98!
-                const l4LockFactor = daysToFeb17 <= 14 ? Math.min(1, (15 - Math.max(0, daysToFeb17)) / 15) : 0;
-                const l4EffWeight = 0.90 + 0.08 * l4LockFactor;
-                const l5EffWeight = daysToFeb17 <= 28 ? 0.98 : 0.95;
-                const rawMastery = ((0.32 * c1 + 0.54 * c2 + 0.75 * c3 + l4EffWeight * c4 + l5EffWeight * c5 + 0.98 * c6) / simTotal) * 100;
+                // FSRS Time-Aware Weights over Pure Tried Cards (L1 1d before exam ≠ L1 1wk before exam ≠ L1 80d before exam!)
+                const wFsrs = getFsrsLevelWeights(Math.max(0, daysToFeb17), revFrac);
+                const rawMastery = ((wFsrs[1] * c1 + wFsrs[2] * c2 + wFsrs[3] * c3 + wFsrs[4] * c4 + wFsrs[5] * c5 + wFsrs[6] * c6) / simReviewed) * 100;
                 // Smoothly decay initial PRC subject imbalance offset as weakest subject catches up
                 const offsetDecay = Math.max(0, 1 - (step / Math.max(20, totalFutureDays * 0.75)));
                 const simMastery = Math.max(0, Math.min(98, rawMastery + prcMasteryOffsetToday * offsetDecay));
@@ -11215,7 +11296,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 const dayAccPct = (dayCorrect / totalRevToday) * 100;
                 simSharp = Math.max(40, Math.min(97, simSharp * (13 / 14) + dayAccPct * (1 / 14)));
 
-                // Leech decay when due load is handled; ticks up if severely overloaded (e.g. testing +200 new/d!)
+                // Leech decay when due load is handled; ticks up only if reviews fall severely behind
                 if (revFrac >= 0.85) {
                     const tamedToday = Math.min(simLeeches, Math.max(0.8, simLeeches * 0.085 + (isLockIn ? 1.5 : 0.6)));
                     simLeeches = Math.max(0, simLeeches - tamedToday);
@@ -11224,17 +11305,16 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 }
                 const simLeechCtrl = Math.max(0, Math.min(100, 100 - (simLeeches / simReviewed) * 200));
 
-                // Smooth Hybrid L4 Trajectory pillar (no artificial Day-1 drop or Feb-17 vertical cliff!)
-                const remWork = c0 * 4.6 + c1 * 3.6 + c2 * 2.4 + c3 * 1.2 + c4 * (daysToFeb17 <= 14 ? 0 : 0.35);
-                const futureRemAdds = Math.max(0, daysToFeb17 - freezeDays) * plannedNewPerDay * 4.6;
+                // Smooth FSRS Trajectory pillar strictly on tried cards + sustainable future tried cards (no Day-1 drop or Feb-17 cliff!)
+                const remWork = c1 * 3.6 + c2 * 2.4 + c3 * 1.2 + c4 * (daysToFeb17 <= 15 ? 0 : 0.35);
+                const effectiveFutureRate = Math.min(plannedNewPerDay, Math.max(10, desiredAvgCap / 4.2));
+                const futureRemAdds = Math.max(0, daysToFeb17 - freezeDays) * effectiveFutureRate * 4.2;
                 const simDaysNeeded = Math.max(1, (remWork + futureRemAdds) / Math.max(25, desiredAvgCap));
                 const simDaysLeft = Math.max(1, daysToFeb17);
                 const rawTraj = Math.min(100, (simDaysLeft / simDaysNeeded) * 100);
                 const examReadinessTraj = simMastery >= 88 ? 100 : Math.min(100, simMastery + 8);
-                // Smoothly blend into exam-day readiness over final 21 days so trajectory never plunges to 0% right before exam day
                 const endBlend = isExamDay ? 1 : Math.max(0, Math.min(1, (21 - daysToFeb17) / 21));
                 const blendedTraj = rawTraj * (1 - endBlend) + examReadinessTraj * endBlend;
-                // Smoothly transition out of Today's live trajectory over first 5 days (no jarring Day-1 cliff)
                 const startBlend = Math.min(1, step / 5);
                 const simTraj = (Number(td.pillars.trajectory) || 0) * (1 - startBlend) + blendedTraj * startBlend;
 
@@ -11249,13 +11329,12 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     isExamDay,
                     actualScore: null,
                     targetScore: Number(targetScore.toFixed(1)),
-                    bankSize: Math.round(simTotal),
+                    bankSize: Math.round(simReviewed),
                     triedTotal: Math.round(todayTriedBaseline + simCumNewTried),
                     newTriedCum: Math.round(simCumNewTried),
-                    newAddedCum: Math.round(simCumNewAdded),
-                    untriedLeft: Math.round(c0),
+                    newPlannedCum: Math.round(simCumNewPlanned),
                     phase,
-                    overloaded: revFrac < 0.78
+                    overloaded: revFrac < 0.80
                 };
                 futurePoints.push(pt);
                 if (!cross80Pt && pt.targetScore >= 80) cross80Pt = pt;
@@ -11272,7 +11351,6 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 const totalLift = Math.max(0, examFeb17Pt.targetScore - startPt.actualScore);
                 pastPoints.forEach(pp => {
                     const frac = Math.max(0, Math.min(1, (pp.ms - startPt.ms) / totalSpanMs));
-                    // Gentle convex curve (slower during expansion, faster in final stretch)
                     pp.targetScore = Number((startPt.actualScore + totalLift * Math.pow(frac, 1.35)).toFixed(1));
                 });
                 const todayFrac = Math.max(0, Math.min(1, (todayStart - startPt.ms) / totalSpanMs));
@@ -11284,6 +11362,17 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             const allPoints = [...pastPoints, todayPoint, ...futurePoints];
             const lockInStartPt = futurePoints.find(p => p.phase === 'Lock-In Surge (Review Focus)') || null;
 
+            // Optimum ~5.0x Capacity Ratio Metrics (for crisp 1-tap Balancer matching!)
+            const roundedCap = Math.round(desiredAvgCap);
+            const optNewAtPace = Math.max(0, Math.round(roundedCap / 5.0));
+            const reqTotalForPlanned = plannedNewPerDay > 0
+                ? Math.min(800, Math.max(roundedCap, Math.ceil((plannedNewPerDay * 5.0) / 10) * 10))
+                : roundedCap;
+            const actualAchievedNewPerDay = expansionDaysCount > 0
+                ? Math.round((simCumNewTried / expansionDaysCount) * 10) / 10
+                : 0;
+            const newCapShortfall = Math.max(0, Math.round(simCumNewPlanned - simCumNewTried));
+
             return {
                 allPoints,
                 pastPoints,
@@ -11293,7 +11382,11 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 autoNewTriedRate,
                 weeklyGoalNewPerDay,
                 freezeDays,
-                desiredAvgCap: Math.round(desiredAvgCap),
+                desiredAvgCap: roundedCap,
+                optNewAtPace,
+                reqTotalForPlanned,
+                actualAchievedNewPerDay,
+                newCapShortfall,
                 cross80Pt,
                 cross90Pt,
                 cross92Pt,
@@ -11401,8 +11494,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             pts.forEach((p, i) => {
                 const cx = getX(i);
                 const tipTxt = p.actualScore !== null
-                    ? `${p.label}: Actual ${p.actualScore}% vs Target ${(p.isToday ? p.designBenchScore : p.targetScore)}% • ${p.bankSize} cards`
-                    : `${p.label} (${p.phase}): Target ${p.targetScore}% • ${p.bankSize.toLocaleString()} cards (+${p.newTriedCum} new tried)`;
+                    ? `${p.label}: Actual ${p.actualScore}% vs Target ${(p.isToday ? p.designBenchScore : p.targetScore)}% • ${p.bankSize.toLocaleString()} tried`
+                    : `${p.label} (${p.phase}): Target ${p.targetScore}% • ${p.triedTotal.toLocaleString()} tried (+${p.newTriedCum.toLocaleString()} new)`;
                 hitColsSvg += `<rect x="${(cx - colW / 2).toFixed(1)}" y="${padT}" width="${colW.toFixed(1)}" height="${plotH}" fill="transparent" class="cursor-pointer" onclick="window.selectRoadmapDate('${p.dateKey}')"><title>${escapeHTML(tipTxt)}</title></rect>`;
             });
 
@@ -11413,8 +11506,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             const selTargetY = getY(selTargetVal);
             const selDelta = selPt.actualScore !== null ? Number((selPt.actualScore - selTargetVal).toFixed(1)) : null;
 
-            const overloadedDaysCount = rm.futurePoints.filter(p => p.overloaded).length;
-            const isOverloadedPlan = rm.examFeb17Pt.targetScore < 88 && (rm.examFeb17Pt.untriedLeft > 80 || overloadedDaysCount >= 14);
+            const needsHigherPace = rm.plannedNewPerDay > rm.optNewAtPace + 5 || rm.newCapShortfall > 100;
 
             return `
             <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
@@ -11423,10 +11515,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         <h2 class="text-base md:text-lg font-extrabold text-slate-900 flex items-center gap-2">
                             <i class="ph-fill ph-path text-amber-500 text-xl"></i> Exam-Ready Rating Roadmap (Actual vs. Target → Feb 17–19, 2027)
                         </h2>
-                        <p class="text-xs text-slate-500 mt-0.5">Kita mo araw-araw kung paano aakyat ang <b>"Kung Bukas na ang Exam"</b> rating mo papuntang <b>90%+</b> habang nagdadagdag ka ng bagong cards.</p>
+                        <p class="text-xs text-slate-500 mt-0.5">Pure <b>actual tried cards</b> + <b>FSRS time-aware memory</b> — L1 card 1 day before exam ≠ L1 card 1 week or 80 days away.</p>
                     </div>
                     <div class="flex flex-wrap items-center gap-1.5 text-[10px] font-black">
-                        <span class="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200">⚡ Hybrid L4 + Locked (&gt;Feb 19)</span>
+                        <span class="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200">⚡ FSRS Time-Aware • Tried Only</span>
                         <span class="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1"><span class="w-2.5 h-1 bg-emerald-500 rounded-full inline-block"></span> Actual</span>
                         <span class="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1"><span class="w-2.5 border-t-2 border-dashed border-amber-500 inline-block"></span> Target Plan</span>
                     </div>
@@ -11453,14 +11545,14 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                             <span class="text-[10px] font-black uppercase tracking-wider text-amber-700 block">🏆 MELE Feb 17–19</span>
                             <span class="text-sm font-black text-amber-900">${rm.examFeb17Pt.targetScore}% → ${rm.examFeb19Pt.targetScore}%</span>
                         </div>
-                        <span class="text-[10px] font-mono font-black text-amber-800 text-right">${rm.examFeb17Pt.triedTotal.toLocaleString()}<br/>cards</span>
+                        <span class="text-[10px] font-mono font-black text-amber-800 text-right">${rm.examFeb17Pt.triedTotal.toLocaleString()}<br/>tried</span>
                     </div>
                 </div>
 
                 <!-- Interactive Simulator Controls: Planned New Cards/Day & Lock-In Cutoff -->
                 <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-[11px]">
                     <div class="flex flex-wrap items-center gap-1.5">
-                        <span class="font-extrabold text-slate-600 mr-0.5">New Cards/Day:</span>
+                        <span class="font-extrabold text-slate-600 mr-0.5">New Tried/Day:</span>
                         <button type="button" onclick="window.setRoadmapNewRate('goal')" class="px-2 py-1 rounded-lg font-black transition-all ${state.roadmapNewRateOverride === null ? 'bg-indigo-600 text-white shadow-xs' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}" title="Follows your Weekly New Cards Goal below (${state.weeklyNewCardsGoal || 200}/wk)">Weekly Goal (+${rm.weeklyGoalNewPerDay}/d)</button>
                         <button type="button" onclick="window.setRoadmapNewRate('pace')" class="px-2 py-1 rounded-lg font-black transition-all ${state.roadmapNewRateOverride === 'pace' ? 'bg-indigo-600 text-white shadow-xs' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}" title="Your actual last-14-day average new cards tried">14d Actual (+${rm.autoNewTriedRate}/d)</button>
                         ${[0, 30, 50, 100, 200].map(r => `
@@ -11480,12 +11572,23 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                 </div>
 
-                ${isOverloadedPlan ? `
-                <div class="px-3.5 py-2 rounded-xl bg-rose-50 border border-rose-200 text-xs font-bold text-rose-700 flex items-center gap-2">
-                    <i class="ph-fill ph-warning-circle text-base shrink-0"></i>
-                    <span>Heads up: Sa <b>+${rm.plannedNewPerDay} new cards/day</b> + <b>${rm.desiredAvgCap} reviews/day</b> pace mo, mag-o-overload ang SRS due queue (hindi lahat mare-review on time). Try <b>+20 to +35 new/day (~200/week)</b> or raise your weekly review capacity below!</span>
+                <!-- Optimum 5x Capacity Ratio Strip (Auto-Match Weekly Balancer!) -->
+                ${needsHigherPace ? `
+                <div class="px-3.5 py-2.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs font-bold text-amber-900 flex flex-wrap items-center justify-between gap-2.5">
+                    <div class="flex items-start gap-2 flex-1 min-w-[220px]">
+                        <i class="ph-fill ph-lightning text-amber-500 text-base shrink-0 mt-0.5"></i>
+                        <span>Sa <b>${rm.desiredAvgCap}/d</b> total pace mo, optimum sweet spot ay <b>~${rm.optNewAtPace} new/d</b> (actual fit: <b>~${rm.actualAchievedNewPerDay} new/d</b> → <b>${rm.examFeb17Pt.triedTotal.toLocaleString()}</b> tried by Feb 17). Para sa full <b>+${rm.plannedNewPerDay} new/d</b> @ 90%+, need ~<b>${rm.reqTotalForPlanned}/d</b> total!</span>
+                    </div>
+                    <button type="button" onclick="window.matchWeeklyBalancerToPace(${rm.reqTotalForPlanned})" class="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-black shadow-xs transition-all active:scale-95 shrink-0">
+                        ⚡ Set Balancer to ${rm.reqTotalForPlanned}/d
+                    </button>
                 </div>
-                ` : ''}
+                ` : `
+                <div class="px-3.5 py-2 rounded-2xl bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-800 flex flex-wrap items-center justify-between gap-2">
+                    <span>✅ <b>Optimum Ratio Match (~5×):</b> At <b>${rm.desiredAvgCap}/d</b> total pace, sweet spot is up to <b>~${rm.optNewAtPace} new/d</b> — your <b>+${rm.plannedNewPerDay} new/d</b> fits cleanly with zero SRS overload!</span>
+                    <span class="font-mono font-black text-emerald-700">${rm.examFeb17Pt.triedTotal.toLocaleString()} tried by Feb 17</span>
+                </div>
+                `}
 
                 <!-- Dual-Line Overlapped SVG Chart -->
                 <div class="w-full overflow-x-auto">
@@ -11942,26 +12045,26 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         <div><span class="text-amber-300 uppercase tracking-wider text-[10px] font-black mr-1.5">Biggest Drag:</span> ${escapeHTML(td.biggestDrag.msg)}</div>
                     </div>
 
-                    <!-- Card Addition Rate & Feb 2027 Topnotcher Pace Reality Check -->
+                    <!-- Actual New Tried Rate & Feb 2027 Topnotcher Pace Reality Check -->
                     <div class="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-2.5">
                         <div class="flex flex-wrap items-center justify-between gap-2">
                             <div class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
                                 <i class="ph-fill ph-trend-up text-cyan-400 text-base"></i>
-                                <span>Card Addition Rate Impact:</span>
+                                <span>Actual New Tried Rate:</span>
                                 <span class="font-mono font-black text-cyan-300">+${td.intakeInfo.effectiveRate}/day</span>
-                                <span class="text-[10px] text-slate-400">(${td.intakeInfo.mode === 'auto' ? `Auto from history • +${td.intakeInfo.addedLast7d} in 7d` : 'Custom rate'})</span>
+                                <span class="text-[10px] text-slate-400">(${td.intakeInfo.mode === 'auto' ? `Auto from tried • +${td.intakeInfo.addedLast7d} tried in 7d` : 'Custom tried rate'})</span>
                             </div>
                             <div class="flex items-center gap-1 flex-wrap text-[10px] font-black">
                                 <button type="button" onclick="window.setIntakeRateMode('auto')" class="px-2 py-1 rounded-lg transition-all ${state.intakeRateMode === 'auto' ? 'bg-cyan-400 text-slate-950' : 'bg-white/10 text-slate-300 hover:bg-white/20'}">Auto (${td.intakeInfo.steadyAutoRate}/d)</button>
-                                ${[0, 10, 20, 35].map(r => `
+                                ${[0, 30, 50, 100].map(r => `
                                     <button type="button" onclick="window.setCustomIntakeRate(${r})" class="px-2 py-1 rounded-lg transition-all ${state.intakeRateMode === 'custom' && Number(state.customIntakeRate) === r ? 'bg-cyan-400 text-slate-950' : 'bg-white/10 text-slate-300 hover:bg-white/20'}">+${r}/d</button>
                                 `).join('')}
                             </div>
                         </div>
                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
                             <div class="px-3 py-2 rounded-xl bg-black/25 border border-white/10">
-                                <div class="text-slate-400 font-bold text-[10px] uppercase">Projected Feb 2027 Bank</div>
-                                <div class="font-mono font-black text-white mt-0.5">${td.intakeInfo.projectedExamBankSize.toLocaleString()} cards <span class="text-cyan-300 font-bold text-[10px]">(+${td.intakeInfo.projectedFutureCards.toLocaleString()} new)</span></div>
+                                <div class="text-slate-400 font-bold text-[10px] uppercase">Projected Feb 17–19 Tried</div>
+                                <div class="font-mono font-black text-white mt-0.5">${td.intakeInfo.projectedExamBankSize.toLocaleString()} tried <span class="text-cyan-300 font-bold text-[10px]">(+${td.intakeInfo.projectedFutureCards.toLocaleString()} new)</span></div>
                             </div>
                             <div class="px-3 py-2 rounded-xl bg-black/25 border border-white/10">
                                 <div class="text-slate-400 font-bold text-[10px] uppercase">Required Daily Pace (Top 1)</div>
@@ -11982,9 +12085,9 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
                 <!-- PRC Subject Weight Breakdown -->
                 <div class="bg-white p-4 md:p-5 rounded-3xl border border-slate-200 shadow-sm space-y-2.5">
-                    <div class="flex items-center justify-between">
+                    <div class="flex flex-wrap items-center justify-between gap-1">
                         <span class="text-xs font-black uppercase tracking-wider text-slate-500">PRC Subject Weighting (35% PIPE • 35% MDSP • 30% MESL)</span>
-                        <span class="text-[11px] font-bold text-slate-400">${td.total} active cards</span>
+                        <span class="text-[11px] font-bold text-slate-400">${td.reviewedCards.toLocaleString()} tried cards${td.untriedCount > 0 ? ` • ${td.untriedCount.toLocaleString()} untried in vault` : ''}</span>
                     </div>
                     <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                         ${prcSubjectPills}
