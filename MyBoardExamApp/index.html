@@ -232,6 +232,7 @@
         html.dark .text-purple-600, html.dark .text-purple-700, html.dark .text-purple-800, html.dark .text-purple-900 { color: #d8b4fe !important; }
         html.dark .text-purple-950 { color: #f3e8ff !important; }
         html.dark .text-green-700, html.dark .text-lime-700 { color: #86efac !important; }
+        html.dark .text-cyan-600 { color: #22d3ee !important; }
         html.dark .bg-lime-50 { background-color: rgba(132, 204, 22, 0.14) !important; }
         html.dark .decoration-blue-600 { text-decoration-color: #60a5fa !important; }
 
@@ -4230,7 +4231,7 @@
                         level: newLevel,
                         nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
-                        graduatedDate: currentCard.graduatedDate || Date.now(),
+                        graduatedDate: currentCard.graduatedDate || (wasNew ? Date.now() : 0),
                         correct: currentCorrect + 1
                     });
                 } else if (answerType === 'correct') {
@@ -4241,7 +4242,7 @@
                         level: newLevel,
                         nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
-                        graduatedDate: currentCard.graduatedDate || Date.now(),
+                        graduatedDate: currentCard.graduatedDate || (wasNew ? Date.now() : 0),
                         correct: currentCorrect + 1
                     });
                 } else {
@@ -4252,7 +4253,7 @@
                         level: 1,
                         nextReviewDate: newNextReview,
                         lastReviewedDate: Date.now(),
-                        graduatedDate: currentCard.graduatedDate || Date.now(),
+                        graduatedDate: currentCard.graduatedDate || (wasNew ? Date.now() : 0),
                         incorrect: currentIncorrect + 1
                     });
                 }
@@ -11678,7 +11679,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             const newTriedByKey = {};
             (state.terms || []).forEach(t => {
                 const gts = Number(t.graduatedDate) || 0;
-                if (!t.isNew && gts >= mondayStart && gts < sundayEnd) {
+                if (!t.isErroneous && !t.isNew && gts >= mondayStart && gts < sundayEnd) {
                     const dk = toLocalKey(gts);
                     newTriedByKey[dk] = (newTriedByKey[dk] || 0) + 1;
                 }
@@ -11696,6 +11697,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 if (ms === todayStart && done === 0) {
                     done = (state.terms || []).filter(t => (t.lastReviewedDate || 0) >= todayStart).length;
                 }
+                const newTriedDay = newTriedByKey[dk] || 0;
                 const target = Math.max(10, Number(state.weeklyTargets && state.weeklyTargets[dow]) || 80);
                 weekDays.push({
                     dow,
@@ -11705,7 +11707,8 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     isToday: ms === todayStart,
                     isFuture: ms > todayStart,
                     done,
-                    newTried: newTriedByKey[dk] || 0,
+                    newTried: newTriedDay,
+                    repeatDone: Math.max(0, done - newTriedDay),
                     target,
                     histAvg: histAvgByDow[dow]
                 });
@@ -11741,6 +11744,10 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
             return {
                 weekDays,
+                todayName: todayObj ? todayObj.name : dowShort[todayDow],
+                todayDone: todayObj ? todayObj.done : 0,
+                todayNewTried: todayObj ? todayObj.newTried : 0,
+                todayRepeatDone: todayObj ? todayObj.repeatDone : 0,
                 histAvgByDow,
                 histDaysByDow,
                 peakDowNames,
@@ -11779,9 +11786,15 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                         : d.isToday
                             ? 'bg-indigo-500'
                             : 'bg-amber-400';
+                const dayTip = d.isFuture
+                    ? `${d.name} target: ${d.target} total reviews`
+                    : `${d.name}: ${d.done} total answers (${d.newTried} new tried + ${d.repeatDone} due/repeat reviews)`;
                 return `
-                <div class="flex flex-col items-center gap-1 flex-1 min-w-[42px]">
-                    <span class="text-[10px] font-mono font-black ${d.done > 0 ? (met ? 'text-emerald-600' : 'text-slate-700') : 'text-slate-400'}">${d.done > 0 ? d.done : (d.isFuture ? '·' : '0')}</span>
+                <div class="flex flex-col items-center gap-1 flex-1 min-w-[42px]" title="${escapeHTML(dayTip)}">
+                    <div class="flex flex-col items-center leading-tight min-h-[24px] justify-end">
+                        <span class="text-[10px] font-mono font-black ${d.done > 0 ? (met ? 'text-emerald-600' : 'text-slate-700') : 'text-slate-400'}">${d.done > 0 ? d.done : (d.isFuture ? '·' : '0')}</span>
+                        ${!d.isFuture && d.newTried > 0 ? `<span class="text-[9px] font-mono font-extrabold text-cyan-600">+${d.newTried}n</span>` : `<span class="text-[9px] font-mono text-transparent select-none">0</span>`}
+                    </div>
                     <div class="relative w-full max-w-[34px] h-24 rounded-xl bg-slate-100 border ${d.isToday ? 'border-indigo-400 ring-2 ring-indigo-200' : 'border-slate-200'} overflow-hidden flex items-end">
                         <div class="w-full rounded-t-lg transition-all duration-500 ${barCls}" style="height: ${Math.max(d.done > 0 ? 6 : 0, doneH)}%"></div>
                         <div class="absolute left-0 right-0 border-t-2 border-dashed border-amber-500 pointer-events-none" style="bottom: ${targetBottom}%" title="Target for ${d.name}: ${d.target}"></div>
@@ -11816,7 +11829,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 <!-- Target Controls + Natural Pattern Badges -->
                 <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
                     <div class="flex flex-wrap items-center gap-1.5">
-                        <span class="font-extrabold text-slate-600">Total Cards/Day Avg:</span>
+                        <span class="font-extrabold text-slate-600">Total Reviews/Day Avg (Due + New):</span>
                         ${[200, 300, 350, 400].map(g => `
                             <button type="button" onclick="window.setWeeklyWaveAvgGoal(${g})" class="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all ${w.avgGoalPerDay === g ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}">${g}/d</button>
                         `).join('')}
@@ -11830,13 +11843,17 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     ` : ''}
                 </div>
 
-                <!-- This Week Mon-Sun Overlap Bars (Actual Bars vs Dashed Shaped Target) -->
+                <!-- This Week Mon-Sun Overlap Bars (Total Reviews = Due/Repeat + New; +Xn shows actual new tried!) -->
                 <div class="space-y-2">
                     <div class="flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
-                        <span class="text-slate-700">This Week (Mon–Sun): <b class="font-mono text-slate-900">${w.thisWeekTotalDone.toLocaleString()} / ${w.weeklyGoalTotal.toLocaleString()}</b> <span class="text-slate-500">(${w.currentWeekAvg}/day avg so far)</span></span>
+                        <span class="text-slate-700">This Week Total Reviews (Mon–Sun): <b class="font-mono text-slate-900">${w.thisWeekTotalDone.toLocaleString()} / ${w.weeklyGoalTotal.toLocaleString()}</b> <span class="text-slate-500">(${w.currentWeekAvg}/day avg so far)</span></span>
                         <span class="px-2.5 py-0.5 rounded-full text-[11px] font-black ${w.weekSurplusOrDeficit >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}">
                             ${w.weekSurplusOrDeficit >= 0 ? `🔥 +${w.weekSurplusOrDeficit.toLocaleString()} ahead of ${w.avgGoalPerDay}/d pace!` : `${Math.abs(w.weekSurplusOrDeficit).toLocaleString()} behind pace`}
                         </span>
+                    </div>
+                    <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-200 text-[11px] font-bold text-indigo-800">
+                        <span>📌 <b>Today (${w.todayName}):</b> <b class="font-mono">${w.todayDone}</b> total answers = <b class="font-mono text-emerald-700">✨ ${w.todayNewTried} new tried</b> + <b class="font-mono text-indigo-700">🔁 ${w.todayRepeatDone} due/repeat</b></span>
+                        <span class="text-[10px] text-slate-500">Top # = all answers • <b class="text-cyan-600">+Xn</b> = new only</span>
                     </div>
                     <div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
                         <div class="h-full rounded-full transition-all duration-500 ${weekPct >= 100 ? 'bg-emerald-500' : 'bg-indigo-500'}" style="width: ${weekPct}%"></div>
@@ -11846,19 +11863,20 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                     <div class="p-3 rounded-2xl ${w.remainingCardsToGoal === 0 ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-indigo-50 border border-indigo-200 text-indigo-900'} text-xs font-bold">
                         ${w.remainingCardsToGoal === 0
-                            ? `🏆 <b>WEEKLY GOAL HIT!</b> Naka-<b>${w.thisWeekTotalDone.toLocaleString()}</b> cards ka na this week (${w.avgGoalPerDay}+/day avg secured!). Pwede ka mag-light recovery day!`
-                            : `💡 <b>Catch-Up Guide:</b> May <b>${w.remainingCardsToGoal.toLocaleString()}</b> cards pa para ma-hit ang <b>${w.weeklyGoalTotal.toLocaleString()}/week</b> (${w.avgGoalPerDay}/day avg) — mga <b>~${w.neededPerRemainingDay}/day</b> sa natitirang <b>${w.catchUpDaysCount}</b> day${w.catchUpDaysCount === 1 ? '' : 's'} (o ibuhos sa Sunday pure-flashcard grind!).`}
+                            ? `🏆 <b>WEEKLY GOAL HIT!</b> Naka-<b>${w.thisWeekTotalDone.toLocaleString()}</b> total reviews ka na this week (${w.avgGoalPerDay}+/day avg secured!). Pwede ka mag-light recovery day!`
+                            : `💡 <b>Catch-Up Guide:</b> May <b>${w.remainingCardsToGoal.toLocaleString()}</b> total reviews pa para ma-hit ang <b>${w.weeklyGoalTotal.toLocaleString()}/week</b> (${w.avgGoalPerDay}/day avg) — mga <b>~${w.neededPerRemainingDay}/day</b> sa natitirang <b>${w.catchUpDaysCount}</b> day${w.catchUpDaysCount === 1 ? '' : 's'} (o ibuhos sa Sunday pure-flashcard grind!).`}
                     </div>
                 </div>
 
                 <!-- Weekly NEW CARDS TRIED Catch-Up Strip (Actual Tried Only — Not Bulk Add!) -->
-                <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
                     <div class="flex flex-wrap items-center justify-between gap-2">
                         <div>
-                            <div class="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                            <div class="text-xs font-extrabold text-slate-800 flex flex-wrap items-center gap-1.5">
                                 <i class="ph-fill ph-sparkle text-emerald-500 text-base"></i>
                                 <span>Weekly New Cards Tried (Intake Only):</span>
                                 <span class="font-mono font-black text-emerald-600">${w.thisWeekNewTried.toLocaleString()} / ${w.weeklyNewGoal.toLocaleString()}</span>
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800">Today (${w.todayName}): +${w.todayNewTried} new</span>
                             </div>
                             <p class="text-[10px] font-semibold text-slate-500 mt-0.5">Bagong cards lang na first-time mong na-unlock this Mon–Sun (hiwalay sa repeat reviews; naka-link sa Roadmap graph sa taas!).</p>
                         </div>
@@ -11872,6 +11890,14 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                     </div>
                     <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                         <div class="h-full bg-emerald-500 rounded-full transition-all duration-500" style="width: ${newWeekPct}%"></div>
+                    </div>
+                    <div class="grid grid-cols-7 gap-1 text-center">
+                        ${w.weekDays.map(d => `
+                            <div class="py-1 px-0.5 rounded-lg border ${d.isToday ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-white border-slate-200 text-slate-600'}">
+                                <div class="text-[9px] font-black ${d.isToday ? 'text-emerald-700' : 'text-slate-400'}">${d.name}</div>
+                                <div class="text-[11px] font-mono font-black ${d.newTried > 0 ? (d.isToday ? 'text-emerald-700' : 'text-slate-800') : 'text-slate-400'}">${d.isFuture ? '·' : `+${d.newTried}`}</div>
+                            </div>
+                        `).join('')}
                     </div>
                     <div class="text-[11px] font-bold text-slate-600">
                         ${w.newRemainingThisWeek === 0
@@ -11889,7 +11915,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             // Keep today's live Topnotcher rating recorded in dailyTelemetry so Actual vs Target graph builds daily history!
             const todayTelSnap = ensureDailyTelemetry();
             todayTelSnap.topnotcherRating = Number(td.score.toFixed(2));
-            todayTelSnap.topnotcherBankSize = td.total;
+            todayTelSnap.topnotcherBankSize = td.reviewedCards;
             const ordInfo = getOrGenerateDailyOrders(td);
             const dualProj = computeDualFeb2027Projections(td, ordInfo);
             const scorePctBar = Math.min(100, Math.max(0, td.score));
