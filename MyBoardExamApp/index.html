@@ -325,7 +325,8 @@
         // --- CONSTANTS ---
         const INTERVALS = { 1: 1, 2: 3, 3: 7, 4: 15, 5: 30, 6: 60 };
         const MS_PER_DAY = 24 * 60 * 60 * 1000;
-        const MELE_EXAM_DATE_MS = new Date('2027-02-15T00:00:00').getTime();
+        const MELE_EXAM_DATE_MS = new Date('2027-02-17T00:00:00').getTime(); // MELE Board Exam: Feb 17–19, 2027
+        const MELE_EXAM_END_MS = new Date('2027-02-19T23:59:59').getTime();
         const MELE_POST_EXAM_MS = new Date('2027-02-28T23:59:59').getTime();
         const OWNER_UNLOCK_PIN = '2027';
         const AVATAR_CHOICES = ['⚙️', '🔧', '🚀', '⚡', '🔥', '🧠', '🛠️', '🏆', '🦾', '📐', '💡', '🎯'];
@@ -380,6 +381,11 @@
             hudStakesMode: 'stakes', // 'stakes' (Pre-Answer Stakes) | 'clean' (Clean Exam / Post-Reveal Only)
             queueMode: 'smart', // 'smart' (Warm-Up + Interleaved Leeches) | 'random'
             weeklyTargets: { 0: 120, 1: 80, 2: 80, 3: 80, 4: 80, 5: 80, 6: 50 }, // Sun(0)..Sat(6) adaptive daily targets
+            weeklyWaveAvgGoal: 200, // Desired daily average total cards/day across the week (e.g., 200/d = 1,400/wk)
+            weeklyNewCardsGoal: 200, // Desired weekly new cards tried (graduatedDate-based)
+            roadmapSelectedDate: null, // Selected YYYY-MM-DD on Actual vs Target Rating Roadmap graph
+            roadmapNewRateOverride: null, // null = Auto from pace, or custom number (0, 15, 30, 50, 200)
+            roadmapFreezeDaysBefore: 21, // Days before Feb 17 when new additions pause for final Lock-In surge (21 | 14 | 0)
             showWeeklyTargetEditor: false,
             showYesterdayOrders: false,
             sessionLastImpact: null, // { delta, dodgedOrMissed, type, isRushed, label, cardId }
@@ -653,6 +659,10 @@
                     if (tp.weeklyTargets && typeof tp.weeklyTargets === 'object') {
                         state.weeklyTargets = { ...state.weeklyTargets, ...tp.weeklyTargets };
                     }
+                    if (typeof tp.weeklyWaveAvgGoal === 'number' && tp.weeklyWaveAvgGoal > 0) state.weeklyWaveAvgGoal = tp.weeklyWaveAvgGoal;
+                    if (typeof tp.weeklyNewCardsGoal === 'number' && tp.weeklyNewCardsGoal >= 0) state.weeklyNewCardsGoal = tp.weeklyNewCardsGoal;
+                    if (typeof tp.roadmapFreezeDaysBefore === 'number') state.roadmapFreezeDaysBefore = tp.roadmapFreezeDaysBefore;
+                    if (tp.roadmapNewRateOverride === null || typeof tp.roadmapNewRateOverride === 'number') state.roadmapNewRateOverride = tp.roadmapNewRateOverride;
                 } catch (e) {}
             }
             if (savedDailyTel) {
@@ -811,7 +821,11 @@
                 deliberateAccurateToday: maxNum(localDay.deliberateAccurateToday, cloudDay.deliberateAccurateToday),
                 leechSurgeriesDone: maxNum(localDay.leechSurgeriesDone, cloudDay.leechSurgeriesDone),
                 ordersSnapshot: pickedSnapshot ? JSON.parse(JSON.stringify(pickedSnapshot)) : null,
-                ordersClearedFlags: mergedFlags
+                ordersClearedFlags: mergedFlags,
+                topnotcherRating: typeof primary.topnotcherRating === 'number'
+                    ? primary.topnotcherRating
+                    : (typeof cloudDay.topnotcherRating === 'number' ? cloudDay.topnotcherRating : (typeof localDay.topnotcherRating === 'number' ? localDay.topnotcherRating : null)),
+                topnotcherBankSize: maxNum(localDay.topnotcherBankSize, cloudDay.topnotcherBankSize)
             };
         }
 
@@ -846,7 +860,11 @@
                 customIntakeRate: state.customIntakeRate,
                 hudStakesMode: state.hudStakesMode,
                 queueMode: state.queueMode,
-                weeklyTargets: state.weeklyTargets
+                weeklyTargets: state.weeklyTargets,
+                weeklyWaveAvgGoal: state.weeklyWaveAvgGoal,
+                weeklyNewCardsGoal: state.weeklyNewCardsGoal,
+                roadmapFreezeDaysBefore: state.roadmapFreezeDaysBefore,
+                roadmapNewRateOverride: state.roadmapNewRateOverride
             }));
             localStorage.setItem('elementVaultDailyTelemetry', JSON.stringify(state.dailyTelemetry || {}));
             localStorage.setItem('elementVaultOrderThrottle', JSON.stringify(state.orderThrottle || {}));
@@ -1027,6 +1045,10 @@
                         if (tp.weeklyTargets && typeof tp.weeklyTargets === 'object') {
                             state.weeklyTargets = { ...state.weeklyTargets, ...tp.weeklyTargets };
                         }
+                        if (typeof tp.weeklyWaveAvgGoal === 'number' && tp.weeklyWaveAvgGoal > 0) state.weeklyWaveAvgGoal = tp.weeklyWaveAvgGoal;
+                        if (typeof tp.weeklyNewCardsGoal === 'number' && tp.weeklyNewCardsGoal >= 0) state.weeklyNewCardsGoal = tp.weeklyNewCardsGoal;
+                        if (typeof tp.roadmapFreezeDaysBefore === 'number') state.roadmapFreezeDaysBefore = tp.roadmapFreezeDaysBefore;
+                        if (tp.roadmapNewRateOverride === null || typeof tp.roadmapNewRateOverride === 'number') state.roadmapNewRateOverride = tp.roadmapNewRateOverride;
                     }
                     if (data.playerProfile && typeof data.playerProfile === 'object') {
                         state.playerProfile = { ...state.playerProfile, ...data.playerProfile };
@@ -1103,7 +1125,11 @@
                             customIntakeRate: state.customIntakeRate,
                             hudStakesMode: state.hudStakesMode,
                             queueMode: state.queueMode,
-                            weeklyTargets: state.weeklyTargets
+                            weeklyTargets: state.weeklyTargets,
+                            weeklyWaveAvgGoal: state.weeklyWaveAvgGoal,
+                            weeklyNewCardsGoal: state.weeklyNewCardsGoal,
+                            roadmapFreezeDaysBefore: state.roadmapFreezeDaysBefore,
+                            roadmapNewRateOverride: state.roadmapNewRateOverride
                         },
                         playerProfile: state.playerProfile || {},
                         isOwnerUnlocked: Boolean(state.isOwnerUnlocked),
@@ -3002,6 +3028,79 @@
             showToast("☕ Claimed 1 Clean Break! Stretch, hydrate, then come back sharp!");
             renderApp();
         };
+        window.selectRoadmapDate = (dateKey) => {
+            state.roadmapSelectedDate = dateKey || null;
+            renderApp();
+        };
+        window.setRoadmapNewRate = (val) => {
+            if (val === 'auto' || val === null || val === '') {
+                state.roadmapNewRateOverride = null;
+            } else {
+                state.roadmapNewRateOverride = Math.max(0, Math.min(250, Number(val) || 0));
+            }
+            saveLocalTelemetryOnly(true);
+            renderApp();
+        };
+        window.setRoadmapFreezeDays = (days) => {
+            state.roadmapFreezeDaysBefore = Math.max(0, Math.min(45, Number(days) || 0));
+            saveLocalTelemetryOnly(true);
+            renderApp();
+        };
+        window.setWeeklyWaveAvgGoal = (val) => {
+            const n = Math.max(30, Math.min(500, parseInt(val, 10) || 200));
+            state.weeklyWaveAvgGoal = n;
+            saveLocalTelemetryOnly(true);
+            renderApp();
+        };
+        window.setWeeklyNewCardsGoal = (val) => {
+            const n = Math.max(0, Math.min(2000, parseInt(val, 10) || 0));
+            state.weeklyNewCardsGoal = n;
+            saveLocalTelemetryOnly(true);
+            renderApp();
+        };
+        window.autoShapeWeeklyWave = () => {
+            const avgGoal = Math.max(30, Math.min(500, Number(state.weeklyWaveAvgGoal) || 200));
+            const weeklyTotalGoal = avgGoal * 7;
+            const wave = computeWeeklyWaveAnalytics();
+            // Use user's real Mon-Sun historical energy pattern if >= 3 weekdays have logs; else use realistic natural wave
+            const loggedDows = [0, 1, 2, 3, 4, 5, 6].filter(d => wave.histDaysByDow[d] > 0);
+            const fallbackWeights = { 0: 1.25, 1: 0.85, 2: 0.95, 3: 1.08, 4: 0.95, 5: 1.12, 6: 0.80 }; // Sun..Sat avg = 1.0
+            let weights = { ...fallbackWeights };
+
+            if (loggedDows.length >= 3) {
+                const knownVals = loggedDows.map(d => wave.histAvgByDow[d]);
+                const meanKnown = Math.max(1, knownVals.reduce((a, b) => a + b, 0) / knownVals.length);
+                [0, 1, 2, 3, 4, 5, 6].forEach(d => {
+                    if (wave.histDaysByDow[d] > 0) {
+                        const rawRatio = wave.histAvgByDow[d] / meanKnown;
+                        // Blend 70% real energy ratio + 30% flat 1.0, clamped 0.60x..1.40x so light days stay realistic & peak days stay achievable
+                        weights[d] = Math.max(0.60, Math.min(1.40, rawRatio * 0.70 + 0.30));
+                    } else {
+                        weights[d] = 1.0;
+                    }
+                });
+            }
+
+            const wSum = Object.values(weights).reduce((a, b) => a + b, 0) || 7;
+            const shaped = {};
+            let assigned = 0;
+            [1, 2, 3, 4, 5, 6, 0].forEach((d, idx) => {
+                if (idx < 6) {
+                    const v = Math.max(25, Math.round((weights[d] / wSum) * weeklyTotalGoal));
+                    shaped[d] = v;
+                    assigned += v;
+                } else {
+                    shaped[d] = Math.max(25, weeklyTotalGoal - assigned);
+                }
+            });
+
+            state.weeklyTargets = shaped;
+            const tel = ensureDailyTelemetry();
+            tel.ordersSnapshot = null;
+            saveLocalTelemetryOnly(true);
+            renderApp();
+            showToast(`🌊 Mon–Sun wave shaped to ${avgGoal}/day avg (${weeklyTotalGoal.toLocaleString()}/week) matching your peak & light days!`);
+        };
         window.closeSessionSummaryModal = () => {
             state.sessionSummaryModal = null;
             renderApp();
@@ -4192,7 +4291,10 @@
 
             // --- Feature 2: Live Top 1 Impact Delta + Game Animations & Haptics (Owner-Only!) ---
             if (state.isOwnerUnlocked) {
-                const topAfter = computeTopnotcherIndex().score;
+                const topAfterObj = computeTopnotcherIndex();
+                const topAfter = topAfterObj.score;
+                tel.topnotcherRating = Number(topAfter.toFixed(2));
+                tel.topnotcherBankSize = topAfterObj.total;
                 const actualDelta = topAfter - topBefore;
                 const isRushedMiss = answerType === 'wrong' && rawSec < 3.5;
 
@@ -9237,7 +9339,7 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
                 <div class="p-4 md:p-5 rounded-2xl bg-gradient-to-r from-indigo-50 to-emerald-50 border-2 border-indigo-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div class="space-y-1">
                         <div class="flex flex-wrap items-center gap-2">
-                            <span class="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-black uppercase tracking-wider">📅 Feb 15, 2027 Projection</span>
+                            <span class="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-black uppercase tracking-wider">📅 Feb 17–19, 2027 Projection</span>
                             <span class="text-[11px] font-extrabold text-indigo-700">${daysLeftFeb2027} days left • Using ${activeBasisMeta.label} (${selectedNewRate.toFixed(1)}/day)</span>
                         </div>
                         <div class="flex items-baseline gap-2 flex-wrap pt-0.5">
@@ -10881,9 +10983,753 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
             `;
         }
 
+        // --- FEATURE: ACTUAL VS. TARGET RATING ROADMAP GRAPH (Today -> Feb 17–19, 2027) ---
+        function computeTopnotcherRoadmapSeries(td) {
+            const todayStart = getTodayStart();
+            const todayKey = getTodayDateKey();
+            const toLocalKey = (ms) => {
+                const d = new Date(ms);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            };
+            const formatShort = (ms) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+            // Compute user's real 14d New Cards Tried/Day (based on graduatedDate, not bulk adds!)
+            const scoped = getTopnotcherScopedTerms(state.terms, td.scope).terms;
+            const cutoff14Ms = todayStart - 13 * MS_PER_DAY;
+            const gradLast14Count = scoped.filter(t => !t.isNew && (Number(t.graduatedDate) || 0) >= cutoff14Ms).length;
+            const autoNewTriedRate = gradLast14Count > 0
+                ? Math.round((gradLast14Count / 14) * 10) / 10
+                : Math.round(((Number(state.weeklyNewCardsGoal) || 200) / 7) * 10) / 10;
+
+            const plannedNewPerDay = (state.roadmapNewRateOverride !== null && state.roadmapNewRateOverride !== undefined)
+                ? Math.max(0, Math.min(250, Number(state.roadmapNewRateOverride) || 0))
+                : autoNewTriedRate;
+            const freezeDays = Math.max(0, Math.min(45, Number(state.roadmapFreezeDaysBefore ?? 21)));
+
+            // Build Mon-Sun daily capacity wave scaled to max(effectiveQuota, weeklyTargets avg)
+            const rawTargets = [0, 1, 2, 3, 4, 5, 6].map(d => Math.max(25, Number(state.weeklyTargets && state.weeklyTargets[d]) || 80));
+            const rawAvg = rawTargets.reduce((a, b) => a + b, 0) / 7;
+            const desiredAvgCap = Math.max(30, td.effectiveQuota || 80, rawAvg);
+            const capScale = desiredAvgCap / Math.max(1, rawAvg);
+            const capByDow = rawTargets.map(v => Math.max(25, Math.round(v * capScale)));
+
+            // 1) Collect Past Historical Actual Points (up to last 14 days before Today)
+            const histAll = (state.history && state.history.all) ? state.history.all : {};
+            const actLog = state.activityLog || {};
+            const pastPoints = [];
+            const pastKeys = [];
+            for (let off = 14; off >= 1; off--) {
+                const ms = todayStart - off * MS_PER_DAY;
+                const dk = toLocalKey(ms);
+                const telDay = state.dailyTelemetry && state.dailyTelemetry[dk];
+                if ((telDay && typeof telDay.topnotcherRating === 'number') || histAll[dk]) {
+                    pastKeys.push({ ms, dk });
+                }
+            }
+
+            // Helper: reconstruct rolling 14d accuracy ending on dateKey dk
+            const getHistSharpnessAt = (msEnd) => {
+                let c = 0, w = 0;
+                for (let back = 0; back < 14; back++) {
+                    const dk = toLocalKey(msEnd - back * MS_PER_DAY);
+                    const hrs = actLog[dk];
+                    if (hrs && typeof hrs === 'object') {
+                        Object.keys(hrs).forEach(h => { c += Number(hrs[h]?.c) || 0; w += Number(hrs[h]?.w) || 0; });
+                    }
+                }
+                return (c + w >= 5) ? (c / (c + w)) * 100 : td.pillars.sharpness;
+            };
+
+            // Compute today's unweighted mastery offset so historical estimates stay smoothly aligned to Today's PRC-weighted score
+            const todayBuckets = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+            scoped.forEach(t => {
+                if (t.isNew) todayBuckets[0]++;
+                else if (isLockedForFeb2027(t)) todayBuckets[6]++;
+                else todayBuckets[Math.min(Math.max(t.level || 1, 1), 6)]++;
+            });
+            const todayTotal = Math.max(1, scoped.length);
+            const rawUnweightedTodayMastery = ((0.30 * todayBuckets[1] + 0.50 * todayBuckets[2] + 0.72 * todayBuckets[3] + 0.86 * todayBuckets[4] + 0.94 * todayBuckets[5] + 0.98 * todayBuckets[6]) / todayTotal) * 100;
+            const prcMasteryOffsetToday = td.pillars.mastery - rawUnweightedTodayMastery;
+
+            pastKeys.forEach(({ ms, dk }) => {
+                const telDay = state.dailyTelemetry && state.dailyTelemetry[dk];
+                const h = histAll[dk];
+                let actualScore = null;
+                let bankSize = td.total;
+                if (telDay && typeof telDay.topnotcherRating === 'number') {
+                    actualScore = telDay.topnotcherRating;
+                    bankSize = telDay.topnotcherBankSize || (h ? Number(h.total) || td.total : td.total);
+                } else if (h && Number(h.total) > 0) {
+                    const tot = Number(h.total);
+                    bankSize = tot;
+                    const l1 = Number(h['1'] ?? h.lvl1) || 0, l2 = Number(h['2'] ?? h.lvl2) || 0, l3 = Number(h['3'] ?? h.lvl3) || 0;
+                    const l4 = Number(h['4'] ?? h.lvl4) || 0, l5 = Number(h['5'] ?? h.lvl5) || 0, l6 = Number(h['6'] ?? h.lvl6) || 0;
+                    const estMastery = Math.max(0, Math.min(98, ((0.30 * l1 + 0.50 * l2 + 0.72 * l3 + 0.86 * l4 + 0.94 * l5 + 0.98 * l6) / tot) * 100 + prcMasteryOffsetToday * 0.65));
+                    const estSharp = Number(getHistSharpnessAt(ms)) || 0;
+                    const estLeech = Number(td.pillars.leech) || 0;
+                    const estTraj = Number(td.pillars.trajectory) || 0;
+                    actualScore = Math.max(0, Math.min(100, estMastery * 0.45 + estSharp * 0.25 + estLeech * 0.15 + estTraj * 0.15));
+                }
+                if (actualScore !== null) {
+                    pastPoints.push({
+                        dateKey: dk,
+                        ms,
+                        label: formatShort(ms),
+                        isPast: true,
+                        isToday: false,
+                        isExamDay: false,
+                        actualScore: Number(actualScore.toFixed(1)),
+                        targetScore: null, // filled below once anchored
+                        bankSize,
+                        newTriedCum: 0,
+                        phase: 'Logged History'
+                    });
+                }
+            });
+
+            // 2) Simulate Day-by-Day Target Curve from TODAY -> Feb 19, 2027 (MELE Exam Days 1–3!)
+            const feb17Mid = new Date('2027-02-17T00:00:00').getTime();
+            const feb19Mid = new Date('2027-02-19T00:00:00').getTime();
+            const totalFutureDays = Math.max(1, Math.min(180, Math.round((feb19Mid - todayStart) / MS_PER_DAY)));
+
+            let c0 = todayBuckets[0], c1 = todayBuckets[1], c2 = todayBuckets[2], c3 = todayBuckets[3], c4 = todayBuckets[4], c5 = todayBuckets[5], c6 = todayBuckets[6];
+            let simLeeches = td.activeLeeches;
+            let simSharp = td.pillars.sharpness;
+            let simCumNewAdded = 0;
+            let simCumNewTried = 0;
+            const todayTriedBaseline = scoped.filter(t => !t.isNew).length;
+
+            const todayPoint = {
+                dateKey: todayKey,
+                ms: todayStart,
+                label: 'Today',
+                isPast: false,
+                isToday: true,
+                isExamDay: false,
+                actualScore: Number(td.score.toFixed(1)),
+                targetScore: Number(td.score.toFixed(1)),
+                bankSize: td.total,
+                triedTotal: todayTriedBaseline,
+                newTriedCum: 0,
+                newAddedCum: 0,
+                phase: 'Today (Live)'
+            };
+
+            const futurePoints = [];
+            let cross80Pt = td.score >= 80 ? todayPoint : null;
+            let cross90Pt = td.score >= 90 ? todayPoint : null;
+            let cross92Pt = td.score >= 92 ? todayPoint : null;
+
+            for (let step = 1; step <= totalFutureDays; step++) {
+                const simMs = todayStart + step * MS_PER_DAY;
+                const dk = toLocalKey(simMs);
+                const dow = new Date(simMs).getDay();
+                const daysToFeb17 = Math.round((feb17Mid - simMs) / MS_PER_DAY);
+                const isExamDay = simMs >= feb17Mid;
+                const isLockIn = !isExamDay && daysToFeb17 <= freezeDays;
+                const phase = isExamDay ? 'MELE Exam (Feb 17–19)' : (isLockIn ? 'Lock-In Surge (Review Focus)' : 'Expansion (+New Cards)');
+
+                const capToday = capByDow[dow] || desiredAvgCap;
+                const dayShare = capToday / Math.max(1, desiredAvgCap);
+
+                // Add planned new cards only during Expansion Phase (until freezeDays before Feb 17)
+                const addToday = (!isExamDay && !isLockIn) ? (plannedNewPerDay * dayShare) : 0;
+                c0 += addToday;
+                simCumNewAdded += addToday;
+
+                // Expected due reviews across SRS intervals (1d, 3d, 7d, 15d, 30d)
+                const due1 = c1 * 0.92;
+                const due2 = c2 / 3;
+                const due3 = c3 / 7;
+                const due4 = c4 / 15;
+                const due5 = c5 / 30;
+                const totalDue = due1 + due2 + due3 + due4 + due5;
+
+                // Serve due reviews first up to daily capacity; leftover capacity unlocks New cards!
+                const revFrac = totalDue > 0 ? Math.min(1, capToday / totalDue) : 1;
+                const remCap = Math.max(0, capToday - totalDue);
+                const unlockedNow = Math.min(c0, remCap * 0.92);
+                c0 = Math.max(0, c0 - unlockedNow);
+                simCumNewTried += unlockedNow;
+
+                // Progressive accuracy improves cleanly as cards move from L1-L2 to L3-L5 (especially in Lock-In)
+                const maturityFrac = Math.min(1, (c3 + c4 + c5 + c6) / Math.max(1, c0 + c1 + c2 + c3 + c4 + c5 + c6));
+                const accBoost = isLockIn || isExamDay ? 0.05 : 0;
+                const p1 = Math.min(0.90, 0.72 + maturityFrac * 0.14 + accBoost);
+                const p2 = Math.min(0.93, 0.78 + maturityFrac * 0.12 + accBoost);
+                const p3 = Math.min(0.95, 0.84 + maturityFrac * 0.09 + accBoost);
+                const p4 = Math.min(0.96, 0.88 + maturityFrac * 0.07 + accBoost);
+                const p5 = Math.min(0.97, 0.91 + maturityFrac * 0.05 + accBoost);
+
+                const r1 = due1 * revFrac, r2 = due2 * revFrac, r3 = due3 * revFrac, r4 = due4 * revFrac, r5 = due5 * revFrac;
+                const next1 = Math.max(0, c1 - r1 + unlockedNow + r1 * (1 - p1) + r2 * (1 - p2) + r3 * (1 - p3) + r4 * (1 - p4) + r5 * (1 - p5));
+                const next2 = Math.max(0, c2 - r2 + r1 * p1);
+                const next3 = Math.max(0, c3 - r3 + r2 * p2);
+                const next4 = Math.max(0, c4 - r4 + r3 * p3);
+                const next5 = Math.max(0, c5 - r5 + r4 * p4);
+                const next6 = Math.max(0, c6 + r5 * p5);
+                c1 = next1; c2 = next2; c3 = next3; c4 = next4; c5 = next5; c6 = next6;
+
+                const simTotal = Math.max(1, c0 + c1 + c2 + c3 + c4 + c5 + c6);
+                const simReviewed = Math.max(1, c1 + c2 + c3 + c4 + c5 + c6);
+                const rawMastery = ((0.30 * c1 + 0.50 * c2 + 0.72 * c3 + 0.86 * c4 + 0.94 * c5 + 0.98 * c6) / simTotal) * 100;
+                // Smoothly decay initial PRC subject imbalance offset as weakest subject catches up
+                const offsetDecay = Math.max(0, 1 - (step / Math.max(20, totalFutureDays * 0.75)));
+                const simMastery = Math.max(0, Math.min(98, rawMastery + prcMasteryOffsetToday * offsetDecay));
+
+                // Day review accuracy feeds 14-day rolling sharpness
+                const totalRevToday = Math.max(1, r1 + r2 + r3 + r4 + r5 + unlockedNow);
+                const dayCorrect = r1 * p1 + r2 * p2 + r3 * p3 + r4 * p4 + r5 * p5 + unlockedNow * 0.76;
+                const dayAccPct = (dayCorrect / totalRevToday) * 100;
+                simSharp = Math.max(40, Math.min(97, simSharp * (13 / 14) + dayAccPct * (1 / 14)));
+
+                // Leech decay when due load is handled; ticks up if severely overloaded (e.g. testing +200 new/d!)
+                if (revFrac >= 0.85) {
+                    const tamedToday = Math.min(simLeeches, Math.max(0.8, simLeeches * 0.085 + (isLockIn ? 1.5 : 0.6)));
+                    simLeeches = Math.max(0, simLeeches - tamedToday);
+                } else {
+                    simLeeches = Math.min(simReviewed * 0.35, simLeeches + (1 - revFrac) * 4.5);
+                }
+                const simLeechCtrl = Math.max(0, Math.min(100, 100 - (simLeeches / simReviewed) * 200));
+
+                // Trajectory pillar at day step
+                const remWork = c0 * 6.4 + c1 * 5.0 + c2 * 3.7 + c3 * 2.3 + c4 * 1.15;
+                const futureRemAdds = Math.max(0, daysToFeb17 - freezeDays) * plannedNewPerDay * 6.4;
+                const simDaysNeeded = Math.max(1, (remWork + futureRemAdds) / Math.max(25, desiredAvgCap));
+                const simDaysLeft = Math.max(1, daysToFeb17);
+                const simTraj = isExamDay
+                    ? (simMastery >= 88 ? 100 : Math.min(100, simMastery + 8))
+                    : Math.min(100, (simDaysLeft / simDaysNeeded) * 100);
+
+                const targetScore = Math.max(0, Math.min(99.5, simMastery * 0.45 + simSharp * 0.25 + simLeechCtrl * 0.15 + simTraj * 0.15));
+
+                const pt = {
+                    dateKey: dk,
+                    ms: simMs,
+                    label: formatShort(simMs),
+                    isPast: false,
+                    isToday: false,
+                    isExamDay,
+                    actualScore: null,
+                    targetScore: Number(targetScore.toFixed(1)),
+                    bankSize: Math.round(simTotal),
+                    triedTotal: Math.round(todayTriedBaseline + simCumNewTried),
+                    newTriedCum: Math.round(simCumNewTried),
+                    newAddedCum: Math.round(simCumNewAdded),
+                    untriedLeft: Math.round(c0),
+                    phase,
+                    overloaded: revFrac < 0.78
+                };
+                futurePoints.push(pt);
+                if (!cross80Pt && pt.targetScore >= 80) cross80Pt = pt;
+                if (!cross90Pt && pt.targetScore >= 90) cross90Pt = pt;
+                if (!cross92Pt && pt.targetScore >= 92) cross92Pt = pt;
+            }
+
+            // Fill past target benchmark smoothly from earliest past point toward Feb 17 design slope so Actual vs Target visibly overlap!
+            const examFeb17Pt = futurePoints.find(p => p.dateKey === '2027-02-17') || futurePoints[futurePoints.length - 1] || todayPoint;
+            const examFeb19Pt = futurePoints[futurePoints.length - 1] || todayPoint;
+            if (pastPoints.length > 0) {
+                const startPt = pastPoints[0];
+                const totalSpanMs = Math.max(MS_PER_DAY, feb17Mid - startPt.ms);
+                const totalLift = Math.max(0, examFeb17Pt.targetScore - startPt.actualScore);
+                pastPoints.forEach(pp => {
+                    const frac = Math.max(0, Math.min(1, (pp.ms - startPt.ms) / totalSpanMs));
+                    // Gentle convex curve (slower during expansion, faster in final stretch)
+                    pp.targetScore = Number((startPt.actualScore + totalLift * Math.pow(frac, 1.35)).toFixed(1));
+                });
+                const todayFrac = Math.max(0, Math.min(1, (todayStart - startPt.ms) / totalSpanMs));
+                todayPoint.designBenchScore = Number((startPt.actualScore + totalLift * Math.pow(todayFrac, 1.35)).toFixed(1));
+            } else {
+                todayPoint.designBenchScore = todayPoint.actualScore;
+            }
+
+            const allPoints = [...pastPoints, todayPoint, ...futurePoints];
+            const lockInStartPt = futurePoints.find(p => p.phase === 'Lock-In Surge (Review Focus)') || null;
+
+            return {
+                allPoints,
+                pastPoints,
+                todayPoint,
+                futurePoints,
+                plannedNewPerDay,
+                autoNewTriedRate,
+                freezeDays,
+                desiredAvgCap: Math.round(desiredAvgCap),
+                cross80Pt,
+                cross90Pt,
+                cross92Pt,
+                examFeb17Pt,
+                examFeb19Pt,
+                lockInStartPt
+            };
+        }
+
+        function renderTopnotcherRoadmapGraph(td) {
+            const rm = computeTopnotcherRoadmapSeries(td);
+            const pts = rm.allPoints;
+            if (!pts || pts.length < 2) return '';
+
+            const svgW = 700, svgH = 232, padL = 40, padR = 20, padT = 22, padB = 34;
+            const plotW = svgW - padL - padR;
+            const plotH = svgH - padT - padB;
+            const minY = 35, maxY = 100;
+            const getX = (idx) => padL + (idx / Math.max(1, pts.length - 1)) * plotW;
+            const getY = (val) => {
+                const clamped = Math.max(minY, Math.min(maxY, Number(val) || minY));
+                return padT + plotH - ((clamped - minY) / (maxY - minY)) * plotH;
+            };
+
+            const todayIdx = pts.findIndex(p => p.isToday);
+            const feb17Idx = pts.findIndex(p => p.dateKey === '2027-02-17');
+            const lockIdx = rm.lockInStartPt ? pts.findIndex(p => p.dateKey === rm.lockInStartPt.dateKey) : -1;
+
+            // Selected day for comparison inspector (defaults to Today)
+            const selPt = pts.find(p => p.dateKey === state.roadmapSelectedDate) || rm.todayPoint;
+            const selIdx = pts.findIndex(p => p.dateKey === selPt.dateKey);
+
+            // Grid lines (50, 70, 80, 90, 92, 100)
+            let gridSvg = '';
+            [50, 70, 80, 90, 92, 100].forEach(val => {
+                const y = getY(val);
+                const isGoal = val === 90 || val === 92;
+                gridSvg += `
+                    <line x1="${padL}" y1="${y.toFixed(1)}" x2="${svgW - padR}" y2="${y.toFixed(1)}" stroke="${val === 92 ? '#f59e0b' : val === 90 ? '#10b981' : '#e2e8f0'}" stroke-width="${isGoal ? '1.3' : '1'}" stroke-dasharray="${isGoal ? '5 4' : '3 3'}" opacity="${isGoal ? '0.75' : '0.8'}" />
+                    ${val !== 92 ? `<text x="${padL - 6}" y="${(y + 3.5).toFixed(1)}" text-anchor="end" font-size="9.5" font-weight="800" fill="${val === 90 ? '#10b981' : '#94a3b8'}">${val}%</text>` : ''}
+                `;
+            });
+            gridSvg += `<text x="${svgW - padR}" y="${(getY(92) - 4).toFixed(1)}" text-anchor="end" font-size="9" font-weight="900" fill="#f59e0b">92% TOP 1–3</text>`;
+
+            // Shaded MELE Exam Window (Feb 17–19)
+            let bandsSvg = '';
+            if (feb17Idx >= 0) {
+                const xExam1 = getX(feb17Idx);
+                const xExam2 = getX(pts.length - 1);
+                bandsSvg += `
+                    <rect x="${Math.max(padL, xExam1 - 4).toFixed(1)}" y="${padT}" width="${Math.max(12, xExam2 - xExam1 + 8).toFixed(1)}" height="${plotH}" rx="4" fill="#f59e0b" opacity="0.18" />
+                    <text x="${((xExam1 + xExam2) / 2).toFixed(1)}" y="${padT + 11}" text-anchor="middle" font-size="8.5" font-weight="900" fill="#f59e0b">MELE</text>
+                `;
+            }
+            if (lockIdx >= 0 && feb17Idx > lockIdx) {
+                const xLock = getX(lockIdx);
+                const xExam1 = getX(feb17Idx);
+                bandsSvg += `
+                    <rect x="${xLock.toFixed(1)}" y="${padT}" width="${Math.max(4, xExam1 - xLock).toFixed(1)}" height="${plotH}" fill="#6366f1" opacity="0.08" />
+                    <line x1="${xLock.toFixed(1)}" y1="${padT}" x2="${xLock.toFixed(1)}" y2="${padT + plotH}" stroke="#6366f1" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.6" />
+                    <text x="${(xLock + 4).toFixed(1)}" y="${padT + 11}" text-anchor="start" font-size="8.5" font-weight="800" fill="#818cf8">Lock-In Surge</text>
+                `;
+            }
+            if (todayIdx >= 0) {
+                const tx = getX(todayIdx);
+                bandsSvg += `
+                    <line x1="${tx.toFixed(1)}" y1="${padT}" x2="${tx.toFixed(1)}" y2="${padT + plotH}" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.85" />
+                    <text x="${tx.toFixed(1)}" y="${padT - 6}" text-anchor="middle" font-size="9" font-weight="900" fill="#3b82f6">TODAY</text>
+                `;
+            }
+
+            // Build Target (Design) Line & Soft Area
+            const targetCoords = pts.map((p, i) => `${getX(i).toFixed(1)},${getY(p.isToday ? p.designBenchScore : p.targetScore).toFixed(1)}`);
+            const futureTargetStartIdx = Math.max(0, todayIdx);
+            const futureTargetCoords = pts.slice(futureTargetStartIdx).map((p, off) => `${getX(futureTargetStartIdx + off).toFixed(1)},${getY(p.targetScore).toFixed(1)}`);
+            const targetAreaPath = futureTargetCoords.length > 1
+                ? `M ${getX(futureTargetStartIdx).toFixed(1)},${(padT + plotH).toFixed(1)} L ${futureTargetCoords.join(' L ')} L ${getX(pts.length - 1).toFixed(1)},${(padT + plotH).toFixed(1)} Z`
+                : '';
+
+            // Build Actual Line (Past -> Today)
+            const actualPts = pts.map((p, i) => ({ p, i })).filter(x => x.p.actualScore !== null);
+            const actualCoords = actualPts.map(x => `${getX(x.i).toFixed(1)},${getY(x.p.actualScore).toFixed(1)}`);
+
+            // X-axis date ticks (evenly spaced ~6 labels)
+            let xLabelsSvg = '';
+            const labelIdxs = new Set([0, todayIdx, feb17Idx, pts.length - 1]);
+            const stepTick = Math.max(1, Math.floor((pts.length - 1) / 5));
+            for (let i = stepTick; i < pts.length - 1; i += stepTick) {
+                if (Math.abs(i - todayIdx) > 3 && (feb17Idx < 0 || Math.abs(i - feb17Idx) > 3)) labelIdxs.add(i);
+            }
+            [...labelIdxs].filter(i => i >= 0 && i < pts.length).sort((a, b) => a - b).forEach(i => {
+                const p = pts[i];
+                const x = getX(i);
+                const lbl = p.isToday ? 'Today' : (p.dateKey === '2027-02-17' ? 'Feb 17' : p.label);
+                xLabelsSvg += `<text x="${x.toFixed(1)}" y="${svgH - 10}" text-anchor="middle" font-size="9.5" font-weight="${p.isToday || p.dateKey === '2027-02-17' ? '900' : '700'}" fill="${p.isToday ? '#3b82f6' : p.dateKey === '2027-02-17' ? '#f59e0b' : '#64748b'}">${lbl}</text>`;
+            });
+
+            // Interactive clickable columns across the graph so user can tap ANY day!
+            const colW = Math.max(6, plotW / Math.max(1, pts.length));
+            let hitColsSvg = '';
+            pts.forEach((p, i) => {
+                const cx = getX(i);
+                const tipTxt = p.actualScore !== null
+                    ? `${p.label}: Actual ${p.actualScore}% vs Target ${(p.isToday ? p.designBenchScore : p.targetScore)}% • ${p.bankSize} cards`
+                    : `${p.label} (${p.phase}): Target ${p.targetScore}% • ${p.bankSize.toLocaleString()} cards (+${p.newTriedCum} new tried)`;
+                hitColsSvg += `<rect x="${(cx - colW / 2).toFixed(1)}" y="${padT}" width="${colW.toFixed(1)}" height="${plotH}" fill="transparent" class="cursor-pointer" onclick="window.selectRoadmapDate('${p.dateKey}')"><title>${escapeHTML(tipTxt)}</title></rect>`;
+            });
+
+            // Selected Day vertical indicator + dot(s)
+            const sx = getX(selIdx);
+            const selActualY = selPt.actualScore !== null ? getY(selPt.actualScore) : null;
+            const selTargetVal = selPt.isToday ? selPt.designBenchScore : selPt.targetScore;
+            const selTargetY = getY(selTargetVal);
+            const selDelta = selPt.actualScore !== null ? Number((selPt.actualScore - selTargetVal).toFixed(1)) : null;
+
+            const overloadedDaysCount = rm.futurePoints.filter(p => p.overloaded).length;
+            const isOverloadedPlan = rm.examFeb17Pt.targetScore < 88 && (rm.examFeb17Pt.untriedLeft > 80 || overloadedDaysCount >= 14);
+
+            return `
+            <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <h2 class="text-base md:text-lg font-extrabold text-slate-900 flex items-center gap-2">
+                            <i class="ph-fill ph-path text-amber-500 text-xl"></i> Exam-Ready Rating Roadmap (Actual vs. Target → Feb 17–19, 2027)
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">Kita mo araw-araw kung paano aakyat ang <b>"Kung Bukas na ang Exam"</b> rating mo papuntang <b>90%+</b> habang nagdadagdag ka ng bagong cards.</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-1.5 text-[10px] font-black">
+                        <span class="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1"><span class="w-2.5 h-1 bg-emerald-500 rounded-full inline-block"></span> Actual</span>
+                        <span class="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1"><span class="w-2.5 border-t-2 border-dashed border-amber-500 inline-block"></span> Target Plan</span>
+                    </div>
+                </div>
+
+                <!-- 3 Milestone Callouts: Crosses 80%, Crosses 90%, MELE Exam Day -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div class="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 cursor-pointer hover:border-blue-300 transition-colors" onclick="window.selectRoadmapDate('${rm.cross80Pt ? rm.cross80Pt.dateKey : rm.examFeb17Pt.dateKey}')">
+                        <div>
+                            <span class="text-[10px] font-black uppercase tracking-wider text-slate-500 block">🎯 Crosses 80%</span>
+                            <span class="text-sm font-black text-slate-900">${rm.cross80Pt ? (rm.cross80Pt.isToday ? '✅ Already 80%+' : rm.cross80Pt.label) : 'Needs higher pace'}</span>
+                        </div>
+                        <span class="text-xs font-mono font-black text-blue-600">${rm.cross80Pt ? `${rm.cross80Pt.targetScore}%` : '—'}</span>
+                    </div>
+                    <div class="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 cursor-pointer hover:border-emerald-400 transition-colors" onclick="window.selectRoadmapDate('${rm.cross90Pt ? rm.cross90Pt.dateKey : rm.examFeb17Pt.dateKey}')">
+                        <div>
+                            <span class="text-[10px] font-black uppercase tracking-wider text-emerald-700 block">🚀 Reaches 90%+</span>
+                            <span class="text-sm font-black text-emerald-800">${rm.cross90Pt ? (rm.cross90Pt.isToday ? '✅ Already 90%+' : rm.cross90Pt.label) : 'Adjust pace/freeze'}</span>
+                        </div>
+                        <span class="text-xs font-mono font-black text-emerald-700">${rm.cross90Pt ? `${rm.cross90Pt.targetScore}%` : '—'}</span>
+                    </div>
+                    <div class="p-3 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 cursor-pointer hover:border-amber-400 transition-colors" onclick="window.selectRoadmapDate('${rm.examFeb17Pt.dateKey}')">
+                        <div>
+                            <span class="text-[10px] font-black uppercase tracking-wider text-amber-700 block">🏆 MELE Feb 17–19</span>
+                            <span class="text-sm font-black text-amber-900">${rm.examFeb17Pt.targetScore}% → ${rm.examFeb19Pt.targetScore}%</span>
+                        </div>
+                        <span class="text-[10px] font-mono font-black text-amber-800 text-right">${rm.examFeb17Pt.triedTotal.toLocaleString()}<br/>cards</span>
+                    </div>
+                </div>
+
+                <!-- Interactive Simulator Controls: Planned New Cards/Day & Lock-In Cutoff -->
+                <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-[11px]">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                        <span class="font-extrabold text-slate-600 mr-0.5">New Cards/Day:</span>
+                        <button type="button" onclick="window.setRoadmapNewRate('auto')" class="px-2 py-1 rounded-lg font-black transition-all ${state.roadmapNewRateOverride === null ? 'bg-indigo-600 text-white shadow-xs' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}">My Pace (+${rm.autoNewTriedRate}/d)</button>
+                        ${[0, 15, 30, 50, 200].map(r => `
+                            <button type="button" onclick="window.setRoadmapNewRate(${r})" class="px-2 py-1 rounded-lg font-black transition-all ${state.roadmapNewRateOverride === r ? 'bg-indigo-600 text-white shadow-xs' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}">${r === 0 ? '+0 (Lock-In)' : r === 30 ? '+30 (~200/wk)' : `+${r}/d`}</button>
+                        `).join('')}
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <span class="font-extrabold text-slate-500 mr-0.5">Stop New:</span>
+                        ${[
+                            { d: 21, l: '21d Before' },
+                            { d: 14, l: '14d Before' },
+                            { d: 0, l: 'Non-Stop' }
+                        ].map(opt => `
+                            <button type="button" onclick="window.setRoadmapFreezeDays(${opt.d})" class="px-2 py-1 rounded-lg font-bold transition-all ${rm.freezeDays === opt.d ? 'bg-amber-500 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-amber-300'}">${opt.l}</button>
+                        `).join('')}
+                    </div>
+                </div>
+
+                ${isOverloadedPlan ? `
+                <div class="px-3.5 py-2 rounded-xl bg-rose-50 border border-rose-200 text-xs font-bold text-rose-700 flex items-center gap-2">
+                    <i class="ph-fill ph-warning-circle text-base shrink-0"></i>
+                    <span>Heads up: Sa <b>+${rm.plannedNewPerDay} new cards/day</b> + <b>${rm.desiredAvgCap} reviews/day</b> pace mo, mag-o-overload ang SRS due queue (hindi lahat mare-review on time). Try <b>+20 to +35 new/day (~200/week)</b> or raise your weekly review capacity below!</span>
+                </div>
+                ` : ''}
+
+                <!-- Dual-Line Overlapped SVG Chart -->
+                <div class="w-full overflow-x-auto">
+                    <svg viewBox="0 0 ${svgW} ${svgH}" class="w-full min-w-[540px] h-auto select-none">
+                        ${gridSvg}
+                        ${bandsSvg}
+                        ${targetAreaPath ? `<path d="${targetAreaPath}" fill="#f59e0b" opacity="0.10" />` : ''}
+                        <!-- Past-to-Today Target Design Overlap Line -->
+                        <polyline points="${targetCoords.slice(0, todayIdx + 1).join(' ')}" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="4 4" opacity="0.7" />
+                        <!-- Today-to-Feb-19 Target Roadmap Line -->
+                        <polyline points="${futureTargetCoords.join(' ')}" fill="none" stroke="#f59e0b" stroke-width="2.6" stroke-dasharray="6 4" stroke-linecap="round" stroke-linejoin="round" />
+                        <!-- Actual Logged Rating Line (Overlapping!) -->
+                        ${actualCoords.length > 1 ? `<polyline points="${actualCoords.join(' ')}" fill="none" stroke="#10b981" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />` : ''}
+                        ${actualPts.map(x => `<circle cx="${getX(x.i).toFixed(1)}" cy="${getY(x.p.actualScore).toFixed(1)}" r="${x.p.isToday ? '5' : '3'}" fill="#10b981" stroke="#ffffff" stroke-width="1.5" />`).join('')}
+                        <!-- Milestone Cross 90% Star Marker -->
+                        ${rm.cross90Pt && !rm.cross90Pt.isToday ? (() => {
+                            const ci = pts.findIndex(p => p.dateKey === rm.cross90Pt.dateKey);
+                            return ci >= 0 ? `<circle cx="${getX(ci).toFixed(1)}" cy="${getY(rm.cross90Pt.targetScore).toFixed(1)}" r="5" fill="#10b981" stroke="#ffffff" stroke-width="2" />` : '';
+                        })() : ''}
+                        <!-- Selected Day Vertical Cursor -->
+                        <line x1="${sx.toFixed(1)}" y1="${padT}" x2="${sx.toFixed(1)}" y2="${padT + plotH}" stroke="#6366f1" stroke-width="1.5" opacity="0.65" />
+                        <circle cx="${sx.toFixed(1)}" cy="${selTargetY.toFixed(1)}" r="4.5" fill="#f59e0b" stroke="#ffffff" stroke-width="1.5" />
+                        ${selActualY !== null ? `<circle cx="${sx.toFixed(1)}" cy="${selActualY.toFixed(1)}" r="5.5" fill="#10b981" stroke="#ffffff" stroke-width="2" />` : ''}
+                        ${xLabelsSvg}
+                        ${hitColsSvg}
+                    </svg>
+                </div>
+
+                <!-- Interactive Tap-Any-Day Comparison Card -->
+                <div class="p-3.5 rounded-2xl bg-indigo-50/90 border border-indigo-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div class="space-y-0.5">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="font-black text-indigo-900">📍 ${selPt.isToday ? `Today (${selPt.dateKey})` : `${selPt.label} (${selPt.dateKey})`}</span>
+                            <span class="px-2 py-0.5 rounded-full bg-white text-indigo-700 border border-indigo-200 text-[10px] font-black">${selPt.phase}</span>
+                        </div>
+                        <div class="font-bold text-slate-700">
+                            ${selPt.actualScore !== null
+                                ? `Actual: <b class="font-mono text-emerald-700">${selPt.actualScore}%</b> vs. Target: <b class="font-mono text-amber-700">${selTargetVal}%</b> <span class="px-1.5 py-0.5 rounded font-mono font-black text-[10px] ${selDelta >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}">${selDelta >= 0 ? `+${selDelta}% ahead` : `${selDelta}% behind`}</span>`
+                                : `Expected Rating: <b class="font-mono text-amber-700">${selPt.targetScore}%</b> • Est. Tried Cards: <b class="font-mono text-slate-900">${(selPt.triedTotal || selPt.bankSize).toLocaleString()}</b> (+${(selPt.newTriedCum || 0).toLocaleString()} new from today)`}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5 text-[10px] font-black shrink-0">
+                        <span class="text-slate-500 hidden sm:inline">Tap any day or jump:</span>
+                        <button type="button" onclick="window.selectRoadmapDate('${rm.todayPoint.dateKey}')" class="px-2 py-1 rounded-lg bg-white hover:bg-indigo-100 text-indigo-700 border border-indigo-200">Today</button>
+                        ${rm.cross90Pt ? `<button type="button" onclick="window.selectRoadmapDate('${rm.cross90Pt.dateKey}')" class="px-2 py-1 rounded-lg bg-white hover:bg-emerald-100 text-emerald-700 border border-emerald-200">90% Day</button>` : ''}
+                        <button type="button" onclick="window.selectRoadmapDate('${rm.examFeb17Pt.dateKey}')" class="px-2 py-1 rounded-lg bg-white hover:bg-amber-100 text-amber-700 border border-amber-200">Feb 17 Exam</button>
+                    </div>
+                </div>
+            </div>
+            `;
+        }
+
+        // --- FEATURE: SMART WEEKLY WAVE & VARIATION PLANNER (Hit 200/day avg even with Peak & Light Days!) ---
+        function computeWeeklyWaveAnalytics() {
+            const actLog = state.activityLog || {};
+            const todayStart = getTodayStart();
+            const todayDow = new Date(todayStart).getDay(); // 0=Sun..6=Sat
+            const toLocalKey = (ms) => {
+                const d = new Date(ms);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            };
+
+            // 1) Historical Mon-Sun natural energy average per day-of-week
+            const histSums = [0, 0, 0, 0, 0, 0, 0];
+            const histDaysByDow = [0, 0, 0, 0, 0, 0, 0];
+            Object.keys(actLog).forEach(dk => {
+                const hrs = actLog[dk];
+                if (!hrs || typeof hrs !== 'object') return;
+                let sum = 0;
+                Object.keys(hrs).forEach(h => { sum += (Number(hrs[h]?.c) || 0) + (Number(hrs[h]?.w) || 0); });
+                if (sum > 0) {
+                    const dow = new Date(dk + 'T00:00:00').getDay();
+                    if (!isNaN(dow)) {
+                        histSums[dow] += sum;
+                        histDaysByDow[dow]++;
+                    }
+                }
+            });
+            const histAvgByDow = [0, 1, 2, 3, 4, 5, 6].map(d => histDaysByDow[d] > 0 ? Math.round(histSums[d] / histDaysByDow[d]) : 0);
+
+            // 2) This Calendar Week (Monday -> Sunday)
+            const daysSinceMonday = (todayDow + 6) % 7; // Mon=0 .. Sun=6
+            const mondayStart = todayStart - daysSinceMonday * MS_PER_DAY;
+            const sundayEnd = mondayStart + 7 * MS_PER_DAY;
+
+            // Count actual New Cards Tried (graduatedDate) per day this week
+            const newTriedByKey = {};
+            (state.terms || []).forEach(t => {
+                const gts = Number(t.graduatedDate) || 0;
+                if (!t.isNew && gts >= mondayStart && gts < sundayEnd) {
+                    const dk = toLocalKey(gts);
+                    newTriedByKey[dk] = (newTriedByKey[dk] || 0) + 1;
+                }
+            });
+
+            const dowShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            const weekDays = [];
+            for (let i = 0; i < 7; i++) {
+                const ms = mondayStart + i * MS_PER_DAY;
+                const dk = toLocalKey(ms);
+                const dow = new Date(ms).getDay();
+                const hrs = actLog[dk] || {};
+                let done = 0;
+                Object.keys(hrs).forEach(h => { done += (Number(hrs[h]?.c) || 0) + (Number(hrs[h]?.w) || 0); });
+                if (ms === todayStart && done === 0) {
+                    done = (state.terms || []).filter(t => (t.lastReviewedDate || 0) >= todayStart).length;
+                }
+                const target = Math.max(10, Number(state.weeklyTargets && state.weeklyTargets[dow]) || 80);
+                weekDays.push({
+                    dow,
+                    name: dowShort[dow],
+                    dateKey: dk,
+                    isPast: ms < todayStart,
+                    isToday: ms === todayStart,
+                    isFuture: ms > todayStart,
+                    done,
+                    newTried: newTriedByKey[dk] || 0,
+                    target,
+                    histAvg: histAvgByDow[dow]
+                });
+            }
+
+            const thisWeekTotalDone = weekDays.reduce((a, d) => a + d.done, 0);
+            const thisWeekNewTried = weekDays.reduce((a, d) => a + d.newTried, 0);
+            const shapedWeekTotal = weekDays.reduce((a, d) => a + d.target, 0);
+            const avgGoalPerDay = Math.max(30, Number(state.weeklyWaveAvgGoal) || 200);
+            const weeklyGoalTotal = avgGoalPerDay * 7;
+            const daysElapsed = daysSinceMonday + 1;
+            const currentWeekAvg = Math.round(thisWeekTotalDone / Math.max(1, daysElapsed));
+
+            // Identify user's strongest & lightest historical weekdays
+            const loggedDows = [1, 2, 3, 4, 5, 6, 0].filter(d => histDaysByDow[d] > 0);
+            const sortedByEnergy = [...loggedDows].sort((a, b) => histAvgByDow[b] - histAvgByDow[a]);
+            const peakDowNames = sortedByEnergy.slice(0, 2).map(d => dowShort[d]);
+            const lightDowNames = sortedByEnergy.length >= 3 ? sortedByEnergy.slice(-2).map(d => dowShort[d]) : [];
+
+            // Catch-up calculation across remaining days (Today if still under target, + future days)
+            const todayObj = weekDays.find(d => d.isToday);
+            const remainingDayObjs = weekDays.filter(d => d.isFuture || (d.isToday && d.done < d.target));
+            const catchUpDaysCount = Math.max(1, remainingDayObjs.length || (7 - daysSinceMonday));
+            const remainingCardsToGoal = Math.max(0, weeklyGoalTotal - thisWeekTotalDone);
+            const neededPerRemainingDay = Math.ceil(remainingCardsToGoal / catchUpDaysCount);
+            const expectedSoFar = Math.round(avgGoalPerDay * daysElapsed);
+            const weekSurplusOrDeficit = thisWeekTotalDone - expectedSoFar;
+
+            // Weekly New Cards Tried catch-up
+            const weeklyNewGoal = Math.max(0, Number(state.weeklyNewCardsGoal) || 200);
+            const newRemainingThisWeek = Math.max(0, weeklyNewGoal - thisWeekNewTried);
+            const newNeededPerRemainingDay = Math.ceil(newRemainingThisWeek / Math.max(1, 7 - daysSinceMonday));
+
+            return {
+                weekDays,
+                histAvgByDow,
+                histDaysByDow,
+                peakDowNames,
+                lightDowNames,
+                thisWeekTotalDone,
+                thisWeekNewTried,
+                shapedWeekTotal,
+                avgGoalPerDay,
+                weeklyGoalTotal,
+                currentWeekAvg,
+                remainingCardsToGoal,
+                catchUpDaysCount,
+                neededPerRemainingDay,
+                weekSurplusOrDeficit,
+                weeklyNewGoal,
+                newRemainingThisWeek,
+                newNeededPerRemainingDay,
+                daysLeftInclToday: 7 - daysSinceMonday
+            };
+        }
+
+        function renderWeeklyWavePlannerWidget(td) {
+            const w = computeWeeklyWaveAnalytics();
+            const weekPct = Math.min(100, Math.round((w.thisWeekTotalDone / Math.max(1, w.weeklyGoalTotal)) * 100));
+            const newWeekPct = w.weeklyNewGoal > 0 ? Math.min(100, Math.round((w.thisWeekNewTried / w.weeklyNewGoal) * 100)) : 100;
+            const maxBarVal = Math.max(50, w.avgGoalPerDay * 1.25, ...w.weekDays.map(d => Math.max(d.done, d.target)));
+
+            const barsHtml = w.weekDays.map(d => {
+                const doneH = Math.min(100, Math.round((d.done / maxBarVal) * 100));
+                const targetBottom = Math.min(96, Math.round((d.target / maxBarVal) * 100));
+                const met = d.done >= d.target;
+                const barCls = d.isFuture
+                    ? 'bg-slate-200'
+                    : met
+                        ? 'bg-emerald-500'
+                        : d.isToday
+                            ? 'bg-indigo-500'
+                            : 'bg-amber-400';
+                return `
+                <div class="flex flex-col items-center gap-1 flex-1 min-w-[38px]">
+                    <span class="text-[10px] font-mono font-black ${d.done > 0 ? (met ? 'text-emerald-600' : 'text-slate-700') : 'text-slate-400'}">${d.done > 0 ? d.done : (d.isFuture ? '·' : '0')}</span>
+                    <div class="relative w-full max-w-[34px] h-24 rounded-xl bg-slate-100 border ${d.isToday ? 'border-indigo-400 ring-2 ring-indigo-200' : 'border-slate-200'} overflow-hidden flex items-end">
+                        <div class="w-full rounded-t-lg transition-all duration-500 ${barCls}" style="height: ${Math.max(d.done > 0 ? 6 : 0, doneH)}%"></div>
+                        <div class="absolute left-0 right-0 border-t-2 border-dashed border-amber-500 pointer-events-none" style="bottom: ${targetBottom}%" title="Shaped Target: ${d.target}"></div>
+                    </div>
+                    <span class="text-[10px] font-black ${d.isToday ? 'text-indigo-600' : 'text-slate-600'}">${d.name}</span>
+                    <span class="text-[9px] font-mono font-bold text-slate-400" title="Target for ${d.name} (Avg hist: ${d.histAvg || '—'})">🎯${d.target}</span>
+                </div>`;
+            }).join('');
+
+            return `
+            <div class="bg-white p-5 md:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <h2 class="text-base md:text-lg font-extrabold text-slate-900 flex items-center gap-2">
+                            <i class="ph-fill ph-waveform text-indigo-500 text-xl"></i> Smart Weekly Wave Planner (Hit ${w.avgGoalPerDay}/day Avg!)
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">Hindi kailangang robot na pantay araw-araw — i-shape ang <b>Peak Days</b> vs <b>Light Days</b> mo para <b>${w.weeklyGoalTotal.toLocaleString()}/week (${w.avgGoalPerDay}/d avg)</b> pa rin!</p>
+                    </div>
+                    <button type="button" onclick="window.autoShapeWeeklyWave()" class="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black flex items-center gap-1.5 shadow-sm transition-all active:scale-95">
+                        <i class="ph-fill ph-magic-wand text-sm"></i> Auto-Shape Mon–Sun to ${w.avgGoalPerDay}/d
+                    </button>
+                </div>
+
+                <!-- Target Controls + Natural Pattern Badges -->
+                <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                        <span class="font-extrabold text-slate-600">Daily Avg Goal:</span>
+                        ${[150, 200, 250, 300].map(g => `
+                            <button type="button" onclick="window.setWeeklyWaveAvgGoal(${g})" class="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all ${w.avgGoalPerDay === g ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300'}">${g}/d</button>
+                        `).join('')}
+                        <input type="number" min="30" max="500" value="${w.avgGoalPerDay}" onchange="window.setWeeklyWaveAvgGoal(this.value)" class="w-16 px-2 py-1 text-center font-mono font-black text-[11px] bg-white border border-slate-200 rounded-lg outline-none focus:border-indigo-400" title="Custom daily avg goal" />
+                    </div>
+                    ${w.peakDowNames.length > 0 ? `
+                    <div class="flex flex-wrap items-center gap-1.5 text-[10px] font-black">
+                        <span class="px-2 py-0.5 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">🔥 Natural Peaks: ${w.peakDowNames.join(', ')}</span>
+                        ${w.lightDowNames.length > 0 ? `<span class="px-2 py-0.5 rounded-lg bg-slate-100 text-slate-600 border border-slate-200">🌿 Lighter: ${w.lightDowNames.join(', ')}</span>` : ''}
+                    </div>
+                    ` : ''}
+                </div>
+
+                <!-- This Week Mon-Sun Overlap Bars (Actual Bars vs Dashed Shaped Target) -->
+                <div class="space-y-2">
+                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+                        <span class="text-slate-700">This Week (Mon–Sun): <b class="font-mono text-slate-900">${w.thisWeekTotalDone.toLocaleString()} / ${w.weeklyGoalTotal.toLocaleString()}</b> <span class="text-slate-500">(${w.currentWeekAvg}/day avg so far)</span></span>
+                        <span class="px-2.5 py-0.5 rounded-full text-[11px] font-black ${w.weekSurplusOrDeficit >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}">
+                            ${w.weekSurplusOrDeficit >= 0 ? `🔥 +${w.weekSurplusOrDeficit.toLocaleString()} ahead of ${w.avgGoalPerDay}/d pace!` : `${Math.abs(w.weekSurplusOrDeficit).toLocaleString()} behind pace`}
+                        </span>
+                    </div>
+                    <div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+                        <div class="h-full rounded-full transition-all duration-500 ${weekPct >= 100 ? 'bg-emerald-500' : 'bg-indigo-500'}" style="width: ${weekPct}%"></div>
+                    </div>
+                    <div class="flex items-end justify-between gap-2 pt-2">
+                        ${barsHtml}
+                    </div>
+                    <div class="p-3 rounded-2xl ${w.remainingCardsToGoal === 0 ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-indigo-50 border border-indigo-200 text-indigo-900'} text-xs font-bold">
+                        ${w.remainingCardsToGoal === 0
+                            ? `🏆 <b>WEEKLY GOAL HIT!</b> Naka-<b>${w.thisWeekTotalDone.toLocaleString()}</b> cards ka na this week (${w.avgGoalPerDay}+/day avg secured!). Pwede ka mag-light recovery day!`
+                            : `💡 <b>Catch-Up Guide:</b> May <b>${w.remainingCardsToGoal.toLocaleString()}</b> cards pa para ma-hit ang <b>${w.weeklyGoalTotal.toLocaleString()}/week</b> (${w.avgGoalPerDay}/day avg) — mga <b>~${w.neededPerRemainingDay}/day</b> sa natitirang <b>${w.catchUpDaysCount}</b> day${w.catchUpDaysCount === 1 ? '' : 's'} (o ibuhos sa Peak Day mo para magaan sa Light Day!).`}
+                    </div>
+                </div>
+
+                <!-- Weekly NEW CARDS TRIED Catch-Up Strip (Actual Tried Only — Not Bulk Add!) -->
+                <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div class="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                            <i class="ph-fill ph-sparkle text-emerald-500 text-base"></i>
+                            <span>Weekly New Cards Tried (Actual):</span>
+                            <span class="font-mono font-black text-emerald-600">${w.thisWeekNewTried.toLocaleString()} / ${w.weeklyNewGoal.toLocaleString()}</span>
+                        </div>
+                        <div class="flex items-center gap-1 text-[10px] font-black">
+                            <span class="text-slate-500">Goal/wk:</span>
+                            ${[100, 150, 200, 300].map(ng => `
+                                <button type="button" onclick="window.setWeeklyNewCardsGoal(${ng})" class="px-2 py-0.5 rounded-lg transition-all ${w.weeklyNewGoal === ng ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:border-emerald-300'}">${ng}</button>
+                            `).join('')}
+                        </div>
+                    </div>
+                    <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                        <div class="h-full bg-emerald-500 rounded-full transition-all duration-500" style="width: ${newWeekPct}%"></div>
+                    </div>
+                    <div class="text-[11px] font-bold text-slate-600">
+                        ${w.newRemainingThisWeek === 0
+                            ? `✅ <b>Weekly New Cards Goal Reached!</b> (${w.thisWeekNewTried} actual new cards tried this Mon–Sun!)`
+                            : `📌 <b>${w.newRemainingThisWeek}</b> new cards pa ang hahabulin this week (~<b>${w.newNeededPerRemainingDay} new/day</b> sa natitirang ${w.daysLeftInclToday} day${w.daysLeftInclToday === 1 ? '' : 's'}) — pure tried cards lang, hindi bulk add.`}
+                    </div>
+                </div>
+            </div>
+            `;
+        }
+
         // --- STREAMING_CHUNK:Feature 1 — "Are You a Topnotcher?" Dedicated Tab ---
         function renderTopnotcher() {
             const td = computeTopnotcherIndex();
+            // Keep today's live Topnotcher rating recorded in dailyTelemetry so Actual vs Target graph builds daily history!
+            const todayTelSnap = ensureDailyTelemetry();
+            todayTelSnap.topnotcherRating = Number(td.score.toFixed(2));
+            todayTelSnap.topnotcherBankSize = td.total;
             const ordInfo = getOrGenerateDailyOrders(td);
             const dualProj = computeDualFeb2027Projections(td, ordInfo);
             const scorePctBar = Math.min(100, Math.max(0, td.score));
@@ -11090,6 +11936,12 @@ Respond ONLY with valid JSON: {"stem": "...", "choices": {"A": "...", "B": "..."
 
                 <!-- Feature 11: Practical Topnotcher Daily Orders -->
                 ${renderDailyOrdersCardHtml(td)}
+
+                <!-- Actual vs Target Rating Roadmap Graph (Today -> Feb 17–19, 2027) -->
+                ${renderTopnotcherRoadmapGraph(td)}
+
+                <!-- Smart Weekly Wave Planner (Hit 200/day avg with Peak & Light Days) -->
+                ${renderWeeklyWavePlannerWidget(td)}
 
                 <!-- Feature 5 + 10: Locked-In Feb 2027 + Adaptive Weekly Targets -->
                 ${renderLockedInFeb2027Widget()}
