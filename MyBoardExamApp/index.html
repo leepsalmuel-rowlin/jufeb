@@ -730,8 +730,111 @@
             if (window.saveToCloud) window.saveToCloud();
         }
 
-        function saveLocalTelemetryOnly() {
-            // Prune dailyTelemetry to last 45 days so localStorage stays super light (ZERO Firestore writes!)
+        function pruneDailyTelemetryForCloud(map, keepDays = 21) {
+            const out = {};
+            if (!map || typeof map !== 'object') return out;
+            const keys = Object.keys(map).sort().slice(-keepDays);
+            keys.forEach(k => { if (map[k] && typeof map[k] === 'object') out[k] = map[k]; });
+            return out;
+        }
+
+        function scoreDailyTelActivity(t) {
+            if (!t || typeof t !== 'object') return 0;
+            const flags = t.ordersClearedFlags || {};
+            const clearedCnt = (flags.mastery ? 1 : 0) + (flags.leech ? 1 : 0) + (flags.sharpness ? 1 : 0);
+            return (Number(t.promotedWeakSubjectCards) || 0)
+                + (Number(t.leechesTamed) || 0) * 5
+                + (Number(t.newCardsUnlocked) || 0)
+                + (Number(t.clearedToday) || 0)
+                + (Number(t.deliberateAccurateToday) || 0)
+                + (Number(t.cleanBlocksEarned) || 0) * 10
+                + clearedCnt * 25;
+        }
+
+        function mergeSingleDayTelemetry(localDay, cloudDay) {
+            if (!localDay) return cloudDay ? JSON.parse(JSON.stringify(cloudDay)) : null;
+            if (!cloudDay) return JSON.parse(JSON.stringify(localDay));
+
+            const maxNum = (a, b) => Math.max(Number(a) || 0, Number(b) || 0);
+            const localScore = scoreDailyTelActivity(localDay);
+            const cloudScore = scoreDailyTelActivity(cloudDay);
+            const primary = localScore > cloudScore ? localDay : cloudDay;
+
+            const luLocal = localDay.levelUps || {};
+            const luCloud = cloudDay.levelUps || {};
+            const mergedLevelUps = {
+                '0->1': maxNum(luLocal['0->1'], luCloud['0->1']),
+                '1->2': maxNum(luLocal['1->2'], luCloud['1->2']),
+                '2->3': maxNum(luLocal['2->3'], luCloud['2->3']),
+                '3->4': maxNum(luLocal['3->4'], luCloud['3->4']),
+                '4->5': maxNum(luLocal['4->5'], luCloud['4->5']),
+                '5->6': maxNum(luLocal['5->6'], luCloud['5->6']),
+                net: localScore > cloudScore ? (Number(luLocal.net) || 0) : (cloudScore > localScore ? (Number(luCloud.net) || 0) : maxNum(luLocal.net, luCloud.net))
+            };
+
+            const pbLocal = localDay.paceBrackets || {};
+            const pbCloud = cloudDay.paceBrackets || {};
+            const mergedPace = {};
+            ['b1', 'b2', 'b3', 'b4'].forEach(bk => {
+                mergedPace[bk] = {
+                    c: maxNum(pbLocal[bk]?.c, pbCloud[bk]?.c),
+                    w: maxNum(pbLocal[bk]?.w, pbCloud[bk]?.w)
+                };
+            });
+
+            const flLocal = localDay.ordersClearedFlags || {};
+            const flCloud = cloudDay.ordersClearedFlags || {};
+            const mergedFlags = {
+                mastery: Boolean(flLocal.mastery || flCloud.mastery),
+                leech: Boolean(flLocal.leech || flCloud.leech),
+                sharpness: Boolean(flLocal.sharpness || flCloud.sharpness)
+            };
+
+            const pickedSnapshot = primary.ordersSnapshot || cloudDay.ordersSnapshot || localDay.ordersSnapshot || null;
+
+            return {
+                levelUps: mergedLevelUps,
+                leechesTamed: maxNum(localDay.leechesTamed, cloudDay.leechesTamed),
+                lockedToday: maxNum(localDay.lockedToday, cloudDay.lockedToday),
+                addedToday: maxNum(localDay.addedToday, cloudDay.addedToday),
+                clearedToday: maxNum(localDay.clearedToday, cloudDay.clearedToday),
+                forwardAns: maxNum(localDay.forwardAns, cloudDay.forwardAns),
+                loopbackAns: maxNum(localDay.loopbackAns, cloudDay.loopbackAns),
+                paceBrackets: mergedPace,
+                cleanBlockSec: localScore > cloudScore ? (Number(localDay.cleanBlockSec) || 0) : (Number(cloudDay.cleanBlockSec) || 0),
+                cleanBlockC: localScore > cloudScore ? (Number(localDay.cleanBlockC) || 0) : (Number(cloudDay.cleanBlockC) || 0),
+                cleanBlockW: localScore > cloudScore ? (Number(localDay.cleanBlockW) || 0) : (Number(cloudDay.cleanBlockW) || 0),
+                cleanBlocksEarned: maxNum(localDay.cleanBlocksEarned, cloudDay.cleanBlocksEarned),
+                breakBankClaimed: maxNum(localDay.breakBankClaimed, cloudDay.breakBankClaimed),
+                promotedWeakSubjectCards: maxNum(localDay.promotedWeakSubjectCards, cloudDay.promotedWeakSubjectCards),
+                newCardsUnlocked: maxNum(localDay.newCardsUnlocked, cloudDay.newCardsUnlocked),
+                deliberateAccurateToday: maxNum(localDay.deliberateAccurateToday, cloudDay.deliberateAccurateToday),
+                leechSurgeriesDone: maxNum(localDay.leechSurgeriesDone, cloudDay.leechSurgeriesDone),
+                ordersSnapshot: pickedSnapshot ? JSON.parse(JSON.stringify(pickedSnapshot)) : null,
+                ordersClearedFlags: mergedFlags
+            };
+        }
+
+        function mergeDailyTelemetryMaps(localMap, cloudMap) {
+            const lMap = (localMap && typeof localMap === 'object') ? localMap : {};
+            const cMap = (cloudMap && typeof cloudMap === 'object') ? cloudMap : {};
+            const allKeys = Array.from(new Set([...Object.keys(lMap), ...Object.keys(cMap)])).sort().slice(-45);
+            const merged = {};
+            let localHadNewerData = false;
+
+            allKeys.forEach(k => {
+                const lDay = lMap[k];
+                const cDay = cMap[k];
+                merged[k] = mergeSingleDayTelemetry(lDay, cDay);
+                if (lDay && (!cDay || scoreDailyTelActivity(lDay) > scoreDailyTelActivity(cDay))) {
+                    localHadNewerData = true;
+                }
+            });
+            return { merged, localHadNewerData };
+        }
+
+        function saveLocalTelemetryOnly(syncCloud = false) {
+            // Prune dailyTelemetry to last 45 days so localStorage stays super light
             const keys = Object.keys(state.dailyTelemetry || {}).sort();
             if (keys.length > 45) {
                 keys.slice(0, keys.length - 45).forEach(k => delete state.dailyTelemetry[k]);
@@ -747,6 +850,9 @@
             }));
             localStorage.setItem('elementVaultDailyTelemetry', JSON.stringify(state.dailyTelemetry || {}));
             localStorage.setItem('elementVaultOrderThrottle', JSON.stringify(state.orderThrottle || {}));
+            if (syncCloud && isCloudSynced && userId && window.saveToCloud) {
+                window.saveToCloud();
+            }
         }
 
         const firebaseConfig = {
@@ -811,6 +917,10 @@
                         state.terms = [];
                         state.history = {};
                         state.activityLog = {};
+                        state.dailyTelemetry = {};
+                        state.orderThrottle = { masteryScale: 1.0, leechScale: 1.0, sharpnessScale: 1.0, consecutiveAllClear: 0, missedStreak: { mastery: 0, leech: 0, sharpness: 0 }, lastEvaluatedDate: null };
+                        localStorage.removeItem('elementVaultDailyTelemetry');
+                        localStorage.removeItem('elementVaultOrderThrottle');
                         state.playerProfile = {
                             displayName: (user.displayName || (user.email ? user.email.split('@')[0] : 'Engineer')).trim(),
                             avatar: '⚙️',
@@ -863,6 +973,7 @@
         window.takeoverSession = () => {
             state.sessionConflict = false;
             enforceSingleSession(); 
+            setupCloudSync();
             renderApp();
         };
 
@@ -871,6 +982,7 @@
         async function setupCloudSync(authUser = null) {
             if (!userId || !db || state.sessionConflict) return;
             const docRef = doc(db, 'artifacts', appId, 'users', userId, 'appData', 'vault');
+            let shouldPushMergedTelemetry = false;
             try {
                 const snap = await getDoc(docRef);
                 if (snap.exists()) {
@@ -881,6 +993,40 @@
                     if (data.activityLog && typeof data.activityLog === 'object') {
                         state.activityLog = data.activityLog;
                         localStorage.setItem('elementVaultActivityLog', JSON.stringify(state.activityLog));
+                    }
+                    // Smart-merge Daily Telemetry (Topnotcher Orders, Micro-Wins, Clean Blocks, Pace) across CP & PC without losing grind!
+                    if (data.dailyTelemetry && typeof data.dailyTelemetry === 'object') {
+                        const { merged, localHadNewerData } = mergeDailyTelemetryMaps(state.dailyTelemetry, data.dailyTelemetry);
+                        state.dailyTelemetry = merged;
+                        if (localHadNewerData) shouldPushMergedTelemetry = true;
+                    } else if (state.dailyTelemetry && Object.keys(state.dailyTelemetry).length > 0) {
+                        // Cloud vault doesn't have dailyTelemetry yet -> upload this device's grind immediately!
+                        shouldPushMergedTelemetry = true;
+                    }
+                    if (data.orderThrottle && typeof data.orderThrottle === 'object') {
+                        const localDate = (state.orderThrottle && state.orderThrottle.lastEvaluatedDate) || '';
+                        const cloudDate = data.orderThrottle.lastEvaluatedDate || '';
+                        if (cloudDate >= localDate) {
+                            state.orderThrottle = {
+                                ...state.orderThrottle,
+                                ...data.orderThrottle,
+                                missedStreak: { ...(state.orderThrottle?.missedStreak || {}), ...(data.orderThrottle.missedStreak || {}) }
+                            };
+                        } else {
+                            shouldPushMergedTelemetry = true;
+                        }
+                    }
+                    if (data.topnotcherPrefs && typeof data.topnotcherPrefs === 'object') {
+                        const tp = data.topnotcherPrefs;
+                        if (tp.topnotcherScope) state.topnotcherScope = tp.topnotcherScope;
+                        if (tp.topnotcherDisplayUnit) state.topnotcherDisplayUnit = tp.topnotcherDisplayUnit;
+                        if (tp.intakeRateMode) state.intakeRateMode = tp.intakeRateMode;
+                        if (typeof tp.customIntakeRate === 'number' && !isNaN(tp.customIntakeRate)) state.customIntakeRate = tp.customIntakeRate;
+                        if (tp.hudStakesMode) state.hudStakesMode = tp.hudStakesMode;
+                        if (tp.queueMode) state.queueMode = tp.queueMode;
+                        if (tp.weeklyTargets && typeof tp.weeklyTargets === 'object') {
+                            state.weeklyTargets = { ...state.weeklyTargets, ...tp.weeklyTargets };
+                        }
                     }
                     if (data.playerProfile && typeof data.playerProfile === 'object') {
                         state.playerProfile = { ...state.playerProfile, ...data.playerProfile };
@@ -911,6 +1057,7 @@
                     localStorage.setItem('elementVaultFolders', JSON.stringify(state.folders));
                     localStorage.setItem('elementVaultTerms', JSON.stringify(cleanTermsForStorage(state.terms)));
                     localStorage.setItem('elementVaultHistory', JSON.stringify(state.history));
+                    saveLocalTelemetryOnly(false);
                 } else {
                     // Brand-new classmate account: initialize clean starter vault so they can immediately join!
                     if (authUser && (!state.playerProfile.displayName || state.playerProfile.displayName === 'Engineer')) {
@@ -918,6 +1065,7 @@
                     }
                     ensureValidActiveFolder();
                 }
+                isCloudSynced = true;
             } catch (e) {
                 console.error("Error fetching from cloud:", e);
             } finally {
@@ -926,16 +1074,19 @@
                 }
                 state.isLoaded = true; 
                 renderApp();
+                if (shouldPushMergedTelemetry && window.saveToCloud) {
+                    window.saveToCloud(true);
+                }
                 // Sync player to Global Class Leaderboard & load class standings cleanly in background
                 if (typeof publishLeaderboardStats === 'function') publishLeaderboardStats();
                 if (typeof fetchLeaderboard === 'function') fetchLeaderboard(false);
             }
         }
 
-        window.saveToCloud = () => {
+        window.saveToCloud = (immediate = false) => {
             if (!userId || !db || state.sessionConflict) return;
             clearTimeout(cloudSaveTimer);
-            cloudSaveTimer = setTimeout(async () => {
+            const runUpload = async () => {
                 const docRef = doc(db, 'artifacts', appId, 'users', userId, 'appData', 'vault');
                 try {
                     await setDoc(docRef, {
@@ -943,6 +1094,17 @@
                         terms: cleanTermsForStorage(state.terms),
                         history: state.history,
                         activityLog: state.activityLog || {},
+                        dailyTelemetry: pruneDailyTelemetryForCloud(state.dailyTelemetry, 21),
+                        orderThrottle: state.orderThrottle || {},
+                        topnotcherPrefs: {
+                            topnotcherScope: state.topnotcherScope,
+                            topnotcherDisplayUnit: state.topnotcherDisplayUnit,
+                            intakeRateMode: state.intakeRateMode,
+                            customIntakeRate: state.customIntakeRate,
+                            hudStakesMode: state.hudStakesMode,
+                            queueMode: state.queueMode,
+                            weeklyTargets: state.weeklyTargets
+                        },
                         playerProfile: state.playerProfile || {},
                         isOwnerUnlocked: Boolean(state.isOwnerUnlocked),
                         defaultTheme: state.defaultTheme || 'light',
@@ -955,7 +1117,12 @@
                 } catch (e) {
                     console.error("Error saving to cloud:", e);
                 }
-            }, 2500); 
+            };
+            if (immediate) {
+                runUpload();
+            } else {
+                cloudSaveTimer = setTimeout(runUpload, 2500);
+            }
         };
 
         const AVAILABLE_GEMINI_MODELS = [
@@ -2535,8 +2702,8 @@
             const sureTopnotcherTodayQuota = Math.max(20, Math.round(td.requiredDailyReviews * dayWeight));
             const intakeTag = `${state.intakeRateMode}_${td.intakeInfo.effectiveRate}`;
 
-            // Freeze today's order targets once generated for the active scope & intake rate so goals don't jitter mid-day
-            if (!tel.ordersSnapshot || tel.ordersSnapshot.scope !== td.scope || tel.ordersSnapshot.intakeTag !== intakeTag || tel.ordersSnapshot.version !== 2) {
+            // Freeze today's order targets once generated for the active scope so goals stay locked across CP & PC all day (explicit setting buttons clear ordersSnapshot to recalibrate)
+            if (!tel.ordersSnapshot || tel.ordersSnapshot.scope !== td.scope || tel.ordersSnapshot.version !== 2) {
                 const th = state.orderThrottle || { masteryScale: 1, leechScale: 1, sharpnessScale: 1 };
                 const totalCards = Math.max(1, td.total);
                 const effectivePaceBase = Math.max(dailyCap, Math.min(dailyCap * 1.45, sureTopnotcherTodayQuota));
@@ -2633,8 +2800,12 @@
                         rawProgress = tel.clearedToday || 0;
                     }
                 } else if (ord.cat === 'sharpness') {
-                    if (ord.mode === 'coverage') rawProgress = tel.newCardsUnlocked || 0;
-                    else rawProgress = tel.deliberateAccurateToday || 0;
+                    if (ord.mode === 'coverage') {
+                        const liveGradToday = getTopnotcherScopedTerms(state.terms, td.scope).terms.filter(t => !t.isNew && (t.graduatedDate || 0) >= getTodayStart()).length;
+                        rawProgress = Math.max(tel.newCardsUnlocked || 0, liveGradToday);
+                    } else {
+                        rawProgress = tel.deliberateAccurateToday || 0;
+                    }
                 }
                 const cleared = rawProgress >= ord.target;
                 const bonus = Math.max(0, rawProgress - ord.target);
@@ -2666,7 +2837,7 @@
 
             if (newlyCleared) {
                 safeHaptic([30, 40, 50]);
-                saveLocalTelemetryOnly();
+                saveLocalTelemetryOnly(true);
             }
 
             // Yesterday recap (if exists)
@@ -2747,14 +2918,14 @@
         // UI Action Helpers for Topnotcher, Intake Rate, Queue, Break Bank & Weekly Targets
         window.setTopnotcherScope = (scope) => {
             state.topnotcherScope = scope;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
         };
         window.setIntakeRateMode = (mode) => {
             state.intakeRateMode = mode === 'custom' ? 'custom' : 'auto';
             const tel = ensureDailyTelemetry();
             tel.ordersSnapshot = null;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
             showToast(mode === 'auto' ? "Card Intake Rate set to Auto (from History) 📈" : "Custom Card Intake Rate active");
         };
@@ -2763,7 +2934,7 @@
             state.customIntakeRate = Math.max(0, Math.min(200, Number(val) || 0));
             const tel = ensureDailyTelemetry();
             tel.ordersSnapshot = null;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
             showToast(`Card Intake Rate set to +${state.customIntakeRate} cards/day 📈`);
         };
@@ -2782,25 +2953,25 @@
             };
             const tel = ensureDailyTelemetry();
             tel.ordersSnapshot = null;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
             showToast(`⚡ Mon–Sun targets synced to ${req} reviews/day Topnotcher pace!`);
         };
         window.toggleTopnotcherDisplayUnit = (event) => {
             if (event) event.stopPropagation();
             state.topnotcherDisplayUnit = state.topnotcherDisplayUnit === 'rp' ? 'pct' : 'rp';
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
         };
         window.toggleHudStakesMode = (event) => {
             if (event) event.stopPropagation();
             state.hudStakesMode = state.hudStakesMode === 'stakes' ? 'clean' : 'stakes';
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
         };
         window.setQueueMode = (mode) => {
             state.queueMode = mode;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
             showToast(mode === 'smart' ? "Smart Queue: Warm-Up + Interleaved Leeches 🎯" : "Queue: Classic Random Order");
         };
@@ -2814,7 +2985,7 @@
             // Reset today's frozen order cap if user changes today's target
             const tel = ensureDailyTelemetry();
             tel.ordersSnapshot = null;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             renderApp();
         };
         window.toggleYesterdayOrders = () => {
@@ -2826,7 +2997,7 @@
             const available = Math.max(0, (tel.cleanBlocksEarned || 0) - (tel.breakBankClaimed || 0));
             if (available <= 0) return showToast("Finish a 15-min Clean Block (≥75% acc) to earn a Break!", "error");
             tel.breakBankClaimed = (tel.breakBankClaimed || 0) + 1;
-            saveLocalTelemetryOnly();
+            saveLocalTelemetryOnly(true);
             safeHaptic([40, 30, 40]);
             showToast("☕ Claimed 1 Clean Break! Stretch, hydrate, then come back sharp!");
             renderApp();
@@ -3775,6 +3946,9 @@
             clearInterval(timerInterval);
             clearInterval(etaRefreshInterval);
             window.logDailyStats();
+            if (finishedSession && (finishedSession.answeredInSession || 0) > 0 && window.saveToCloud) {
+                window.saveToCloud(true);
+            }
             const returnView = (state.isOwnerUnlocked && finishedSession && finishedSession.objectiveCat)
                 ? 'topnotcher'
                 : (finishedSession && finishedSession.type === 'leech_surgery' ? 'analytics' : 'dashboard');
